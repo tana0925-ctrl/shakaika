@@ -556,7 +556,7 @@ const commonHead = `
 // --- Login / Register Page ---
 app.get('/login', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>ログイン - 学びのコンパス</title>
+<title>ログイン - 社会科同好会</title>
 <style>
   .auth-container { max-width: 440px; margin: 60px auto; padding: 0 20px; }
   .auth-card { background: #fff; border-radius: 16px; padding: 40px 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; }
@@ -583,7 +583,7 @@ app.get('/login', (c) => {
 </head><body>
 <div class="auth-container">
   <div class="auth-card">
-    <div class="logo"><span>NAGOYA SHAKAIKA</span><strong>学びのコンパス</strong></div>
+    <div class="logo"><span>NAGOYA SHAKAIKA</span><strong>社会科同好会</strong></div>
     <div class="tabs">
       <div class="tab active" onclick="switchTab('login')">ログイン</div>
       <div class="tab" onclick="switchTab('register')">新規登録</div>
@@ -685,7 +685,7 @@ if (token) {
 // --- Member My Page (with interactive rubric) ---
 app.get('/mypage', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>マイページ - 学びのコンパス</title>
+<title>マイページ - 社会科同好会</title>
 <style>
   .top-bar { background: #fff; border-bottom: 3px solid var(--header-line); padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
   .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); font-size: 18px; font-weight: 700; }
@@ -776,7 +776,7 @@ app.get('/mypage', (c) => {
 </style>
 </head><body>
 <div class="top-bar">
-  <div class="logo"><i class="fas fa-compass"></i> 学びのコンパス</div>
+  <div class="logo"><i class="fas fa-map"></i> 社会科同好会</div>
   <div class="user-info">
     <span class="name" id="userName"></span>
     <span id="adminLink"></span>
@@ -953,7 +953,7 @@ loadSelections();
 // --- Admin Dashboard ---
 app.get('/admin', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>管理者ダッシュボード - 学びのコンパス</title>
+<title>管理者ダッシュボード - 社会科同好会</title>
 <style>
   .top-bar { background: #1a237e; color: #fff; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
   .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; font-weight: 700; }
@@ -1198,7 +1198,7 @@ loadMembers();
 app.get('/attend/:code', (c) => {
   const code = c.req.param('code')
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>出席・アンケート - 学びのコンパス</title>
+<title>出席・アンケート - 社会科同好会</title>
 <style>
   .attend-container { max-width: 560px; margin: 20px auto; padding: 0 16px; }
   .card { background: #fff; border-radius: 16px; padding: 28px 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; margin-bottom: 20px; }
@@ -1351,7 +1351,7 @@ async function submitSurvey() {
 // --- Admin Events Page ---
 app.get('/admin/events', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>イベント管理 - 学びのコンパス</title>
+<title>イベント管理 - 社会科同好会</title>
 <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
 <style>
   .top-bar { background: #1a237e; color: #fff; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
