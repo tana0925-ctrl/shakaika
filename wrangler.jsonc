@@ -9,8 +9,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "webapp-production",
-      "database_id": "local-dev-placeholder"
+      "database_name": "syakaika-production",
+      "database_id": "6228706e-87b6-4e93-871d-b1399519738d"
     }
   ]
 }
