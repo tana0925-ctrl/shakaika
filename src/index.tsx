@@ -671,12 +671,12 @@ app.get('/mypage', (c) => {
   .guide { background: #fff3e0; border-left: 4px solid #ffb74d; padding: 12px 16px; border-radius: 0 8px 8px 0; margin-bottom: 20px; font-size: 13px; color: #5d4037; }
   .guide strong { color: #e65100; }
 
-  .container { max-width: 1250px; margin: 0 auto; background-color: #fff; padding: 20px 24px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-radius: 12px; border: 2px solid #f0e6d2; }
+  .container { max-width: 1250px; margin: 0 auto; background-color: #fff; padding: 20px 24px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-radius: 12px; border: 2px solid #f0e6d2; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 3px dashed var(--header-line); padding-bottom: 8px; margin-bottom: 15px; }
   .title-block h1 { font-family: 'Zen Maru Gothic', sans-serif; font-size: 22px; margin: 0; line-height: 1.2; color: var(--header-line); }
   .title-block .subtitle { font-size: 12px; color: #666; margin-top: 4px; font-weight: 500; }
 
-  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 10.5pt; table-layout: fixed; border-radius: 8px; overflow: hidden; border: 1px solid #ddd; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 10.5pt; table-layout: fixed; border-radius: 8px; overflow: hidden; border: 1px solid #ddd; min-width: 900px; }
   th, td { border: 1px solid #e0e0e0; padding: 7px 9px; vertical-align: middle; word-wrap: break-word; }
   .col-category { width: 30px; text-align: center; font-weight: bold; writing-mode: vertical-rl; letter-spacing: 3px; color: #fff; border-bottom: 1px solid rgba(255,255,255,0.3); }
   .col-viewpoint { width: 85px; background-color: #fff8e1; font-weight: bold; color: #5d4037; font-family: 'Zen Maru Gothic', sans-serif; }
@@ -708,8 +708,29 @@ app.get('/mypage', (c) => {
   .memo-input { width: 100%; margin-top: 6px; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 9pt; font-family: inherit; resize: none; display: none; }
   .col-step.selected .memo-input { display: block; }
 
+  .scroll-hint { display: none; text-align: center; color: #999; font-size: 12px; margin-bottom: 8px; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:0.5} 50%{opacity:1} }
+
+  @media (max-width: 768px) {
+    .top-bar { padding: 8px 12px; flex-wrap: wrap; gap: 6px; }
+    .top-bar .logo { font-size: 15px; }
+    .top-bar .user-info { gap: 6px; font-size: 11px; }
+    .top-bar .user-info .name { display: none; }
+    .btn-sm { padding: 5px 10px; font-size: 11px; }
+    .main { padding: 0 8px; margin: 12px auto; }
+    .guide { font-size: 12px; padding: 10px 12px; }
+    .container { padding: 12px; border-radius: 8px; }
+    .header { flex-direction: column; align-items: flex-start; }
+    .title-block h1 { font-size: 18px; }
+    .scroll-hint { display: block; }
+    .footer-note { flex-direction: column; gap: 8px; }
+    .footer-note > div { max-width: 100% !important; text-align: left !important; }
+    .save-area { margin-top: 16px; }
+    .save-area .btn-sm { padding: 12px 20px; font-size: 15px; }
+  }
+
   @media print {
-    .top-bar, .guide, .save-area, .memo-input { display: none !important; }
+    .top-bar, .guide, .save-area, .memo-input, .scroll-hint { display: none !important; }
     @page { size: A4 landscape; margin: 5mm; }
     body { width: 287mm; height: 200mm; margin: 0; padding: 0; background-color: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; zoom: 90%; }
     .container { max-width: none; box-shadow: none; border: none; padding: 0; margin: 0; }
@@ -745,6 +766,7 @@ app.get('/mypage', (c) => {
       </div>
     </div>
 
+    <div class="scroll-hint"><i class="fas fa-arrows-alt-h"></i> 横にスクロールできます</div>
     <table>
       <thead><tr>
         <th colspan="2" style="background-color: #fff8e1; border-bottom: 3px solid #5d4037;">成長の視点</th>
