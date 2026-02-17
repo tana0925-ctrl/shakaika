@@ -261,6 +261,44 @@ app.delete('/api/selections/:viewpoint', authMiddleware, async (c) => {
   return c.json({ success: true })
 })
 
+
+// ========== My History API ==========
+app.get('/api/me/history', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const db = c.env.DB
+
+  const { results: events } = await db.prepare(`
+    SELECT
+      e.id, e.title, e.description, e.event_date,
+      a.attended_at,
+      sa.satisfaction, sa.comment, sa.answered_at
+    FROM attendances a
+    JOIN events e ON e.id = a.event_id
+    LEFT JOIN survey_answers sa ON sa.event_id = e.id AND sa.user_id = a.user_id
+    WHERE a.user_id = ?
+    ORDER BY e.event_date DESC, a.attended_at DESC
+  `).bind(user.id).all()
+
+  const { results: custom } = await db.prepare(`
+    SELECT
+      ca.event_id, ca.question_id, ca.answer_text,
+      q.question_text, q.question_type, q.options, q.sort_order
+    FROM custom_answers ca
+    JOIN survey_questions q ON q.id = ca.question_id
+    WHERE ca.user_id = ?
+    ORDER BY ca.event_id, q.sort_order ASC, ca.question_id ASC
+  `).bind(user.id).all()
+
+  const grouped: Record<string, any[]> = {}
+  for (const row of custom as any[]) {
+    const key = String(row.event_id)
+    if (!grouped[key]) grouped[key] = []
+    grouped[key].push(row)
+  }
+
+  return c.json({ events, customByEvent: grouped })
+})
+
 // ========== Admin API ==========
 app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
@@ -737,6 +775,30 @@ app.get('/mypage', (c) => {
   .save-area { text-align: center; margin-top: 20px; }
   .save-status { font-size: 13px; color: #2e7d32; margin-top: 10px; display: none; }
 
+  .history-card { background: #fff; border-radius: 12px; border: 2px solid #f0e6d2; box-shadow: 0 4px 15px rgba(0,0,0,0.05); padding: 16px 18px; margin-top: 18px; }
+  .history-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; border-bottom: 2px dashed #ffccbc; padding-bottom: 8px; margin-bottom: 10px; }
+  .history-head h2 { margin: 0; font-size: 16px; font-family: 'Zen Maru Gothic', sans-serif; color: #5d4037; }
+  .history-controls { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #666; }
+  .history-controls label { font-weight: 700; color: #555; }
+  .history-controls select { padding: 6px 10px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 12px; font-family: inherit; background: #fff; }
+  .history-note { font-size: 12px; color: #777; margin: 6px 0 10px; line-height: 1.5; }
+  details.hist-item { border: 1px solid #eee; border-radius: 10px; padding: 10px 12px; margin: 10px 0; background: #fffaf0; }
+  details.hist-item summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+  details.hist-item summary::-webkit-details-marker { display: none; }
+  .hist-left { display: flex; flex-direction: column; gap: 2px; }
+  .hist-title { font-weight: 700; color: #444; font-size: 13px; }
+  .hist-date { font-size: 12px; color: #888; white-space: nowrap; }
+  .hist-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 700; white-space: nowrap; }
+  .badge-done { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
+  .badge-pending { background: #fff3e0; color: #e65100; border: 1px solid #ffe0b2; }
+  .hist-body { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eee; font-size: 13px; color: #555; line-height: 1.6; }
+  .qa { margin-top: 10px; }
+  .qa .q { font-weight: 700; margin-top: 8px; color: #5d4037; }
+  .qa .a { margin-top: 2px; white-space: pre-wrap; }
+  .stars-mini { color: #ffb300; letter-spacing: 1px; }
+  .muted { color: #999; font-size: 12px; }
+
+
   .memo-input { width: 100%; margin-top: 6px; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 9pt; font-family: inherit; resize: none; display: none; }
   .col-step.selected .memo-input { display: block; }
 
@@ -861,6 +923,20 @@ app.get('/mypage', (c) => {
     </div>
   </div>
 
+  <div class="history-card">
+    <div class="history-head">
+      <h2><i class="fas fa-calendar-check"></i> 参加した会・アンケート（自分用）</h2>
+      <div class="history-controls">
+        <label for="fySelect">年度</label>
+        <select id="fySelect"></select>
+      </div>
+    </div>
+    <div class="history-note">
+      年間で参加した会と、アンケートのコメント・自由記述をここで読み返せます（出席は自動記録）。
+    </div>
+    <div id="historyList"><div class="muted">読み込み中...</div></div>
+  </div>
+
   <div class="save-area">
     <button class="btn-sm btn-save" onclick="saveSelections()"><i class="fas fa-save"></i> 保存する</button>
     <button class="btn-sm" style="background:#eee;color:#666;padding:10px 20px;border:none;border-radius:10px;margin-left:8px;cursor:pointer;font-family:inherit;font-weight:700" onclick="window.print()"><i class="fas fa-print"></i> 印刷する</button>
@@ -939,6 +1015,144 @@ async function saveSelections() {
   setTimeout(() => status.style.display = 'none', 3000);
 }
 
+
+let __historyData = null;
+
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function fiscalYearFromDate(dateStr) {
+  const parts = String(dateStr || '').split('-');
+  const y = parseInt(parts[0] || '0');
+  const m = parseInt(parts[1] || '1');
+  if (!y) return 0;
+  return m >= 4 ? y : (y - 1);
+}
+
+function starsMini(n) {
+  const v = Math.max(0, Math.min(5, parseInt(n || '0')));
+  return '★★★★★'.slice(0, v) + '☆☆☆☆☆'.slice(0, 5 - v);
+}
+
+function formatAnswer(row) {
+  const t = row.question_type;
+  const a = row.answer_text || '';
+  if (t === 'rating') return starsMini(a) + '（' + a + '）';
+  return a;
+}
+
+function renderHistory() {
+  const list = document.getElementById('historyList');
+  const fySel = document.getElementById('fySelect');
+
+  if (!__historyData || !__historyData.events) {
+    list.innerHTML = '<div class="muted">読み込み中...</div>';
+    return;
+  }
+
+  const fy = parseInt(fySel.value || '0');
+  const events = (__historyData.events || []).filter(ev => fiscalYearFromDate(ev.event_date) === fy);
+
+  if (!events.length) {
+    list.innerHTML = '<div class="muted">この年度の記録はありません。</div>';
+    return;
+  }
+
+  const customByEvent = __historyData.customByEvent || {};
+  let html = '';
+
+  for (const ev of events) {
+    const answered = !!ev.answered_at;
+    const badge = answered
+      ? '<span class="hist-badge badge-done"><i class="fas fa-clipboard-check"></i> 回答済み</span>'
+      : '<span class="hist-badge badge-pending"><i class="fas fa-clipboard"></i> 未回答</span>';
+
+    const date = escapeHtml(ev.event_date || '');
+    const title = escapeHtml(ev.title || '');
+    const attendedAt = escapeHtml(ev.attended_at || '');
+    const satisfaction = ev.satisfaction
+      ? '<span class="stars-mini">' + escapeHtml(starsMini(ev.satisfaction)) + '</span>'
+      : '<span class="muted">（未記録）</span>';
+    const comment = (ev.comment && String(ev.comment).trim())
+      ? escapeHtml(ev.comment)
+      : '<span class="muted">（記述なし）</span>';
+
+    const cas = customByEvent[String(ev.id)] || [];
+    let qaHtml = '';
+
+    if (answered) {
+      qaHtml += '<div class="qa"><div class="q">満足度</div><div class="a">' + satisfaction + '</div></div>';
+      qaHtml += '<div class="qa"><div class="q">感想・コメント</div><div class="a">' + comment + '</div></div>';
+    }
+
+    if (cas.length) {
+      qaHtml += '<div class="qa"><div class="q">追加質問</div></div>';
+      for (const row of cas) {
+        const q = escapeHtml(row.question_text || '');
+        const a = escapeHtml(formatAnswer(row));
+        qaHtml += '<div class="qa"><div class="q">' + q + '</div><div class="a">' + (a || '<span class="muted">（記述なし）</span>') + '</div></div>';
+      }
+    }
+
+    if (!answered && !cas.length) {
+      qaHtml += '<div class="muted">アンケートは未回答です。</div>';
+    }
+
+    html += '<details class="hist-item">';
+    html +=   '<summary>';
+    html +=     '<div class="hist-left">';
+    html +=       '<div class="hist-title">' + title + '</div>';
+    html +=       '<div class="hist-date"><i class="fas fa-calendar"></i> ' + date + '</div>';
+    html +=     '</div>';
+    html +=     badge;
+    html +=   '</summary>';
+    html +=   '<div class="hist-body">';
+    html +=     '<div><strong>出席記録：</strong>' + (attendedAt || '<span class="muted">（記録なし）</span>') + '</div>';
+    html +=     qaHtml;
+    html +=   '</div>';
+    html += '</details>';
+  }
+
+  list.innerHTML = html;
+}
+
+async function loadHistory() {
+  const list = document.getElementById('historyList');
+  list.innerHTML = '<div class="muted">読み込み中...</div>';
+
+  try {
+    const res = await fetch('/api/me/history', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+    const data = await res.json();
+    __historyData = data;
+
+    const events = data.events || [];
+    const fySelect = document.getElementById('fySelect');
+
+    if (!events.length) {
+      fySelect.innerHTML = '';
+      list.innerHTML = '<div class="muted">まだ参加記録がありません。イベントのQRを読み取って参加すると、ここに記録されます。</div>';
+      return;
+    }
+
+    const fys = Array.from(new Set(events.map(ev => fiscalYearFromDate(ev.event_date)).filter(Boolean))).sort((a,b)=>b-a);
+    fySelect.innerHTML = fys.map(y => '<option value="' + y + '">' + y + '年度</option>').join('');
+    fySelect.value = String(fys[0] || '');
+    fySelect.onchange = function () { renderHistory(); };
+
+    renderHistory();
+  } catch (e) {
+    console.error(e);
+    list.innerHTML = '<div class="muted">読み込みに失敗しました。</div>';
+  }
+}
+
 async function logout() {
   const t = localStorage.getItem('token');
   if (t) { try { await fetch('/api/auth/logout', { method:'POST', headers:{'Authorization':'Bearer '+t} }); } catch(e){} }
@@ -946,6 +1160,7 @@ async function logout() {
 }
 
 loadSelections();
+loadHistory();
 </script>
 </body></html>`)
 })
