@@ -1063,12 +1063,12 @@ function renderMembers(members) {
       : '<span class="role-badge role-member">会員</span>';
     return '<tr>' +
       '<td>'+(i+1)+'</td>' +
-      '<td class="member-name" style="cursor:pointer" onclick=\\'showDetail('+m.id+')\\'>' + m.name + '</td>' +
+      '<td class="member-name" style="cursor:pointer" data-action="detail" data-id="'+m.id+'">' + m.name + '</td>' +
       '<td>' + roleBadge + '</td>' +
       vpKeys.map(vp => '<td>' + stepBadge(m.selections[vp]) + '</td>').join('') +
       '<td>' +
-        (m.role !== 'admin' ? '<button class="btn-sm btn-role" onclick="toggleRole('+m.id+',\\''+m.role+'\\')"><i class="fas fa-user-shield"></i></button> ' : '') +
-        (m.id !== user.id ? '<button class="btn-sm btn-danger" onclick="deleteMember('+m.id+',\\''+m.name+'\\')"><i class="fas fa-trash"></i></button>' : '') +
+        (m.role !== 'admin' ? '<button class="btn-sm btn-role" data-action="role" data-id="'+m.id+'" data-role="'+m.role+'"><i class="fas fa-user-shield"></i></button> ' : '') +
+        (m.id !== user.id ? '<button class="btn-sm btn-danger" data-action="delete" data-id="'+m.id+'" data-name="'+m.name+'"><i class="fas fa-trash"></i></button>' : '') +
       '</td>' +
     '</tr>';
   }).join('');
@@ -1115,8 +1115,9 @@ function showDetail(id) {
     if (sel && sel.memo) html += '<div class="memo">' + sel.memo + '</div>';
     html += '</div>' + stepBadge(sel) + '</div>';
   }
-  html += '<div style="text-align:center;margin-top:24px"><button class="btn-sm" style="background:#eee;color:#555;padding:8px 24px" onclick="document.getElementById(\\'detailModal\\').classList.remove(\\'show\\')">閉じる</button></div>';
+  html += '<div style="text-align:center;margin-top:24px"><button class="btn-sm" style="background:#eee;color:#555;padding:8px 24px" id="closeDetailBtn">閉じる</button></div>';
   document.getElementById('detailContent').innerHTML = html;
+  document.getElementById('closeDetailBtn').addEventListener('click', function() { document.getElementById('detailModal').classList.remove('show'); });
   document.getElementById('detailModal').classList.add('show');
 }
 
@@ -1158,6 +1159,17 @@ async function logout() {
   if (t) { try { await fetch('/api/auth/logout', { method:'POST', headers:{'Authorization':'Bearer '+t} }); } catch(e){} }
   localStorage.clear(); window.location.href = '/login';
 }
+
+// Event delegation for member table
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const id = parseInt(btn.dataset.id);
+  if (action === 'detail') showDetail(id);
+  else if (action === 'role') toggleRole(id, btn.dataset.role);
+  else if (action === 'delete') deleteMember(id, btn.dataset.name);
+});
 
 loadMembers();
 </script>
@@ -1322,7 +1334,7 @@ async function submitSurvey() {
 app.get('/admin/events', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <title>イベント管理 - 学びのコンパス</title>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
 <style>
   .top-bar { background: #1a237e; color: #fff; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
   .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; font-weight: 700; }
@@ -1438,20 +1450,37 @@ async function createEvent() {
   else { const d = await res.json(); alert(d.error); }
 }
 
+let eventsData = [];
+
 async function loadEvents() {
   const res = await fetch('/api/admin/events', { headers:{'Authorization':'Bearer '+token} });
+  if (res.status === 401 || res.status === 403) { localStorage.clear(); window.location.href='/login'; return; }
   const data = await res.json();
+  eventsData = data.events || [];
   const list = document.getElementById('eventList');
-  if (!data.events.length) { list.innerHTML='<p style="color:#888;text-align:center">まだイベントがありません</p>'; return; }
-  list.innerHTML = data.events.map(ev => '<div class="event-item"><div class="event-info"><div class="title">'+ev.title+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" onclick="showQR('+ev.id+',\\''+ev.title+'\\',\\''+ev.event_date+'\\',\\''+ev.event_code+'\\')"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" onclick="exportEvent('+ev.id+')"><i class="fas fa-download"></i> CSV</button><button class="btn-danger" onclick="deleteEvent('+ev.id+',\\''+ev.title+'\\')"><i class="fas fa-trash"></i></button></div></div>').join('');
+  if (!eventsData.length) { list.innerHTML='<p style="color:#888;text-align:center">まだイベントがありません</p>'; return; }
+  list.innerHTML = eventsData.map(function(ev) {
+    return '<div class="event-item"><div class="event-info"><div class="title">'+ev.title+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+ev.title.replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div>';
+  }).join('');
 }
 
-function showQR(id, title, date, code) {
-  const url = location.origin + '/attend/' + code;
-  const c = document.getElementById('qrContent');
-  c.innerHTML = '<h3>'+title+'</h3><div class="date">'+date+'</div><canvas id="qrCanvas"></canvas><div class="code-text">'+code+'</div><div class="url-text">'+url+'</div><div style="margin-top:16px"><button class="btn-sm" style="background:#1a237e;color:#fff;padding:8px 20px" onclick="window.print()"><i class="fas fa-print"></i> 印刷</button> <button class="btn-sm" style="background:#eee;color:#555;padding:8px 20px" onclick="document.getElementById(\\'qrModal\\').classList.remove(\\'show\\')">閉じる</button></div>';
+function showQR(eventId) {
+  const ev = eventsData.find(function(e){ return e.id === eventId; });
+  if (!ev) return;
+  const url = location.origin + '/attend/' + ev.event_code;
+  const cont = document.getElementById('qrContent');
+  cont.innerHTML = '<h3>'+ev.title+'</h3><div class="date">'+ev.event_date+'</div><div id="qrCanvas" style="display:inline-block"></div><div class="code-text">'+ev.event_code+'</div><div class="url-text">'+url+'</div><div style="margin-top:16px"><button class="btn-sm" style="background:#1a237e;color:#fff;padding:8px 20px" onclick="window.print()"><i class="fas fa-print"></i> 印刷</button> <button class="btn-sm" id="closeQrBtn" style="background:#eee;color:#555;padding:8px 20px">閉じる</button></div>';
   document.getElementById('qrModal').classList.add('show');
-  setTimeout(() => { QRCode.toCanvas(document.getElementById('qrCanvas'), url, { width: 240, margin: 2 }); }, 100);
+  document.getElementById('closeQrBtn').addEventListener('click', function() { document.getElementById('qrModal').classList.remove('show'); });
+  setTimeout(function() {
+    var qrEl = document.getElementById('qrCanvas');
+    if (typeof QRCode !== 'undefined' && qrEl) {
+      qrEl.innerHTML = '';
+      new QRCode(qrEl, { text: url, width: 240, height: 240 });
+    } else {
+      qrEl.innerHTML = '<p style="color:#c62828">QRコードライブラリの読み込みに失敗しました。<br>URL: '+url+'</p>';
+    }
+  }, 200);
 }
 
 async function exportEvent(id) {
@@ -1467,6 +1496,17 @@ async function deleteEvent(id, title) {
   await fetch('/api/admin/events/'+id, { method:'DELETE', headers:{'Authorization':'Bearer '+token} });
   loadEvents();
 }
+
+// Event delegation for event list buttons
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const id = parseInt(btn.dataset.id);
+  if (action === 'qr') showQR(id);
+  else if (action === 'export') exportEvent(id);
+  else if (action === 'delete-ev') deleteEvent(id, btn.dataset.title);
+});
 
 loadEvents();
 </script>
