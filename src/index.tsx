@@ -6,7 +6,7 @@ type Bindings = {
 }
 
 type Variables = {
-  user: { id: number; name: string; email: string; role: string }
+  user: { id: number; name: string; email: string; school: string; role: string }
 }
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>()
@@ -59,7 +59,7 @@ async function authMiddleware(c: any, next: any) {
   if (!userId) {
     return c.json({ error: 'セッションが無効です。再ログインしてください' }, 401)
   }
-  const user = await c.env.DB.prepare('SELECT id, name, email, role FROM users WHERE id = ?').bind(userId).first()
+  const user = await c.env.DB.prepare('SELECT id, name, email, school, role FROM users WHERE id = ?').bind(userId).first()
   if (!user) {
     return c.json({ error: 'ユーザーが見つかりません' }, 401)
   }
@@ -82,11 +82,23 @@ app.get('/api/init', async (c) => {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     email TEXT UNIQUE NOT NULL,
+    school TEXT NOT NULL DEFAULT '',
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('member', 'admin')),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`).run()
+
+  // Add 'school' column if missing (for existing DBs)
+  try {
+    const { results: cols } = (await db.prepare("PRAGMA table_info(users)").all()) as any
+    const hasSchool = Array.isArray(cols) && cols.some((c: any) => c.name === 'school')
+    if (!hasSchool) {
+      await db.prepare("ALTER TABLE users ADD COLUMN school TEXT NOT NULL DEFAULT ''").run()
+    }
+  } catch (e) {
+    // ignore
+  }
 
   await db.prepare(`CREATE TABLE IF NOT EXISTS selections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,17 +165,17 @@ app.get('/api/init', async (c) => {
   // Create default admin if not exists
   const adminHash = await hashPassword('admin123')
   await db.prepare(
-    'INSERT OR IGNORE INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)'
-  ).bind('管理者', 'admin@example.com', adminHash, 'admin').run()
+    'INSERT OR IGNORE INTO users (name, email, school, password_hash, role) VALUES (?, ?, ?, ?, ?)'
+  ).bind('管理者', 'admin@example.com', '（管理者）', adminHash, 'admin').run()
 
   return c.json({ message: 'データベースを初期化しました' })
 })
 
 // ========== Auth API ==========
 app.post('/api/auth/register', async (c) => {
-  const { name, email, password } = await c.req.json()
-  if (!name || !email || !password) {
-    return c.json({ error: '名前・メールアドレス・パスワードは必須です' }, 400)
+  const { name, school, email, password } = await c.req.json()
+  if (!name || !school || !email || !password) {
+    return c.json({ error: '名前・学校名・メールアドレス・パスワードは必須です' }, 400)
   }
   if (password.length < 4) {
     return c.json({ error: 'パスワードは4文字以上にしてください' }, 400)
@@ -174,14 +186,14 @@ app.post('/api/auth/register', async (c) => {
   }
   const passwordHash = await hashPassword(password)
   const result = await c.env.DB.prepare(
-    'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)'
-  ).bind(name, email, passwordHash, 'member').run()
+    'INSERT INTO users (name, email, school, password_hash, role) VALUES (?, ?, ?, ?, ?)'
+  ).bind(name, email, school, passwordHash, 'member').run()
 
   const userId = result.meta.last_row_id as number
   const token = generateToken()
   await setToken(c.env.DB, token, userId)
 
-  return c.json({ token, user: { id: userId, name, email, role: 'member' } })
+  return c.json({ token, user: { id: userId, name, school, email, role: 'member' } })
 })
 
 app.post('/api/auth/login', async (c) => {
@@ -191,7 +203,7 @@ app.post('/api/auth/login', async (c) => {
   }
   const passwordHash = await hashPassword(password)
   const user = await c.env.DB.prepare(
-    'SELECT id, name, email, role FROM users WHERE email = ? AND password_hash = ?'
+    'SELECT id, name, email, school, role FROM users WHERE email = ? AND password_hash = ?'
   ).bind(email, passwordHash).first()
   if (!user) {
     return c.json({ error: 'メールアドレスまたはパスワードが正しくありません' }, 401)
@@ -199,7 +211,7 @@ app.post('/api/auth/login', async (c) => {
   const token = generateToken()
   await setToken(c.env.DB, token, user.id as number)
 
-  return c.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } })
+  return c.json({ token, user: { id: user.id, name: user.name, school: (user as any).school || '', email: user.email, role: user.role } })
 })
 
 app.get('/api/auth/me', authMiddleware, async (c) => {
@@ -252,7 +264,7 @@ app.delete('/api/selections/:viewpoint', authMiddleware, async (c) => {
 // ========== Admin API ==========
 app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
-    `SELECT u.id, u.name, u.email, u.role, u.created_at,
+    `SELECT u.id, u.name, u.school, u.email, u.role, u.created_at,
       GROUP_CONCAT(s.viewpoint || ':' || s.step || ':' || COALESCE(s.memo,''), '||') as selections_raw
      FROM users u
      LEFT JOIN selections s ON u.id = s.user_id
@@ -274,6 +286,7 @@ app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
     return {
       id: m.id,
       name: m.name,
+      school: m.school || '',
       email: m.email,
       role: m.role,
       created_at: m.created_at,
@@ -308,7 +321,7 @@ app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) 
 // ========== CSV Export ==========
 app.get('/api/admin/export', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
-    'SELECT id, name, email, role, created_at FROM users ORDER BY created_at'
+    'SELECT id, name, school, email, role, created_at FROM users ORDER BY created_at'
   ).all()
 
   const { results: allSelections } = await c.env.DB.prepare(
@@ -340,7 +353,7 @@ app.get('/api/admin/export', authMiddleware, adminMiddleware, async (c) => {
   const BOM = '\uFEFF'
   let csv = BOM
   // Header
-  const headers = ['名前', 'メールアドレス', '役割', '登録日']
+  const headers = ['名前', '学校名', 'メールアドレス', '役割', '登録日']
   for (const vp of vps) {
     headers.push(vpLabels[vp] + '(ステップ)')
     headers.push(vpLabels[vp] + '(メモ)')
@@ -352,6 +365,7 @@ app.get('/api/admin/export', authMiddleware, adminMiddleware, async (c) => {
     const sels = selMap.get(m.id) || {}
     const row = [
       m.name,
+      m.school || '',
       m.email,
       m.role === 'admin' ? '管理者' : '会員',
       m.created_at || ''
@@ -595,6 +609,10 @@ app.get('/login', (c) => {
         <input type="text" id="regName" required placeholder="山田 太郎">
       </div>
       <div class="form-group">
+        <label><i class="fas fa-school"></i> 学校名</label>
+        <input type="text" id="regSchool" required placeholder="〇〇小学校">
+      </div>
+      <div class="form-group">
         <label><i class="fas fa-envelope"></i> メールアドレス</label>
         <input type="email" id="regEmail" required placeholder="example@email.com">
       </div>
@@ -642,7 +660,7 @@ async function handleRegister(e) {
     const res = await fetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: document.getElementById('regName').value, email: document.getElementById('regEmail').value, password: document.getElementById('regPassword').value })
+      body: JSON.stringify({ name: document.getElementById('regName').value, school: document.getElementById('regSchool').value, email: document.getElementById('regEmail').value, password: document.getElementById('regPassword').value })
     });
     const data = await res.json();
     if (!res.ok) { showError(data.error); return false; }
@@ -855,7 +873,7 @@ const token = localStorage.getItem('token');
 const user = JSON.parse(localStorage.getItem('user') || 'null');
 if (!token || !user) { window.location.href = '/login'; }
 
-document.getElementById('userName').textContent = user ? user.name + ' さん' : '';
+document.getElementById('userName').textContent = user ? (user.name + ' さん' + (user.school ? '（' + user.school + '）' : '')) : '';
 if (user && user.role === 'admin') {
   document.getElementById('adminLink').innerHTML = '<a href="/admin" class="btn-sm btn-admin" style="text-decoration:none"><i class="fas fa-cog"></i> 管理者</a> <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:#ff6f00;color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>';
 }
@@ -1100,7 +1118,7 @@ async function loadMembers() {
 
 function filterMembers() {
   const q = document.getElementById('searchBox').value.toLowerCase();
-  const filtered = allMembers.filter(m => m.name.toLowerCase().includes(q) || m.email.toLowerCase().includes(q));
+  const filtered = allMembers.filter(m => m.name.toLowerCase().includes(q) || (m.school || '').toLowerCase().includes(q) || m.email.toLowerCase().includes(q));
   renderMembers(filtered);
 }
 
@@ -1108,7 +1126,7 @@ function showDetail(id) {
   const m = allMembers.find(x => x.id === id);
   if (!m) return;
   let html = '<h2><i class="fas fa-user"></i> ' + m.name + '</h2>';
-  html += '<p style="color:#888;font-size:13px;margin-bottom:20px">' + m.email + ' | 登録日: ' + (m.created_at || '-') + '</p>';
+  html += '<p style="color:#888;font-size:13px;margin-bottom:20px">' + (m.school ? ('学校名: ' + m.school + ' | ') : '') + m.email + ' | 登録日: ' + (m.created_at || '-') + '</p>';
   for (const vp of vpKeys) {
     const sel = m.selections[vp];
     html += '<div class="detail-item"><div><div class="vp-name">' + vpLabels[vp] + '</div>';
