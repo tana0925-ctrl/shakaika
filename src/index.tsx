@@ -99,6 +99,43 @@ app.get('/api/init', async (c) => {
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_selections_user_id ON selections(user_id)').run()
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)').run()
 
+  // Event tables
+  await db.prepare(`CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT DEFAULT '',
+    event_date TEXT NOT NULL, event_code TEXT UNIQUE NOT NULL, is_active INTEGER DEFAULT 1,
+    created_by INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (created_by) REFERENCES users(id)
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS attendances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+    attended_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, UNIQUE(event_id, user_id)
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS survey_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, question_text TEXT NOT NULL,
+    question_type TEXT NOT NULL CHECK(question_type IN ('text','radio','rating')),
+    options TEXT DEFAULT '', sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS survey_answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+    satisfaction INTEGER CHECK(satisfaction BETWEEN 1 AND 5), comment TEXT DEFAULT '',
+    answered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, UNIQUE(event_id, user_id)
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS custom_answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+    question_id INTEGER NOT NULL, answer_text TEXT DEFAULT '',
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (question_id) REFERENCES survey_questions(id) ON DELETE CASCADE,
+    UNIQUE(event_id, user_id, question_id)
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_attendances_event ON attendances(event_id)').run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_events_code ON events(event_code)').run()
+
   // Create default admin if not exists
   const adminHash = await hashPassword('admin123')
   await db.prepare(
@@ -323,6 +360,146 @@ app.get('/api/admin/export', authMiddleware, adminMiddleware, async (c) => {
       'Content-Disposition': 'attachment; filename="shakaika_members_export.csv"'
     }
   })
+})
+
+// ========== Events API ==========
+function generateEventCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let code = ''
+  const arr = new Uint8Array(8)
+  crypto.getRandomValues(arr)
+  for (let i = 0; i < 8; i++) code += chars[arr[i] % chars.length]
+  return code
+}
+
+app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
+  const { title, description, event_date, custom_questions } = await c.req.json()
+  if (!title || !event_date) return c.json({ error: 'タイトルと日付は必須です' }, 400)
+  const db = c.env.DB
+  const code = generateEventCode()
+  const user = c.get('user')
+  const res = await db.prepare(
+    'INSERT INTO events (title, description, event_date, event_code, created_by) VALUES (?,?,?,?,?)'
+  ).bind(title, description || '', event_date, code, user.id).run()
+  const eventId = res.meta.last_row_id as number
+  if (custom_questions && Array.isArray(custom_questions)) {
+    for (let i = 0; i < custom_questions.length; i++) {
+      const q = custom_questions[i]
+      await db.prepare(
+        'INSERT INTO survey_questions (event_id, question_text, question_type, options, sort_order) VALUES (?,?,?,?,?)'
+      ).bind(eventId, q.question_text, q.question_type || 'text', q.options || '', i).run()
+    }
+  }
+  return c.json({ id: eventId, event_code: code })
+})
+
+app.get('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  const { results: events } = await db.prepare(
+    'SELECT e.*, (SELECT COUNT(*) FROM attendances a WHERE a.event_id = e.id) as attendance_count, (SELECT COUNT(*) FROM survey_answers sa WHERE sa.event_id = e.id) as survey_count FROM events e ORDER BY e.event_date DESC'
+  ).all()
+  return c.json({ events })
+})
+
+app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE id = ?').bind(id).first()
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const { results: questions } = await db.prepare(
+    'SELECT * FROM survey_questions WHERE event_id = ? ORDER BY sort_order'
+  ).bind(id).all()
+  const { results: attendances } = await db.prepare(
+    'SELECT a.*, u.name, u.email FROM attendances a JOIN users u ON a.user_id = u.id WHERE a.event_id = ? ORDER BY a.attended_at'
+  ).bind(id).all()
+  const { results: answers } = await db.prepare(
+    'SELECT sa.*, u.name, u.email FROM survey_answers sa JOIN users u ON sa.user_id = u.id WHERE sa.event_id = ?'
+  ).bind(id).all()
+  const { results: customAnswers } = await db.prepare(
+    'SELECT ca.*, u.name FROM custom_answers ca JOIN users u ON ca.user_id = u.id WHERE ca.event_id = ?'
+  ).bind(id).all()
+  return c.json({ event, questions, attendances, answers, customAnswers })
+})
+
+app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const db = c.env.DB
+  await db.prepare('DELETE FROM custom_answers WHERE event_id = ?').bind(id).run()
+  await db.prepare('DELETE FROM survey_answers WHERE event_id = ?').bind(id).run()
+  await db.prepare('DELETE FROM survey_questions WHERE event_id = ?').bind(id).run()
+  await db.prepare('DELETE FROM attendances WHERE event_id = ?').bind(id).run()
+  await db.prepare('DELETE FROM events WHERE id = ?').bind(id).run()
+  return c.json({ success: true })
+})
+
+app.get('/api/admin/events/:id/export', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE id = ?').bind(id).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const { results: questions } = await db.prepare('SELECT * FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(id).all() as any
+  const { results: attendances } = await db.prepare('SELECT a.*, u.name, u.email FROM attendances a JOIN users u ON a.user_id = u.id WHERE a.event_id = ?').bind(id).all() as any
+  const { results: answers } = await db.prepare('SELECT sa.*, u.name, u.email FROM survey_answers sa JOIN users u ON sa.user_id = u.id WHERE sa.event_id = ?').bind(id).all() as any
+  const { results: customAnswers } = await db.prepare('SELECT * FROM custom_answers WHERE event_id = ?').bind(id).all() as any
+  const caMap = new Map<number, Record<number, string>>()
+  for (const ca of customAnswers) {
+    if (!caMap.has(ca.user_id)) caMap.set(ca.user_id, {})
+    caMap.get(ca.user_id)![ca.question_id] = ca.answer_text
+  }
+  const ansMap = new Map<number, any>()
+  for (const a of answers) ansMap.set(a.user_id, a)
+  const BOM = '\uFEFF'
+  const headers = ['名前', 'メール', '出席時刻', '満足度', '感想']
+  for (const q of questions) headers.push(q.question_text)
+  let csv = BOM + headers.map((h: string) => `"${h}"`).join(',') + '\n'
+  for (const att of attendances) {
+    const ans = ansMap.get(att.user_id)
+    const ca = caMap.get(att.user_id) || {}
+    const row = [att.name, att.email, att.attended_at, ans ? ans.satisfaction : '', ans ? (ans.comment || '') : '']
+    for (const q of questions) row.push(ca[q.id as number] || '')
+    csv += row.map((v: any) => `"${String(v).replace(/"/g, '""')}"`).join(',') + '\n'
+  }
+  return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${event.title}_export.csv"` } })
+})
+
+// ========== Attendance & Survey (Member) ==========
+app.get('/api/events/:code', authMiddleware, async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE event_code = ? AND is_active = 1').bind(code).first()
+  if (!event) return c.json({ error: 'イベントが見つからないか、受付が終了しています' }, 404)
+  const { results: questions } = await db.prepare('SELECT * FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
+  const user = c.get('user')
+  const attendance = await db.prepare('SELECT * FROM attendances WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
+  const survey = await db.prepare('SELECT * FROM survey_answers WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
+  const { results: myCustom } = await db.prepare('SELECT * FROM custom_answers WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).all()
+  return c.json({ event, questions, attendance, survey, customAnswers: myCustom })
+})
+
+app.post('/api/events/:code/attend', authMiddleware, async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE event_code = ? AND is_active = 1').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const user = c.get('user')
+  await db.prepare("INSERT OR IGNORE INTO attendances (event_id, user_id, attended_at) VALUES (?,?,datetime('now'))").bind(event.id, user.id).run()
+  return c.json({ success: true })
+})
+
+app.post('/api/events/:code/survey', authMiddleware, async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE event_code = ? AND is_active = 1').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const user = c.get('user')
+  const { satisfaction, comment, custom_answers } = await c.req.json()
+  await db.prepare(`INSERT INTO survey_answers (event_id, user_id, satisfaction, comment, answered_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(event_id, user_id) DO UPDATE SET satisfaction=excluded.satisfaction, comment=excluded.comment, answered_at=datetime('now')`).bind(event.id, user.id, satisfaction || null, comment || '').run()
+  if (custom_answers && Array.isArray(custom_answers)) {
+    for (const ca of custom_answers) {
+      await db.prepare('INSERT INTO custom_answers (event_id, user_id, question_id, answer_text) VALUES (?,?,?,?) ON CONFLICT(event_id, user_id, question_id) DO UPDATE SET answer_text=excluded.answer_text').bind(event.id, user.id, ca.question_id, ca.answer_text || '').run()
+    }
+  }
+  return c.json({ success: true })
 })
 
 // ========== Health ==========
@@ -644,7 +821,7 @@ if (!token || !user) { window.location.href = '/login'; }
 
 document.getElementById('userName').textContent = user ? user.name + ' さん' : '';
 if (user && user.role === 'admin') {
-  document.getElementById('adminLink').innerHTML = '<a href="/admin" class="btn-sm btn-admin" style="text-decoration:none"><i class="fas fa-cog"></i> 管理者</a>';
+  document.getElementById('adminLink').innerHTML = '<a href="/admin" class="btn-sm btn-admin" style="text-decoration:none"><i class="fas fa-cog"></i> 管理者</a> <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:#ff6f00;color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>';
 }
 
 function selectCell(td) {
@@ -781,6 +958,7 @@ app.get('/admin', (c) => {
   <div class="logo"><i class="fas fa-shield-alt"></i> 管理者ダッシュボード</div>
   <div class="user-info">
     <a href="/mypage" class="btn-sm btn-back" style="text-decoration:none"><i class="fas fa-map"></i> マイページ</a>
+    <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>
     <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i> ログアウト</button>
   </div>
 </div>
@@ -936,6 +1114,320 @@ async function exportCSV() {
 function logout() { localStorage.clear(); window.location.href = '/login'; }
 
 loadMembers();
+</script>
+</body></html>`)
+})
+
+// --- Root redirect ---
+app.get('/', (c) => {
+  return c.redirect('/login')
+})
+
+// --- QR Attend Page (scanned by member) ---
+app.get('/attend/:code', (c) => {
+  const code = c.req.param('code')
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>出席・アンケート - 学びのコンパス</title>
+<style>
+  .attend-container { max-width: 560px; margin: 20px auto; padding: 0 16px; }
+  .card { background: #fff; border-radius: 16px; padding: 28px 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; margin-bottom: 20px; }
+  .card h2 { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); margin: 0 0 4px; font-size: 20px; }
+  .card .date { color: #888; font-size: 13px; margin-bottom: 16px; }
+  .card .desc { color: #666; font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
+  .success-box { background: #e8f5e9; border: 2px solid #66bb6a; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px; }
+  .success-box i { font-size: 40px; color: #2e7d32; }
+  .success-box p { font-size: 15px; font-weight: 700; color: #2e7d32; margin: 8px 0 0; }
+  .form-group { margin-bottom: 18px; }
+  .form-group label { display: block; font-weight: 700; font-size: 14px; color: #555; margin-bottom: 6px; }
+  .form-group .hint { font-size: 11px; color: #999; margin-bottom: 6px; }
+  .stars { display: flex; gap: 6px; }
+  .star { font-size: 32px; cursor: pointer; color: #ddd; transition: color 0.15s; }
+  .star.active { color: #ffb300; }
+  .star:hover { color: #ffc107; }
+  textarea { width: 100%; padding: 10px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 14px; font-family: inherit; resize: vertical; min-height: 80px; }
+  textarea:focus { outline: none; border-color: var(--header-line); }
+  input[type="text"] { width: 100%; padding: 10px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 14px; font-family: inherit; }
+  input[type="text"]:focus { outline: none; border-color: var(--header-line); }
+  .radio-group { display: flex; flex-wrap: wrap; gap: 8px; }
+  .radio-option { padding: 8px 16px; border: 2px solid #e0d6c8; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
+  .radio-option.selected { border-color: var(--header-line); background: #fff3e0; color: var(--header-line); font-weight: 700; }
+  .rating-stars { display: flex; gap: 4px; }
+  .rating-star { font-size: 26px; cursor: pointer; color: #ddd; transition: color 0.15s; }
+  .rating-star.active { color: #ffb300; }
+  .btn { width: 100%; padding: 14px; border: none; border-radius: 12px; font-size: 16px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .btn-primary { background: var(--header-line); color: #fff; }
+  .btn-primary:hover { background: #bf360c; }
+  .btn-secondary { background: #f5f5f5; color: #666; margin-top: 10px; }
+  .already { background: #f3e5f5; border: 2px solid #ab47bc; border-radius: 12px; padding: 16px; text-align: center; color: #6a1b9a; font-weight: 700; }
+  .login-prompt { text-align: center; padding: 40px 20px; }
+  .login-prompt a { color: var(--header-line); font-weight: 700; }
+  #loading { text-align: center; padding: 60px; color: #888; }
+</style>
+</head><body>
+<div class="attend-container">
+  <div id="loading"><i class="fas fa-spinner fa-spin fa-2x"></i><p>読み込み中...</p></div>
+  <div id="loginPrompt" style="display:none" class="card login-prompt">
+    <i class="fas fa-user-circle fa-3x" style="color:#ccc;margin-bottom:12px"></i>
+    <p>出席を記録するにはログインが必要です</p>
+    <a href="/login?redirect=/attend/${code}" class="btn btn-primary" style="display:inline-block;width:auto;padding:12px 32px;text-decoration:none;margin-top:12px">ログインする</a>
+  </div>
+  <div id="content" style="display:none"></div>
+</div>
+<script>
+const CODE = '${code}';
+const token = localStorage.getItem('token');
+const user = JSON.parse(localStorage.getItem('user') || 'null');
+if (!token || !user) {
+  document.getElementById('loading').style.display='none';
+  document.getElementById('loginPrompt').style.display='block';
+} else { loadEvent(); }
+
+async function loadEvent() {
+  try {
+    const res = await fetch('/api/events/'+CODE, { headers:{'Authorization':'Bearer '+token} });
+    if (res.status === 401) { localStorage.clear(); document.getElementById('loading').style.display='none'; document.getElementById('loginPrompt').style.display='block'; return; }
+    const data = await res.json();
+    if (!res.ok) { document.getElementById('loading').innerHTML='<p style="color:#c62828">'+data.error+'</p>'; return; }
+    // Auto attend
+    if (!data.attendance) {
+      await fetch('/api/events/'+CODE+'/attend', { method:'POST', headers:{'Authorization':'Bearer '+token} });
+    }
+    renderEvent(data);
+  } catch(e) { document.getElementById('loading').innerHTML='<p style="color:#c62828">エラーが発生しました</p>'; }
+}
+
+let satisfaction = 0;
+let customData = {};
+
+function renderEvent(data) {
+  const ev = data.event;
+  const qs = data.questions || [];
+  const hasSurvey = !!data.survey;
+  document.getElementById('loading').style.display='none';
+  const c = document.getElementById('content');
+  c.style.display='block';
+  let html = '<div class="success-box"><i class="fas fa-check-circle"></i><p>出席を記録しました！</p></div>';
+  html += '<div class="card"><h2>'+ev.title+'</h2><div class="date"><i class="fas fa-calendar"></i> '+ev.event_date+'</div>';
+  if (ev.description) html += '<div class="desc">'+ev.description+'</div>';
+  if (hasSurvey) {
+    html += '<div class="already"><i class="fas fa-clipboard-check"></i> アンケートは回答済みです。ありがとうございました！</div></div>';
+    html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
+  } else {
+    html += '<hr style="border:none;border-top:2px dashed #eee;margin:16px 0"><h3 style="font-family:Zen Maru Gothic;color:#5d4037;font-size:16px;margin:0 0 16px"><i class="fas fa-clipboard-list"></i> アンケート</h3>';
+    html += '<div class="form-group"><label>満足度</label><div class="hint">タップで選択してください</div><div class="stars" id="stars">';
+    for (let i=1;i<=5;i++) html += '<span class="star" data-val="'+i+'" onclick="setStar('+i+')">★</span>';
+    html += '</div></div>';
+    html += '<div class="form-group"><label>感想・コメント</label><textarea id="comment" placeholder="自由にお書きください"></textarea></div>';
+    for (const q of qs) {
+      html += '<div class="form-group"><label>'+q.question_text+'</label>';
+      if (q.question_type === 'text') {
+        html += '<input type="text" id="cq_'+q.id+'" placeholder="回答を入力">';
+      } else if (q.question_type === 'radio') {
+        const opts = q.options ? q.options.split('|') : [];
+        html += '<div class="radio-group" id="cq_'+q.id+'">';
+        for (const o of opts) html += '<div class="radio-option" onclick="selectRadio(this,'+q.id+')">'+o+'</div>';
+        html += '</div>';
+      } else if (q.question_type === 'rating') {
+        html += '<div class="rating-stars" id="cq_'+q.id+'">';
+        for (let i=1;i<=5;i++) html += '<span class="rating-star" data-qid="'+q.id+'" data-val="'+i+'" onclick="setRating('+q.id+','+i+')">★</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    html += '<button class="btn btn-primary" onclick="submitSurvey()"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
+    html += '</div>';
+    html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none;margin-top:10px"><i class="fas fa-home"></i> マイページへ</a>';
+  }
+  c.innerHTML = html;
+  // Restore previous answers
+  if (data.survey) satisfaction = data.survey.satisfaction;
+  if (data.customAnswers) {
+    for (const ca of data.customAnswers) customData[ca.question_id] = ca.answer_text;
+  }
+}
+
+function setStar(v) { satisfaction=v; document.querySelectorAll('#stars .star').forEach((s,i)=>s.classList.toggle('active',i<v)); }
+function selectRadio(el, qid) {
+  el.parentElement.querySelectorAll('.radio-option').forEach(o=>o.classList.remove('selected'));
+  el.classList.add('selected'); customData[qid]=el.textContent;
+}
+function setRating(qid, v) {
+  customData[qid]=String(v);
+  document.querySelectorAll('#cq_'+qid+' .rating-star').forEach((s,i)=>s.classList.toggle('active',i<v));
+}
+
+async function submitSurvey() {
+  const qs = document.querySelectorAll('[id^="cq_"]');
+  const custom_answers = [];
+  qs.forEach(el => {
+    const qid = parseInt(el.id.replace('cq_',''));
+    if (el.tagName === 'INPUT') { customData[qid] = el.value; }
+    if (customData[qid]) custom_answers.push({ question_id: qid, answer_text: customData[qid] });
+  });
+  const comment = document.getElementById('comment')?.value || '';
+  const res = await fetch('/api/events/'+CODE+'/survey', {
+    method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body: JSON.stringify({ satisfaction, comment, custom_answers })
+  });
+  if (res.ok) {
+    document.getElementById('content').innerHTML = '<div class="success-box"><i class="fas fa-heart"></i><p>回答ありがとうございました！</p></div><a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
+  } else { alert('送信に失敗しました'); }
+}
+</script>
+</body></html>`)
+})
+
+// --- Admin Events Page ---
+app.get('/admin/events', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>イベント管理 - 学びのコンパス</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+<style>
+  .top-bar { background: #1a237e; color: #fff; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+  .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; font-weight: 700; }
+  .btn-sm { padding: 6px 14px; border-radius: 8px; border: none; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .btn-back { background: rgba(255,255,255,0.2); color: #fff; text-decoration: none; }
+  .main { max-width: 900px; margin: 20px auto; padding: 0 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); margin-bottom: 16px; }
+  .card h3 { font-family: 'Zen Maru Gothic', sans-serif; margin: 0 0 12px; color: #333; }
+  .form-row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .form-row input, .form-row textarea { flex: 1; padding: 8px 12px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 14px; font-family: inherit; min-width: 200px; }
+  .form-row input:focus, .form-row textarea:focus { outline: none; border-color: #1a237e; }
+  .btn-create { background: #1a237e; color: #fff; padding: 10px 24px; border: none; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .btn-create:hover { background: #0d1642; }
+  .btn-danger { background: #c62828; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
+  .btn-export2 { background: #2e7d32; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
+  .btn-qr { background: #ff6f00; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
+  .event-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #eee; flex-wrap: wrap; gap: 8px; }
+  .event-item:last-child { border-bottom: none; }
+  .event-info .title { font-weight: 700; font-size: 15px; }
+  .event-info .meta { font-size: 12px; color: #888; margin-top: 2px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 10px; font-weight: 700; }
+  .badge-att { background: #e3f2fd; color: #1565c0; }
+  .badge-sur { background: #f3e5f5; color: #7b1fa2; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .qr-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200; align-items: center; justify-content: center; }
+  .qr-modal.show { display: flex; }
+  .qr-content { background: #fff; border-radius: 20px; padding: 36px; text-align: center; max-width: 420px; width: 90%; }
+  .qr-content h3 { font-family: 'Zen Maru Gothic', sans-serif; color: #1a237e; margin: 0 0 4px; }
+  .qr-content .date { color: #888; font-size: 13px; margin-bottom: 16px; }
+  .qr-content canvas { margin: 0 auto; }
+  .qr-content .code-text { margin-top: 12px; font-size: 20px; font-weight: 700; color: var(--header-line); letter-spacing: 4px; font-family: monospace; }
+  .qr-content .url-text { margin-top: 8px; font-size: 11px; color: #999; word-break: break-all; }
+  .custom-q-area { margin-top: 16px; padding-top: 16px; border-top: 2px dashed #eee; }
+  .custom-q-item { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
+  .custom-q-item input, .custom-q-item select { padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; font-family: inherit; }
+  .custom-q-item .q-text { flex: 1; min-width: 150px; }
+  .remove-q { background: none; border: none; color: #c62828; cursor: pointer; font-size: 16px; }
+  .btn-add-q { background: #f5f5f5; color: #555; border: 2px dashed #ccc; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-family: inherit; width: 100%; margin-top: 8px; }
+  @media print {
+    .top-bar, .main { display: none !important; }
+    .qr-modal { position: static !important; display: block !important; background: none !important; }
+    .qr-content { box-shadow: none !important; max-width: none !important; padding: 20px !important; }
+  }
+</style>
+</head><body>
+<div class="top-bar">
+  <div class="logo"><i class="fas fa-calendar-alt"></i> イベント管理</div>
+  <div style="display:flex;gap:8px">
+    <a href="/admin" class="btn-sm btn-back"><i class="fas fa-arrow-left"></i> ダッシュボード</a>
+  </div>
+</div>
+<div class="main">
+  <div class="card">
+    <h3><i class="fas fa-plus-circle"></i> 新しいイベントを作成</h3>
+    <div class="form-row">
+      <input type="text" id="evTitle" placeholder="イベント名（例：7月定例会）">
+      <input type="date" id="evDate">
+    </div>
+    <div class="form-row">
+      <textarea id="evDesc" rows="2" placeholder="説明（任意）" style="width:100%"></textarea>
+    </div>
+    <div class="custom-q-area">
+      <strong style="font-size:13px;color:#555"><i class="fas fa-question-circle"></i> カスタム質問（任意）</strong>
+      <div id="customQuestions"></div>
+      <button class="btn-add-q" onclick="addQuestion()"><i class="fas fa-plus"></i> 質問を追加</button>
+    </div>
+    <div style="margin-top:16px"><button class="btn-create" onclick="createEvent()"><i class="fas fa-paper-plane"></i> 作成する</button></div>
+  </div>
+  <div class="card">
+    <h3><i class="fas fa-list"></i> イベント一覧</h3>
+    <div id="eventList"><p style="color:#888;text-align:center">読み込み中...</p></div>
+  </div>
+</div>
+<div class="qr-modal" id="qrModal" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="qr-content" id="qrContent"></div>
+</div>
+<script>
+const token = localStorage.getItem('token');
+const user = JSON.parse(localStorage.getItem('user')||'null');
+if (!token||!user||user.role!=='admin') window.location.href='/login';
+
+let qCount = 0;
+function addQuestion() {
+  qCount++;
+  const div = document.getElementById('customQuestions');
+  const item = document.createElement('div');
+  item.className = 'custom-q-item';
+  item.id = 'q_'+qCount;
+  item.innerHTML = '<input class="q-text" type="text" placeholder="質問文"><select class="q-type"><option value="text">テキスト入力</option><option value="radio">選択式</option><option value="rating">5段階評価</option></select><input class="q-opts" type="text" placeholder="選択肢（|区切り）" style="display:none;min-width:120px"><button class="remove-q" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>';
+  item.querySelector('.q-type').addEventListener('change', function() {
+    item.querySelector('.q-opts').style.display = this.value==='radio'?'block':'none';
+  });
+  div.appendChild(item);
+}
+
+async function createEvent() {
+  const title = document.getElementById('evTitle').value;
+  const event_date = document.getElementById('evDate').value;
+  const description = document.getElementById('evDesc').value;
+  if (!title||!event_date) { alert('タイトルと日付を入力してください'); return; }
+  const custom_questions = [];
+  document.querySelectorAll('.custom-q-item').forEach(item => {
+    const text = item.querySelector('.q-text').value;
+    const type = item.querySelector('.q-type').value;
+    const opts = item.querySelector('.q-opts').value;
+    if (text) custom_questions.push({ question_text: text, question_type: type, options: opts });
+  });
+  const res = await fetch('/api/admin/events', {
+    method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body: JSON.stringify({ title, event_date, description, custom_questions })
+  });
+  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; document.getElementById('customQuestions').innerHTML=''; loadEvents(); }
+  else { const d = await res.json(); alert(d.error); }
+}
+
+async function loadEvents() {
+  const res = await fetch('/api/admin/events', { headers:{'Authorization':'Bearer '+token} });
+  const data = await res.json();
+  const list = document.getElementById('eventList');
+  if (!data.events.length) { list.innerHTML='<p style="color:#888;text-align:center">まだイベントがありません</p>'; return; }
+  list.innerHTML = data.events.map(ev => '<div class="event-item"><div class="event-info"><div class="title">'+ev.title+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" onclick="showQR('+ev.id+',\\''+ev.title+'\\',\\''+ev.event_date+'\\',\\''+ev.event_code+'\\')"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" onclick="exportEvent('+ev.id+')"><i class="fas fa-download"></i> CSV</button><button class="btn-danger" onclick="deleteEvent('+ev.id+',\\''+ev.title+'\\')"><i class="fas fa-trash"></i></button></div></div>').join('');
+}
+
+function showQR(id, title, date, code) {
+  const url = location.origin + '/attend/' + code;
+  const c = document.getElementById('qrContent');
+  c.innerHTML = '<h3>'+title+'</h3><div class="date">'+date+'</div><canvas id="qrCanvas"></canvas><div class="code-text">'+code+'</div><div class="url-text">'+url+'</div><div style="margin-top:16px"><button class="btn-sm" style="background:#1a237e;color:#fff;padding:8px 20px" onclick="window.print()"><i class="fas fa-print"></i> 印刷</button> <button class="btn-sm" style="background:#eee;color:#555;padding:8px 20px" onclick="document.getElementById(\\'qrModal\\').classList.remove(\\'show\\')">閉じる</button></div>';
+  document.getElementById('qrModal').classList.add('show');
+  setTimeout(() => { QRCode.toCanvas(document.getElementById('qrCanvas'), url, { width: 240, margin: 2 }); }, 100);
+}
+
+async function exportEvent(id) {
+  const res = await fetch('/api/admin/events/'+id+'/export', { headers:{'Authorization':'Bearer '+token} });
+  if (!res.ok) { alert('エクスポート失敗'); return; }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='event_export.csv'; a.click(); URL.revokeObjectURL(url);
+}
+
+async function deleteEvent(id, title) {
+  if (!confirm(title+' を削除しますか？')) return;
+  await fetch('/api/admin/events/'+id, { method:'DELETE', headers:{'Authorization':'Bearer '+token} });
+  loadEvents();
+}
+
+loadEvents();
 </script>
 </body></html>`)
 })
