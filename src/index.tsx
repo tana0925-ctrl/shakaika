@@ -28,21 +28,24 @@ function generateToken(): string {
   return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-// Simple token store (in-memory per instance, fine for local dev; for prod use KV or D1)
-const tokenStore = new Map<string, { userId: number; expires: number }>()
-
-function setToken(token: string, userId: number) {
-  tokenStore.set(token, { userId, expires: Date.now() + 7 * 24 * 60 * 60 * 1000 })
+// Token store using D1 for production persistence
+async function setToken(db: D1Database, token: string, userId: number) {
+  const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  await db.prepare(
+    'INSERT OR REPLACE INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)'
+  ).bind(token, userId, expires).run()
 }
 
-function getUserIdFromToken(token: string): number | null {
-  const entry = tokenStore.get(token)
-  if (!entry) return null
-  if (Date.now() > entry.expires) {
-    tokenStore.delete(token)
+async function getUserIdFromToken(db: D1Database, token: string): Promise<number | null> {
+  const row = await db.prepare(
+    'SELECT user_id, expires_at FROM sessions WHERE token = ?'
+  ).bind(token).first() as any
+  if (!row) return null
+  if (new Date(row.expires_at) < new Date()) {
+    await db.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run()
     return null
   }
-  return entry.userId
+  return row.user_id
 }
 
 // ========== Auth Middleware ==========
@@ -52,7 +55,7 @@ async function authMiddleware(c: any, next: any) {
     return c.json({ error: 'ログインが必要です' }, 401)
   }
   const token = authHeader.replace('Bearer ', '')
-  const userId = getUserIdFromToken(token)
+  const userId = await getUserIdFromToken(c.env.DB, token)
   if (!userId) {
     return c.json({ error: 'セッションが無効です。再ログインしてください' }, 401)
   }
@@ -136,6 +139,17 @@ app.get('/api/init', async (c) => {
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_attendances_event ON attendances(event_id)').run()
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_events_code ON events(event_code)').run()
 
+  // Sessions table for persistent auth tokens
+  await db.prepare(`CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)').run()
+  // Clean up expired sessions
+  await db.prepare("DELETE FROM sessions WHERE expires_at < datetime('now')").run()
+
   // Create default admin if not exists
   const adminHash = await hashPassword('admin123')
   await db.prepare(
@@ -165,7 +179,7 @@ app.post('/api/auth/register', async (c) => {
 
   const userId = result.meta.last_row_id as number
   const token = generateToken()
-  setToken(token, userId)
+  await setToken(c.env.DB, token, userId)
 
   return c.json({ token, user: { id: userId, name, email, role: 'member' } })
 })
@@ -183,7 +197,7 @@ app.post('/api/auth/login', async (c) => {
     return c.json({ error: 'メールアドレスまたはパスワードが正しくありません' }, 401)
   }
   const token = generateToken()
-  setToken(token, user.id as number)
+  await setToken(c.env.DB, token, user.id as number)
 
   return c.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } })
 })
@@ -907,6 +921,12 @@ async function saveSelections() {
   setTimeout(() => status.style.display = 'none', 3000);
 }
 
+async function logout() {
+  const t = localStorage.getItem('token');
+  if (t) { try { await fetch('/api/auth/logout', { method:'POST', headers:{'Authorization':'Bearer '+t} }); } catch(e){} }
+  localStorage.clear(); window.location.href = '/login';
+}
+
 loadSelections();
 </script>
 </body></html>`)
@@ -1133,16 +1153,15 @@ async function exportCSV() {
   URL.revokeObjectURL(url);
 }
 
-function logout() { localStorage.clear(); window.location.href = '/login'; }
+async function logout() {
+  const t = localStorage.getItem('token');
+  if (t) { try { await fetch('/api/auth/logout', { method:'POST', headers:{'Authorization':'Bearer '+t} }); } catch(e){} }
+  localStorage.clear(); window.location.href = '/login';
+}
 
 loadMembers();
 </script>
 </body></html>`)
-})
-
-// --- Root redirect ---
-app.get('/', (c) => {
-  return c.redirect('/login')
 })
 
 // --- QR Attend Page (scanned by member) ---
@@ -1457,6 +1476,16 @@ loadEvents();
 // --- Root redirect ---
 app.get('/', (c) => {
   return c.redirect('/login')
+})
+
+// --- Logout API (clean up session from D1) ---
+app.post('/api/auth/logout', async (c) => {
+  const authHeader = c.req.header('Authorization')
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.replace('Bearer ', '')
+    await c.env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run()
+  }
+  return c.json({ success: true })
 })
 
 export default app
