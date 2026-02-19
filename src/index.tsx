@@ -162,6 +162,20 @@ app.get('/api/init', async (c) => {
   // Clean up expired sessions
   await db.prepare("DELETE FROM sessions WHERE expires_at < datetime('now')").run()
 
+
+  // Annual notes (goal/reflection) per fiscal year
+  await db.prepare(`CREATE TABLE IF NOT EXISTS annual_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    fiscal_year INTEGER NOT NULL,
+    goal TEXT DEFAULT '',
+    reflection TEXT DEFAULT '',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(user_id, fiscal_year)
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_annual_notes_user_year ON annual_notes(user_id, fiscal_year)').run()
+
   // Create default admin if not exists
   const adminHash = await hashPassword('admin123')
   await db.prepare(
@@ -262,42 +276,134 @@ app.delete('/api/selections/:viewpoint', authMiddleware, async (c) => {
 })
 
 
-// ========== My History API ==========
+// ========== My Annual Notes & History ==========
+function getCurrentFiscalYear(): number {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth() + 1
+  return m >= 4 ? y : y - 1
+}
+
+app.get('/api/me/annual-notes', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const qfy = c.req.query('fy')
+  const fy = qfy ? parseInt(qfy) : getCurrentFiscalYear()
+  const fiscalYear = Number.isFinite(fy) ? fy : getCurrentFiscalYear()
+
+  const row = await c.env.DB.prepare(
+    'SELECT fiscal_year, goal, reflection, updated_at FROM annual_notes WHERE user_id = ? AND fiscal_year = ?'
+  ).bind(user.id, fiscalYear).first() as any
+
+  return c.json({
+    fiscal_year: fiscalYear,
+    goal: row?.goal || '',
+    reflection: row?.reflection || '',
+    updated_at: row?.updated_at || null
+  })
+})
+
+app.post('/api/me/annual-notes', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const body = await c.req.json()
+  const fiscal_year = parseInt(body?.fiscal_year)
+  const goal = (body?.goal ?? '').toString()
+  const reflection = (body?.reflection ?? '').toString()
+
+  if (!Number.isFinite(fiscal_year) || fiscal_year < 2000 || fiscal_year > 3000) {
+    return c.json({ error: '年度が不正です' }, 400)
+  }
+  if (goal.length > 8000 || reflection.length > 8000) {
+    return c.json({ error: '入力が長すぎます（8000文字以内）' }, 400)
+  }
+
+  await c.env.DB.prepare(`
+    INSERT INTO annual_notes (user_id, fiscal_year, goal, reflection, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(user_id, fiscal_year) DO UPDATE SET
+      goal = excluded.goal,
+      reflection = excluded.reflection,
+      updated_at = datetime('now')
+  `).bind(user.id, fiscal_year, goal, reflection).run()
+
+  return c.json({ success: true })
+})
+
 app.get('/api/me/history', authMiddleware, async (c) => {
   const user = c.get('user')
-  const db = c.env.DB
+  const qfy = c.req.query('fy')
+  const fy = qfy ? parseInt(qfy) : getCurrentFiscalYear()
+  const fiscalYear = Number.isFinite(fy) ? fy : getCurrentFiscalYear()
+  const start = `${fiscalYear}-04-01`
+  const end = `${fiscalYear + 1}-03-31`
 
-  const { results: events } = await db.prepare(`
-    SELECT
-      e.id, e.title, e.description, e.event_date,
+  const db = c.env.DB
+  const { results: baseRows } = await db.prepare(
+    `SELECT
+      e.id as event_id,
+      e.title,
+      e.description,
+      e.event_date,
+      e.event_code,
       a.attended_at,
-      sa.satisfaction, sa.comment, sa.answered_at
+      sa.satisfaction,
+      sa.comment,
+      sa.answered_at
     FROM attendances a
     JOIN events e ON e.id = a.event_id
     LEFT JOIN survey_answers sa ON sa.event_id = e.id AND sa.user_id = a.user_id
-    WHERE a.user_id = ?
-    ORDER BY e.event_date DESC, a.attended_at DESC
-  `).bind(user.id).all()
+    WHERE a.user_id = ? AND e.event_date >= ? AND e.event_date <= ?
+    ORDER BY e.event_date DESC`
+  ).bind(user.id, start, end).all() as any
 
-  const { results: custom } = await db.prepare(`
-    SELECT
-      ca.event_id, ca.question_id, ca.answer_text,
-      q.question_text, q.question_type, q.options, q.sort_order
-    FROM custom_answers ca
-    JOIN survey_questions q ON q.id = ca.question_id
-    WHERE ca.user_id = ?
-    ORDER BY ca.event_id, q.sort_order ASC, ca.question_id ASC
-  `).bind(user.id).all()
+  const { results: qaRows } = await db.prepare(
+    `SELECT
+      e.id as event_id,
+      q.id as question_id,
+      q.question_text,
+      q.question_type,
+      q.options,
+      q.sort_order,
+      ca.answer_text
+    FROM attendances a
+    JOIN events e ON e.id = a.event_id
+    JOIN survey_questions q ON q.event_id = e.id
+    LEFT JOIN custom_answers ca ON ca.event_id = e.id AND ca.question_id = q.id AND ca.user_id = a.user_id
+    WHERE a.user_id = ? AND e.event_date >= ? AND e.event_date <= ?
+    ORDER BY e.event_date DESC, q.sort_order ASC`
+  ).bind(user.id, start, end).all() as any
 
-  const grouped: Record<string, any[]> = {}
-  for (const row of custom as any[]) {
-    const key = String(row.event_id)
-    if (!grouped[key]) grouped[key] = []
-    grouped[key].push(row)
+  const map = new Map<number, any>()
+  for (const r of (baseRows || [])) {
+    map.set(r.event_id, {
+      event_id: r.event_id,
+      title: r.title,
+      description: r.description || '',
+      event_date: r.event_date,
+      event_code: r.event_code,
+      attended_at: r.attended_at,
+      survey: {
+        satisfaction: r.satisfaction ?? null,
+        comment: r.comment || '',
+        answered_at: r.answered_at ?? null
+      },
+      questions: [] as any[]
+    })
+  }
+  for (const q of (qaRows || [])) {
+    const ev = map.get(q.event_id)
+    if (!ev) continue
+    ev.questions.push({
+      question_id: q.question_id,
+      question_text: q.question_text,
+      question_type: q.question_type,
+      options: q.options || '',
+      answer_text: q.answer_text || ''
+    })
   }
 
-  return c.json({ events, customByEvent: grouped })
+  return c.json({ fiscal_year: fiscalYear, events: Array.from(map.values()) })
 })
+
 
 // ========== Admin API ==========
 app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
@@ -775,28 +881,33 @@ app.get('/mypage', (c) => {
   .save-area { text-align: center; margin-top: 20px; }
   .save-status { font-size: 13px; color: #2e7d32; margin-top: 10px; display: none; }
 
-  .history-card { background: #fff; border-radius: 12px; border: 2px solid #f0e6d2; box-shadow: 0 4px 15px rgba(0,0,0,0.05); padding: 16px 18px; margin-top: 18px; }
-  .history-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; border-bottom: 2px dashed #ffccbc; padding-bottom: 8px; margin-bottom: 10px; }
-  .history-head h2 { margin: 0; font-size: 16px; font-family: 'Zen Maru Gothic', sans-serif; color: #5d4037; }
-  .history-controls { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #666; }
-  .history-controls label { font-weight: 700; color: #555; }
-  .history-controls select { padding: 6px 10px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 12px; font-family: inherit; background: #fff; }
-  .history-note { font-size: 12px; color: #777; margin: 6px 0 10px; line-height: 1.5; }
-  details.hist-item { border: 1px solid #eee; border-radius: 10px; padding: 10px 12px; margin: 10px 0; background: #fffaf0; }
-  details.hist-item summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
-  details.hist-item summary::-webkit-details-marker { display: none; }
-  .hist-left { display: flex; flex-direction: column; gap: 2px; }
-  .hist-title { font-weight: 700; color: #444; font-size: 13px; }
-  .hist-date { font-size: 12px; color: #888; white-space: nowrap; }
-  .hist-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 700; white-space: nowrap; }
-  .badge-done { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
-  .badge-pending { background: #fff3e0; color: #e65100; border: 1px solid #ffe0b2; }
-  .hist-body { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eee; font-size: 13px; color: #555; line-height: 1.6; }
+
+  .notes-card { background: #fff; border: 2px dashed #ffb74d; padding: 14px 16px; border-radius: 12px; margin: 12px 0 14px; }
+  .notes-card h2 { font-family: 'Zen Maru Gothic', sans-serif; font-size: 16px; margin: 0 0 8px; color: #e65100; display: flex; align-items: center; gap: 8px; }
+  .notes-card textarea { width: 100%; min-height: 84px; padding: 10px 12px; border: 2px solid #e0d6c8; border-radius: 10px; font-size: 14px; font-family: inherit; resize: vertical; outline: none; }
+  .notes-card textarea:focus { border-color: var(--header-line); }
+  .notes-meta { font-size: 12px; color: #888; margin-top: 6px; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+
+  .history-card { background: #fff; border: 2px solid #f0e6d2; border-radius: 12px; padding: 16px; margin-top: 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+  .history-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .history-header h2 { margin: 0; font-family: 'Zen Maru Gothic', sans-serif; color: #2e7d32; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+  .fy-select { padding: 6px 10px; border: 2px solid #ddd; border-radius: 8px; font-family: inherit; font-size: 13px; }
+  .fy-select:focus { outline: none; border-color: #2e7d32; }
+
+  .event-item { border-top: 1px solid #eee; padding: 12px 0; }
+  .event-item:first-child { border-top: none; }
+  .event-title { font-weight: 700; color: #444; }
+  .event-meta { color: #888; font-size: 12px; margin-top: 2px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+  .tag-answered { background: #e8f5e9; color: #2e7d32; }
+  .tag-pending { background: #fff3e0; color: #e65100; }
+  .toggle-btn { background: #eee; border: none; border-radius: 8px; padding: 6px 10px; cursor: pointer; font-family: inherit; font-weight: 700; font-size: 12px; }
+  .toggle-btn:hover { background: #e0e0e0; }
+  .event-detail { display: none; margin-top: 10px; background: #fafafa; border: 1px solid #eee; border-radius: 10px; padding: 10px 12px; }
+  .event-detail.show { display: block; }
   .qa { margin-top: 10px; }
-  .qa .q { font-weight: 700; margin-top: 8px; color: #5d4037; }
-  .qa .a { margin-top: 2px; white-space: pre-wrap; }
-  .stars-mini { color: #ffb300; letter-spacing: 1px; }
-  .muted { color: #999; font-size: 12px; }
+  .qa .q { font-weight: 700; font-size: 13px; margin-top: 8px; color: #555; }
+  .qa .a { color: #555; font-size: 13px; padding-left: 10px; border-left: 3px solid #ddd; margin-top: 4px; white-space: pre-wrap; }
 
 
   .memo-input { width: 100%; margin-top: 6px; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 9pt; font-family: inherit; resize: none; display: none; }
@@ -921,20 +1032,14 @@ app.get('/mypage', (c) => {
       <div style="color:#666"><strong>カテゴリ：</strong><span style="color:#8d6e63">■ 授業・準備</span> <span style="color:#66bb6a">■ 仲間・活動</span> <span style="color:#42a5f5">■ 研究・発信</span></div>
       <div style="color:#777;text-align:right;max-width:60%">※これは「ここまでやらなきゃいけない」というノルマではありません。<br>今の自分に合った「次の一歩」を見つけるための地図として使ってください。</div>
     </div>
-  </div>
 
-  <div class="history-card">
-    <div class="history-head">
-      <h2><i class="fas fa-calendar-check"></i> 参加した会・アンケート（自分用）</h2>
-      <div class="history-controls">
-        <label for="fySelect">年度</label>
-        <select id="fySelect"></select>
-      </div>
+    <div class="notes-card" style="border-style:solid;border-color:#bbdefb;margin-top:16px">
+      <h2 style="color:#1565c0"><i class="fas fa-pen"></i> 今年度の振り返り</h2>
+      <textarea id="annualReflection" placeholder="今年度の参加や学び、次につながったことなど"></textarea>
+      <div class="notes-meta"><span>※自分だけが見られます</span><span id="annualSavedAt2"></span></div>
     </div>
-    <div class="history-note">
-      年間で参加した会と、アンケートのコメント・自由記述をここで読み返せます（出席は自動記録）。
-    </div>
-    <div id="historyList"><div class="muted">読み込み中...</div></div>
+
+
   </div>
 
   <div class="save-area">
@@ -942,6 +1047,16 @@ app.get('/mypage', (c) => {
     <button class="btn-sm" style="background:#eee;color:#666;padding:10px 20px;border:none;border-radius:10px;margin-left:8px;cursor:pointer;font-family:inherit;font-weight:700" onclick="window.print()"><i class="fas fa-print"></i> 印刷する</button>
     <div class="save-status" id="saveStatus"><i class="fas fa-check-circle"></i> 保存しました</div>
   </div>
+
+  <div class="history-card">
+    <div class="history-header">
+      <h2><i class="fas fa-calendar-check"></i> 参加した会・アンケート（自分用）</h2>
+      <select class="fy-select" id="fySelect" onchange="changeFY()"></select>
+    </div>
+    <div id="historyList" style="margin-top:10px;color:#666;font-size:13px">読み込み中...</div>
+  </div>
+
+
 </div>
 
 <script>
@@ -954,6 +1069,149 @@ if (user && user.role === 'admin') {
   document.getElementById('adminLink').innerHTML = '<a href="/admin" class="btn-sm btn-admin" style="text-decoration:none"><i class="fas fa-cog"></i> 管理者</a> <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:#ff6f00;color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>';
 }
 
+
+function currentFY() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+  return m >= 4 ? y : (y - 1);
+}
+
+let activeFY = currentFY();
+
+function esc(s) {
+  return (s ?? '').toString().replace(/[&<>"']/g, (ch) => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'
+  }[ch]));
+}
+
+function setupFYSelect() {
+  const sel = document.getElementById('fySelect');
+  if (!sel) return;
+  const now = currentFY();
+  sel.innerHTML = '';
+  for (let y = now; y >= now - 3; y--) {
+    const opt = document.createElement('option');
+    opt.value = String(y);
+    opt.textContent = y + '年度';
+    sel.appendChild(opt);
+  }
+  sel.value = String(activeFY);
+  const label = document.getElementById('fyLabel');
+  if (label) label.textContent = '(' + activeFY + '年度)';
+}
+
+function changeFY() {
+  const sel = document.getElementById('fySelect');
+  if (!sel) return;
+  activeFY = parseInt(sel.value);
+  const label = document.getElementById('fyLabel');
+  if (label) label.textContent = '(' + activeFY + '年度)';
+  loadAnnualNotes();
+  loadHistory();
+}
+
+async function loadAnnualNotes() {
+  try {
+    const res = await fetch('/api/me/annual-notes?fy=' + activeFY, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+    const data = await res.json();
+    const g = document.getElementById('annualGoal');
+    const r = document.getElementById('annualReflection');
+    if (g) g.value = data.goal || '';
+    if (r) r.value = data.reflection || '';
+    const at = data.updated_at ? ('最終更新：' + new Date(data.updated_at).toLocaleString('ja-JP')) : '';
+    const s1 = document.getElementById('annualSavedAt');
+    const s2 = document.getElementById('annualSavedAt2');
+    if (s1) s1.textContent = at;
+    if (s2) s2.textContent = at;
+  } catch(e) { console.error(e); }
+}
+
+async function saveAnnualNotes() {
+  const g = document.getElementById('annualGoal')?.value || '';
+  const r = document.getElementById('annualReflection')?.value || '';
+  const res = await fetch('/api/me/annual-notes', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fiscal_year: activeFY, goal: g, reflection: r })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || '保存に失敗しました');
+  }
+}
+
+function toggleDetail(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.toggle('show');
+}
+
+function renderHistory(events) {
+  const root = document.getElementById('historyList');
+  if (!root) return;
+  if (!events || events.length === 0) {
+    root.innerHTML = '<div style="color:#888">この年度は、出席した会がまだありません。</div>';
+    return;
+  }
+  let html = '';
+  for (const ev of events) {
+    const answered = !!(ev?.survey?.answered_at);
+    const tag = answered
+      ? '<span class="tag tag-answered">回答済み</span>'
+      : '<span class="tag tag-pending">未回答</span>';
+
+    const detailId = 'detail_' + ev.event_id;
+    const sat = ev?.survey?.satisfaction ? ('満足度：' + ev.survey.satisfaction + ' / 5') : '満足度：—';
+    const comment = ev?.survey?.comment ? esc(ev.survey.comment) : '（自由記述なし）';
+
+    let qaHtml = '';
+    if (Array.isArray(ev.questions) && ev.questions.length > 0) {
+      qaHtml += '<div class="qa"><div style="font-weight:700;color:#555;margin-top:8px">追加質問</div>';
+      for (const q of ev.questions) {
+        const a = (q.answer_text && q.answer_text.trim()) ? esc(q.answer_text) : '（未回答）';
+        qaHtml += '<div class="q">Q. ' + esc(q.question_text) + '</div><div class="a">' + a + '</div>';
+      }
+      qaHtml += '</div>';
+    }
+
+    html += '<div class="event-item">' +
+      '<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap">' +
+        '<div>' +
+          '<div class="event-title">' + esc(ev.title) + '</div>' +
+          '<div class="event-meta">' +
+            '<span><i class="fas fa-calendar-day"></i> ' + esc(ev.event_date) + '</span>' +
+            tag +
+          '</div>' +
+        '</div>' +
+        '<button class="toggle-btn" onclick="toggleDetail(\'' + detailId + '\')"><i class="fas fa-eye"></i> 振り返りを見る</button>' +
+      '</div>' +
+      '<div class="event-detail" id="' + detailId + '">' +
+        '<div style="font-weight:700;color:#555">' + sat + '</div>' +
+        '<div style="margin-top:6px;color:#555;white-space:pre-wrap">' + comment + '</div>' +
+        qaHtml +
+      '</div>' +
+    '</div>';
+  }
+  root.innerHTML = html;
+}
+
+async function loadHistory() {
+  const root = document.getElementById('historyList');
+  if (root) root.textContent = '読み込み中...';
+  try {
+    const res = await fetch('/api/me/history?fy=' + activeFY, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+    const data = await res.json();
+    renderHistory(data.events || []);
+  } catch(e) {
+    console.error(e);
+    if (root) root.innerHTML = '<div style="color:#c62828">読み込みに失敗しました</div>';
+  }
+}
+
+setupFYSelect();
 function selectCell(td) {
   const vp = td.dataset.vp;
   const step = td.dataset.step;
@@ -1010,147 +1268,10 @@ async function saveSelections() {
   }
 
   await Promise.all(promises);
+  try { await saveAnnualNotes(); } catch(e) { console.error(e); }
   const status = document.getElementById('saveStatus');
   status.style.display = 'block';
   setTimeout(() => status.style.display = 'none', 3000);
-}
-
-
-let __historyData = null;
-
-function escapeHtml(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function fiscalYearFromDate(dateStr) {
-  const parts = String(dateStr || '').split('-');
-  const y = parseInt(parts[0] || '0');
-  const m = parseInt(parts[1] || '1');
-  if (!y) return 0;
-  return m >= 4 ? y : (y - 1);
-}
-
-function starsMini(n) {
-  const v = Math.max(0, Math.min(5, parseInt(n || '0')));
-  return '★★★★★'.slice(0, v) + '☆☆☆☆☆'.slice(0, 5 - v);
-}
-
-function formatAnswer(row) {
-  const t = row.question_type;
-  const a = row.answer_text || '';
-  if (t === 'rating') return starsMini(a) + '（' + a + '）';
-  return a;
-}
-
-function renderHistory() {
-  const list = document.getElementById('historyList');
-  const fySel = document.getElementById('fySelect');
-
-  if (!__historyData || !__historyData.events) {
-    list.innerHTML = '<div class="muted">読み込み中...</div>';
-    return;
-  }
-
-  const fy = parseInt(fySel.value || '0');
-  const events = (__historyData.events || []).filter(ev => fiscalYearFromDate(ev.event_date) === fy);
-
-  if (!events.length) {
-    list.innerHTML = '<div class="muted">この年度の記録はありません。</div>';
-    return;
-  }
-
-  const customByEvent = __historyData.customByEvent || {};
-  let html = '';
-
-  for (const ev of events) {
-    const answered = !!ev.answered_at;
-    const badge = answered
-      ? '<span class="hist-badge badge-done"><i class="fas fa-clipboard-check"></i> 回答済み</span>'
-      : '<span class="hist-badge badge-pending"><i class="fas fa-clipboard"></i> 未回答</span>';
-
-    const date = escapeHtml(ev.event_date || '');
-    const title = escapeHtml(ev.title || '');
-    const attendedAt = escapeHtml(ev.attended_at || '');
-    const satisfaction = ev.satisfaction
-      ? '<span class="stars-mini">' + escapeHtml(starsMini(ev.satisfaction)) + '</span>'
-      : '<span class="muted">（未記録）</span>';
-    const comment = (ev.comment && String(ev.comment).trim())
-      ? escapeHtml(ev.comment)
-      : '<span class="muted">（記述なし）</span>';
-
-    const cas = customByEvent[String(ev.id)] || [];
-    let qaHtml = '';
-
-    if (answered) {
-      qaHtml += '<div class="qa"><div class="q">満足度</div><div class="a">' + satisfaction + '</div></div>';
-      qaHtml += '<div class="qa"><div class="q">感想・コメント</div><div class="a">' + comment + '</div></div>';
-    }
-
-    if (cas.length) {
-      qaHtml += '<div class="qa"><div class="q">追加質問</div></div>';
-      for (const row of cas) {
-        const q = escapeHtml(row.question_text || '');
-        const a = escapeHtml(formatAnswer(row));
-        qaHtml += '<div class="qa"><div class="q">' + q + '</div><div class="a">' + (a || '<span class="muted">（記述なし）</span>') + '</div></div>';
-      }
-    }
-
-    if (!answered && !cas.length) {
-      qaHtml += '<div class="muted">アンケートは未回答です。</div>';
-    }
-
-    html += '<details class="hist-item">';
-    html +=   '<summary>';
-    html +=     '<div class="hist-left">';
-    html +=       '<div class="hist-title">' + title + '</div>';
-    html +=       '<div class="hist-date"><i class="fas fa-calendar"></i> ' + date + '</div>';
-    html +=     '</div>';
-    html +=     badge;
-    html +=   '</summary>';
-    html +=   '<div class="hist-body">';
-    html +=     '<div><strong>出席記録：</strong>' + (attendedAt || '<span class="muted">（記録なし）</span>') + '</div>';
-    html +=     qaHtml;
-    html +=   '</div>';
-    html += '</details>';
-  }
-
-  list.innerHTML = html;
-}
-
-async function loadHistory() {
-  const list = document.getElementById('historyList');
-  list.innerHTML = '<div class="muted">読み込み中...</div>';
-
-  try {
-    const res = await fetch('/api/me/history', { headers: { 'Authorization': 'Bearer ' + token } });
-    if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
-    const data = await res.json();
-    __historyData = data;
-
-    const events = data.events || [];
-    const fySelect = document.getElementById('fySelect');
-
-    if (!events.length) {
-      fySelect.innerHTML = '';
-      list.innerHTML = '<div class="muted">まだ参加記録がありません。イベントのQRを読み取って参加すると、ここに記録されます。</div>';
-      return;
-    }
-
-    const fys = Array.from(new Set(events.map(ev => fiscalYearFromDate(ev.event_date)).filter(Boolean))).sort((a,b)=>b-a);
-    fySelect.innerHTML = fys.map(y => '<option value="' + y + '">' + y + '年度</option>').join('');
-    fySelect.value = String(fys[0] || '');
-    fySelect.onchange = function () { renderHistory(); };
-
-    renderHistory();
-  } catch (e) {
-    console.error(e);
-    list.innerHTML = '<div class="muted">読み込みに失敗しました。</div>';
-  }
 }
 
 async function logout() {
@@ -1160,6 +1281,7 @@ async function logout() {
 }
 
 loadSelections();
+loadAnnualNotes();
 loadHistory();
 </script>
 </body></html>`)
@@ -1250,7 +1372,14 @@ app.get('/admin', (c) => {
     <input type="text" class="search-box" id="searchBox" placeholder="🔍 名前・メールで検索..." oninput="filterMembers()">
     <div style="display:flex;gap:8px">
       <button class="btn-sm btn-export" onclick="exportCSV()"><i class="fas fa-file-excel"></i> Excel (CSV) ダウンロード</button>
+    
+    <div class="notes-card">
+      <h2><i class="fas fa-bullseye"></i> 今年度の目標 <span style="font-size:12px;color:#888;font-weight:500" id="fyLabel"></span></h2>
+      <textarea id="annualGoal" placeholder="例：月に1回は授業づくりの相談をする、FWに1回参加する など"></textarea>
+      <div class="notes-meta"><span>※自分だけが見られます</span><span id="annualSavedAt"></span></div>
     </div>
+
+</div>
   </div>
 
   <table class="member-table">
