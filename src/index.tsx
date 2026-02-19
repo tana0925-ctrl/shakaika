@@ -970,12 +970,12 @@ app.get('/mypage', (c) => {
         <div class="subtitle">授業も、つながりも。あなたのペースで歩むガイドマップ</div>
       </div>
     </div>
-
     <div class="notes-card" style="border-style:solid;border-color:#ffe0b2;margin-top:16px">
       <h2 style="color:#e65100"><i class="fas fa-bullseye"></i> 今年度の目標 <span style="font-size:12px;color:#888;font-weight:500" id="fyLabel"></span></h2>
       <textarea id="annualGoal" placeholder="例：月に1回は授業づくりの相談をする、FWに1回参加する など"></textarea>
       <div class="notes-meta"><span>※自分だけが見られます</span><span id="annualSavedAt"></span></div>
     </div>
+
 
     <div class="scroll-hint"><i class="fas fa-arrows-alt-h"></i> 横にスクロールできます</div>
     <table>
@@ -1049,9 +1049,9 @@ app.get('/mypage', (c) => {
   </div>
 
   <div class="save-area">
-    <button class="btn-sm btn-save" onclick="saveSelections()"><i class="fas fa-save"></i> 保存する</button>
-    <button class="btn-sm" style="background:#eee;color:#666;padding:10px 20px;border:none;border-radius:10px;margin-left:8px;cursor:pointer;font-family:inherit;font-weight:700" onclick="window.print()"><i class="fas fa-print"></i> 印刷する</button>
-    <div class="save-status" id="saveStatus"><i class="fas fa-check-circle"></i> 保存しました</div>
+    <button id="btnSave" type="button" class="btn-sm btn-save" onclick="saveSelections()"><i class="fas fa-save"></i> 保存する</button>
+    <button id="btnPrint" type="button" class="btn-sm" style="background:#eee;color:#666;padding:10px 20px;border:none;border-radius:10px;margin-left:8px;cursor:pointer;font-family:inherit;font-weight:700" onclick="handlePrint()"><i class="fas fa-print"></i> 印刷する</button>
+    <div class="save-status" id="saveStatus"></div>
   </div>
 
   <div class="history-card">
@@ -1068,13 +1068,18 @@ app.get('/mypage', (c) => {
 <script>
 const token = localStorage.getItem('token');
 const user = JSON.parse(localStorage.getItem('user') || 'null');
-if (!token || !user) { window.location.href = '/login'; }
 
-document.getElementById('userName').textContent = user ? (user.name + ' さん' + (user.school ? '（' + user.school + '）' : '')) : '';
-if (user && user.role === 'admin') {
-  document.getElementById('adminLink').innerHTML = '<a href="/admin" class="btn-sm btn-admin" style="text-decoration:none"><i class="fas fa-cog"></i> 管理者</a> <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:#ff6f00;color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>';
+const viewpoints = ['lesson_plan','lesson_practice','student_eval','connection','research'];
+const selectedByVp = Object.create(null);
+let selectionsLoaded = false;
+
+function requireAuth() {
+  if (!token || !user) {
+    window.location.href = '/login';
+    return false;
+  }
+  return true;
 }
-
 
 function currentFY() {
   const d = new Date();
@@ -1089,6 +1094,26 @@ function esc(s) {
   return (s ?? '').toString().replace(/[&<>"']/g, (ch) => ({
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'
   }[ch]));
+}
+
+function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs || 12000);
+  const opts = Object.assign({}, options || {}, { signal: controller.signal });
+  return fetch(url, opts).finally(() => clearTimeout(id));
+}
+
+function showSaveStatus(message, ok) {
+  const el = document.getElementById('saveStatus');
+  if (!el) return;
+  const safe = esc(message || '');
+  el.style.display = 'block';
+  el.style.background = ok ? '#e8f5e9' : '#ffebee';
+  el.style.color = ok ? '#2e7d32' : '#c62828';
+  el.innerHTML = (ok ? '<i class="fas fa-check-circle"></i> ' : '<i class="fas fa-exclamation-triangle"></i> ') + safe;
+
+  if (showSaveStatus._t) clearTimeout(showSaveStatus._t);
+  showSaveStatus._t = setTimeout(() => { el.style.display = 'none'; }, 4000);
 }
 
 function setupFYSelect() {
@@ -1110,7 +1135,7 @@ function setupFYSelect() {
 function changeFY() {
   const sel = document.getElementById('fySelect');
   if (!sel) return;
-  activeFY = parseInt(sel.value);
+  activeFY = parseInt(sel.value, 10);
   const label = document.getElementById('fyLabel');
   if (label) label.textContent = '(' + activeFY + '年度)';
   loadAnnualNotes();
@@ -1119,32 +1144,42 @@ function changeFY() {
 
 async function loadAnnualNotes() {
   try {
-    const res = await fetch('/api/me/annual-notes?fy=' + activeFY, { headers: { 'Authorization': 'Bearer ' + token } });
+    const res = await fetchWithTimeout('/api/me/annual-notes?fy=' + activeFY, { headers: { 'Authorization': 'Bearer ' + token } }, 12000);
     if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+    if (!res.ok) throw new Error('読み込みに失敗しました（' + res.status + '）');
     const data = await res.json();
     const g = document.getElementById('annualGoal');
     const r = document.getElementById('annualReflection');
-    if (g) g.value = data.goal || '';
-    if (r) r.value = data.reflection || '';
+    if (g) g.value = (data.goal || '');
+    if (r) r.value = (data.reflection || '');
+
     const at = data.updated_at ? ('最終更新：' + new Date(data.updated_at).toLocaleString('ja-JP')) : '';
     const s1 = document.getElementById('annualSavedAt');
     const s2 = document.getElementById('annualSavedAt2');
     if (s1) s1.textContent = at;
     if (s2) s2.textContent = at;
-  } catch(e) { console.error(e); }
+  } catch(e) {
+    console.error(e);
+  }
 }
 
 async function saveAnnualNotes() {
-  const g = document.getElementById('annualGoal')?.value || '';
-  const r = document.getElementById('annualReflection')?.value || '';
-  const res = await fetch('/api/me/annual-notes', {
+  const gEl = document.getElementById('annualGoal');
+  const rEl = document.getElementById('annualReflection');
+  const g = gEl ? gEl.value : '';
+  const r = rEl ? rEl.value : '';
+
+  const res = await fetchWithTimeout('/api/me/annual-notes', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
     body: JSON.stringify({ fiscal_year: activeFY, goal: g, reflection: r })
-  });
+  }, 12000);
+
+  if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
   if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || '保存に失敗しました');
+    let data = {};
+    try { data = await res.json(); } catch(e) {}
+    throw new Error(data.error || ('保存に失敗しました（' + res.status + '）'));
   }
 }
 
@@ -1157,138 +1192,254 @@ function toggleDetail(id) {
 function renderHistory(events) {
   const root = document.getElementById('historyList');
   if (!root) return;
+
   if (!events || events.length === 0) {
     root.innerHTML = '<div style="color:#888">この年度は、出席した会がまだありません。</div>';
     return;
   }
+
   let html = '';
-  for (const ev of events) {
-    const answered = !!(ev?.survey?.answered_at);
+  for (const ev0 of events) {
+    const ev = ev0 || {};
+    const answered = !!(ev.survey && ev.survey.answered_at);
     const tag = answered
       ? '<span class="tag tag-answered">回答済み</span>'
       : '<span class="tag tag-pending">未回答</span>';
 
     const detailId = 'detail_' + ev.event_id;
-    const sat = ev?.survey?.satisfaction ? ('満足度：' + ev.survey.satisfaction + ' / 5') : '満足度：—';
-    const comment = ev?.survey?.comment ? esc(ev.survey.comment) : '（自由記述なし）';
+    const sat = (ev.survey && ev.survey.satisfaction) ? ('満足度：' + ev.survey.satisfaction + ' / 5') : '満足度：—';
+    const comment = (ev.survey && ev.survey.comment) ? esc(ev.survey.comment) : '（自由記述なし）';
 
     let qaHtml = '';
     if (Array.isArray(ev.questions) && ev.questions.length > 0) {
       qaHtml += '<div class="qa"><div style="font-weight:700;color:#555;margin-top:8px">追加質問</div>';
-      for (const q of ev.questions) {
+      for (const q0 of ev.questions) {
+        const q = q0 || {};
         const a = (q.answer_text && q.answer_text.trim()) ? esc(q.answer_text) : '（未回答）';
-        qaHtml += '<div class="q">Q. ' + esc(q.question_text) + '</div><div class="a">' + a + '</div>';
+        qaHtml += '<div class="q">Q. ' + esc(q.question_text || '') + '</div><div class="a">' + a + '</div>';
       }
       qaHtml += '</div>';
     }
 
-    html += '<div class="event-item">' +
-      '<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap">' +
-        '<div>' +
-          '<div class="event-title">' + esc(ev.title) + '</div>' +
-          '<div class="event-meta">' +
-            '<span><i class="fas fa-calendar-day"></i> ' + esc(ev.event_date) + '</span>' +
-            tag +
-          '</div>' +
-        '</div>' +
-        '<button class="toggle-btn" onclick="toggleDetail(\'' + detailId + '\')"><i class="fas fa-eye"></i> 振り返りを見る</button>' +
-      '</div>' +
-      '<div class="event-detail" id="' + detailId + '">' +
-        '<div style="font-weight:700;color:#555">' + sat + '</div>' +
-        '<div style="margin-top:6px;color:#555;white-space:pre-wrap">' + comment + '</div>' +
-        qaHtml +
-      '</div>' +
-    '</div>';
+    html += ''
+      + '<div class="event-item">'
+      +   '<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap">'
+      +     '<div>'
+      +       '<div class="event-title">' + esc(ev.title || '') + '</div>'
+      +       '<div class="event-meta">'
+      +         '<span><i class="fas fa-calendar-day"></i> ' + esc(ev.event_date || '') + '</span>'
+      +         tag
+      +       '</div>'
+      +     '</div>'
+      +     '<button class="toggle-btn" type="button" data-detail="' + esc(detailId) + '"><i class="fas fa-eye"></i> 振り返りを見る</button>'
+      +   '</div>'
+      +   '<div class="event-detail" id="' + esc(detailId) + '">'
+      +     '<div style="font-weight:700;color:#555">' + esc(sat) + '</div>'
+      +     '<div style="margin-top:6px;color:#555;white-space:pre-wrap">' + comment + '</div>'
+      +     qaHtml
+      +   '</div>'
+      + '</div>';
   }
+
   root.innerHTML = html;
+
+  // Attach toggle handlers
+  root.querySelectorAll('.toggle-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-detail');
+      if (id) toggleDetail(id);
+    });
+  });
 }
 
 async function loadHistory() {
   const root = document.getElementById('historyList');
   if (root) root.textContent = '読み込み中...';
   try {
-    const res = await fetch('/api/me/history?fy=' + activeFY, { headers: { 'Authorization': 'Bearer ' + token } });
+    const res = await fetchWithTimeout('/api/me/history?fy=' + activeFY, { headers: { 'Authorization': 'Bearer ' + token } }, 12000);
     if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+    if (!res.ok) throw new Error('読み込みに失敗しました（' + res.status + '）');
     const data = await res.json();
-    renderHistory(data.events || []);
+    renderHistory((data && data.events) ? data.events : []);
   } catch(e) {
     console.error(e);
-    if (root) root.innerHTML = '<div style="color:#c62828">読み込みに失敗しました</div>';
+    if (root) root.innerHTML = '<div style="color:#c62828">読み込みに失敗しました（通信が不安定か、サーバーが応答していません）</div>';
   }
 }
 
-setupFYSelect();
 function selectCell(td) {
-  const vp = td.dataset.vp;
-  const step = td.dataset.step;
-  // Deselect same viewpoint
-  document.querySelectorAll('.col-step[data-vp="'+vp+'"]').forEach(el => {
-    if (el !== td) { el.classList.remove('selected'); }
+  const vp = td.getAttribute('data-vp') || '';
+  const step = parseInt(td.getAttribute('data-step') || '0', 10);
+  if (!vp || !step) return;
+
+  // radio behavior per viewpoint
+  document.querySelectorAll('.col-step[data-vp="' + vp + '"]').forEach((el) => el.classList.remove('selected'));
+  td.classList.add('selected');
+
+  const memoEl = td.querySelector('.memo-input');
+  selectedByVp[vp] = { step: step, memo: memoEl ? memoEl.value : '' };
+}
+
+function attachMemoListeners() {
+  document.querySelectorAll('.col-step').forEach((cell) => {
+    const vp = cell.getAttribute('data-vp') || '';
+    const step = parseInt(cell.getAttribute('data-step') || '0', 10);
+    const memo = cell.querySelector('.memo-input');
+    if (!vp || !step || !memo) return;
+    memo.addEventListener('input', () => {
+      const cur = selectedByVp[vp];
+      if (cur && cur.step === step) cur.memo = memo.value;
+    });
   });
-  td.classList.toggle('selected');
+}
+
+function clearSelectionsUI() {
+  document.querySelectorAll('.col-step.selected').forEach((el) => el.classList.remove('selected'));
+  for (const vp of viewpoints) delete selectedByVp[vp];
 }
 
 async function loadSelections() {
+  selectionsLoaded = false;
   try {
-    const res = await fetch('/api/selections', { headers: { 'Authorization': 'Bearer ' + token } });
+    const res = await fetchWithTimeout('/api/selections', { headers: { 'Authorization': 'Bearer ' + token } }, 12000);
     if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+    if (!res.ok) throw new Error('読み込みに失敗しました（' + res.status + '）');
     const data = await res.json();
-    for (const s of data.selections) {
-      const cell = document.querySelector('.col-step[data-vp="'+s.viewpoint+'"][data-step="'+s.step+'"]');
+    clearSelectionsUI();
+
+    const selections = (data && data.selections) ? data.selections : [];
+    for (const s0 of selections) {
+      const s = s0 || {};
+      const vp = s.viewpoint || '';
+      const step = parseInt(String(s.step || '0'), 10);
+      if (!vp || !step) continue;
+
+      // If multiple rows exist for the same viewpoint, the last one wins.
+      selectedByVp[vp] = { step: step, memo: s.memo || '' };
+    }
+
+    for (const vp of viewpoints) {
+      const sel = selectedByVp[vp];
+      if (!sel) continue;
+      const cell = document.querySelector('.col-step[data-vp="' + vp + '"][data-step="' + sel.step + '"]');
       if (cell) {
         cell.classList.add('selected');
         const memo = cell.querySelector('.memo-input');
-        if (memo && s.memo) memo.value = s.memo;
+        if (memo) memo.value = sel.memo || '';
       }
     }
-  } catch(e) { console.error(e); }
+  } catch(e) {
+    console.error(e);
+  } finally {
+    selectionsLoaded = true;
+  }
 }
 
 async function saveSelections() {
-  const selected = document.querySelectorAll('.col-step.selected');
-  const promises = [];
-  // Collect all viewpoints
-  const viewpoints = ['lesson_plan','lesson_practice','student_eval','connection','research'];
-  const selectedVps = new Set();
-
-  for (const cell of selected) {
-    const vp = cell.dataset.vp;
-    const step = parseInt(cell.dataset.step);
-    const memo = cell.querySelector('.memo-input')?.value || '';
-    selectedVps.add(vp);
-    promises.push(fetch('/api/selections', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ viewpoint: vp, step, memo })
-    }));
+  if (!requireAuth()) return;
+  if (!selectionsLoaded) {
+    showSaveStatus('読み込み中です。少し待ってから保存してください。', false);
+    return;
   }
 
-  // Delete unselected viewpoints
-  for (const vp of viewpoints) {
-    if (!selectedVps.has(vp)) {
-      promises.push(fetch('/api/selections/' + vp, {
-        method: 'DELETE',
-        headers: { 'Authorization': 'Bearer ' + token }
-      }));
+  const btn = document.getElementById('btnSave');
+  const prev = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 保存中...';
+  }
+
+  try {
+    const tasks = [];
+
+    for (const vp of viewpoints) {
+      const sel = selectedByVp[vp];
+      if (sel && sel.step) {
+        // Get latest memo from DOM (in case)
+        const cell = document.querySelector('.col-step[data-vp="' + vp + '"][data-step="' + sel.step + '"]');
+        let memo = sel.memo || '';
+        if (cell) {
+          const memoEl = cell.querySelector('.memo-input');
+          if (memoEl) memo = memoEl.value;
+        }
+
+        tasks.push(fetchWithTimeout('/api/selections', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ viewpoint: vp, step: sel.step, memo: memo })
+        }, 12000));
+      } else {
+        tasks.push(fetchWithTimeout('/api/selections/' + vp, {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Bearer ' + token }
+        }, 12000));
+      }
+    }
+
+    // Also save annual notes
+    await Promise.all(tasks);
+    await saveAnnualNotes();
+
+    showSaveStatus('保存しました', true);
+  } catch(e) {
+    console.error(e);
+    showSaveStatus((e && e.message) ? e.message : '保存に失敗しました', false);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = prev;
     }
   }
+}
 
-  await Promise.all(promises);
-  try { await saveAnnualNotes(); } catch(e) { console.error(e); }
-  const status = document.getElementById('saveStatus');
-  status.style.display = 'block';
-  setTimeout(() => status.style.display = 'none', 3000);
+function handlePrint() {
+  try {
+    if (typeof window.print !== 'function') {
+      alert('この端末・ブラウザでは印刷が利用できない場合があります。PCブラウザをお試しください。');
+      return;
+    }
+    window.print();
+  } catch(e) {
+    alert('印刷が利用できませんでした。PCブラウザでお試しください。');
+  }
 }
 
 async function logout() {
   const t = localStorage.getItem('token');
   if (t) { try { await fetch('/api/auth/logout', { method:'POST', headers:{'Authorization':'Bearer '+t} }); } catch(e){} }
-  localStorage.clear(); window.location.href = '/login';
+  localStorage.clear();
+  window.location.href = '/login';
 }
 
-loadSelections();
-loadAnnualNotes();
-loadHistory();
+function init() {
+  if (!requireAuth()) return;
+
+  const userName = document.getElementById('userName');
+  if (userName) userName.textContent = user.name + ' さん' + (user.school ? '（' + user.school + '）' : '');
+
+  if (user.role === 'admin') {
+    const adminLink = document.getElementById('adminLink');
+    if (adminLink) adminLink.innerHTML = '<a href="/admin" class="btn-sm btn-admin" style="text-decoration:none"><i class="fas fa-cog"></i> 管理者</a> <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:#ff6f00;color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>';
+  }
+
+  setupFYSelect();
+  attachMemoListeners();
+
+  const btnSave = document.getElementById('btnSave');
+  if (btnSave) btnSave.addEventListener('click', () => saveSelections());
+  const btnPrint = document.getElementById('btnPrint');
+  if (btnPrint) btnPrint.addEventListener('click', () => handlePrint());
+
+  loadSelections();
+  loadAnnualNotes();
+  loadHistory();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
 </script>
 </body></html>`)
 })
@@ -1379,6 +1530,8 @@ app.get('/admin', (c) => {
     <div style="display:flex;gap:8px">
       <button class="btn-sm btn-export" onclick="exportCSV()"><i class="fas fa-file-excel"></i> Excel (CSV) ダウンロード</button>
     </div>
+
+</div>
   </div>
 
   <table class="member-table">
