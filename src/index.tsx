@@ -971,6 +971,12 @@ app.get('/mypage', (c) => {
       </div>
     </div>
 
+    <div class="notes-card" style="border-style:solid;border-color:#ffe0b2;margin-top:16px">
+      <h2 style="color:#e65100"><i class="fas fa-bullseye"></i> 今年度の目標 <span style="font-size:12px;color:#888;font-weight:500" id="fyLabel"></span></h2>
+      <textarea id="annualGoal" placeholder="例：月に1回は授業づくりの相談をする、FWに1回参加する など"></textarea>
+      <div class="notes-meta"><span>※自分だけが見られます</span><span id="annualSavedAt"></span></div>
+    </div>
+
     <div class="scroll-hint"><i class="fas fa-arrows-alt-h"></i> 横にスクロールできます</div>
     <table>
       <thead><tr>
@@ -1372,14 +1378,7 @@ app.get('/admin', (c) => {
     <input type="text" class="search-box" id="searchBox" placeholder="🔍 名前・メールで検索..." oninput="filterMembers()">
     <div style="display:flex;gap:8px">
       <button class="btn-sm btn-export" onclick="exportCSV()"><i class="fas fa-file-excel"></i> Excel (CSV) ダウンロード</button>
-    
-    <div class="notes-card">
-      <h2><i class="fas fa-bullseye"></i> 今年度の目標 <span style="font-size:12px;color:#888;font-weight:500" id="fyLabel"></span></h2>
-      <textarea id="annualGoal" placeholder="例：月に1回は授業づくりの相談をする、FWに1回参加する など"></textarea>
-      <div class="notes-meta"><span>※自分だけが見られます</span><span id="annualSavedAt"></span></div>
     </div>
-
-</div>
   </div>
 
   <table class="member-table">
