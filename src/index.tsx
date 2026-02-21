@@ -819,8 +819,9 @@ async function handleRegister(e) {
 const token = localStorage.getItem('token');
 if (token) {
   fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } })
-    .then(r => r.json())
-    .then(d => { if (d.user) window.location.href = d.user.role === 'admin' ? '/admin' : '/mypage'; });
+    .then(r => { if (!r.ok) { localStorage.clear(); return {}; } return r.json(); })
+    .then(d => { if (d.user) window.location.href = d.user.role === 'admin' ? '/admin' : '/mypage'; })
+    .catch(() => { localStorage.clear(); });
 }
 </script>
 </body></html>`)
@@ -1557,7 +1558,7 @@ app.get('/admin', (c) => {
 <script>
 const token = localStorage.getItem('token');
 const user = JSON.parse(localStorage.getItem('user') || 'null');
-if (!token || !user || user.role !== 'admin') { window.location.href = '/login'; }
+if (!token || !user || user.role !== 'admin') { window.location.href = '/login'; throw new Error('redirect'); }
 
 let allMembers = [];
 const vpKeys = ['lesson_plan','lesson_practice','student_eval','connection','research'];
@@ -1928,7 +1929,7 @@ app.get('/admin/events', (c) => {
 <script>
 const token = localStorage.getItem('token');
 const user = JSON.parse(localStorage.getItem('user')||'null');
-if (!token||!user||user.role!=='admin') window.location.href='/login';
+if (!token||!user||user.role!=='admin') { window.location.href='/login'; throw new Error('redirect'); }
 
 let qCount = 0;
 function addQuestion() {
