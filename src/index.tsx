@@ -232,6 +232,37 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
   return c.json({ user: c.get('user') })
 })
 
+// Update my profile (currently: school only)
+app.post('/api/me/profile', authMiddleware, async (c) => {
+  const u = c.get('user')
+  const body = await c.req.json().catch(() => ({} as any))
+  const schoolRaw = (body && typeof body.school === 'string') ? body.school : ''
+  const school = schoolRaw.trim()
+
+  if (!school) {
+    return c.json({ error: '学校名を入力してください' }, 400)
+  }
+  if (school.length > 100) {
+    return c.json({ error: '学校名が長すぎます（100文字以内）' }, 400)
+  }
+
+  await c.env.DB
+    .prepare("UPDATE users SET school = ?, updated_at = datetime('now') WHERE id = ?")
+    .bind(school, u.id)
+    .run()
+
+  const updated = await c.env.DB
+    .prepare('SELECT id, name, email, school, role FROM users WHERE id = ?')
+    .bind(u.id)
+    .first()
+
+  if (!updated) {
+    return c.json({ error: '更新に失敗しました' }, 500)
+  }
+
+  return c.json({ user: updated })
+})
+
 // ========== Selections API ==========
 app.get('/api/selections', authMiddleware, async (c) => {
   const user = c.get('user')
@@ -291,7 +322,7 @@ app.get('/api/me/annual-notes', authMiddleware, async (c) => {
   const fiscalYear = Number.isFinite(fy) ? fy : getCurrentFiscalYear()
 
   const row = await c.env.DB.prepare(
-    'SELECT fiscal_year, goal, reflection, updated_at FROM annual_notes WHERE user_id = ? AND fiscal_year = ?'
+    'SELECT fiscal_year, goal, reflection, datetime(updated_at, "+9 hours") as updated_at FROM annual_notes WHERE user_id = ? AND fiscal_year = ?'
   ).bind(user.id, fiscalYear).first() as any
 
   return c.json({
@@ -408,7 +439,8 @@ app.get('/api/me/history', authMiddleware, async (c) => {
 // ========== Admin API ==========
 app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
-    `SELECT u.id, u.name, u.school, u.email, u.role, u.created_at,
+    `SELECT u.id, u.name, u.school, u.email, u.role,
+      datetime(u.created_at, '+9 hours') as created_at,
       GROUP_CONCAT(s.viewpoint || ':' || s.step || ':' || COALESCE(s.memo,''), '||') as selections_raw
      FROM users u
      LEFT JOIN selections s ON u.id = s.user_id
@@ -460,6 +492,30 @@ app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) 
   await c.env.DB.prepare('DELETE FROM selections WHERE user_id = ?').bind(id).run()
   await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id).run()
   return c.json({ success: true })
+})
+
+// Admin: Annual Notes (goal/reflection)
+app.get('/api/admin/annual-notes', authMiddleware, adminMiddleware, async (c) => {
+  const userId = parseInt(c.req.query('user_id') || '')
+  const fy = parseInt(c.req.query('fy') || '')
+
+  if (!Number.isFinite(userId) || userId <= 0) {
+    return c.json({ error: 'user_id が不正です' }, 400)
+  }
+
+  // FY未指定なら今年度
+  const fiscalYear = Number.isFinite(fy) ? fy : getCurrentFiscalYear()
+
+  const row = await c.env.DB.prepare(
+    'SELECT fiscal_year, goal, reflection, datetime(updated_at, "+9 hours") as updated_at FROM annual_notes WHERE user_id = ? AND fiscal_year = ?'
+  ).bind(userId, fiscalYear).first() as any
+
+  return c.json({
+    fiscal_year: fiscalYear,
+    goal: row?.goal || '',
+    reflection: row?.reflection || '',
+    updated_at: row?.updated_at || null
+  })
 })
 
 // ========== CSV Export ==========
@@ -651,11 +707,24 @@ app.get('/api/events/:code', authMiddleware, async (c) => {
 app.post('/api/events/:code/attend', authMiddleware, async (c) => {
   const code = c.req.param('code')
   const db = c.env.DB
-  const event = await db.prepare('SELECT * FROM events WHERE event_code = ? AND is_active = 1').bind(code).first() as any
+  const event = await db
+    .prepare('SELECT id FROM events WHERE event_code = ? AND is_active = 1')
+    .bind(code)
+    .first() as any
   if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+
   const user = c.get('user')
-  await db.prepare("INSERT OR IGNORE INTO attendances (event_id, user_id, attended_at) VALUES (?,?,datetime('now'))").bind(event.id, user.id).run()
-  return c.json({ success: true })
+
+  // 冪等（idempotent）：同じユーザーが何回叩いても「出席済み」なら成功扱い
+  const result = await db
+    .prepare("INSERT OR IGNORE INTO attendances (event_id, user_id, attended_at) VALUES (?,?,datetime('now'))")
+    .bind(event.id, user.id)
+    .run()
+
+  // D1のmeta.changes: 1なら新規作成、0なら既に存在
+  const attended = (result?.meta?.changes ?? 0) > 0
+
+  return c.json({ success: true, attended })
 })
 
 app.post('/api/events/:code/survey', authMiddleware, async (c) => {
@@ -971,10 +1040,19 @@ app.get('/mypage', (c) => {
         <div class="subtitle">授業も、つながりも。あなたのペースで歩むガイドマップ</div>
       </div>
     </div>
+    <div class="notes-card" style="border-style:solid;border-color:#c8e6c9;margin-top:16px">
+      <h2 style="color:#1b5e20"><i class="fas fa-school"></i> 学校名（異動したら更新してください）</h2>
+      <input id="schoolEdit" type="text" placeholder="例：橘小学校" style="width:100%;padding:10px 12px;border:2px solid #e0d6c8;border-radius:10px;font-size:14px;font-family:inherit" />
+      <div class="notes-meta"><span id="schoolSaveStatus" style="font-weight:700"></span></div>
+      <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
+        <button id="btnSchoolSave" type="button" class="btn-sm btn-save" style="background:#2e7d32"><i class="fas fa-save"></i> 学校名を保存</button>
+      </div>
+    </div>
+
     <div class="notes-card" style="border-style:solid;border-color:#ffe0b2;margin-top:16px">
       <h2 style="color:#e65100"><i class="fas fa-bullseye"></i> 今年度の目標 <span style="font-size:12px;color:#888;font-weight:500" id="fyLabel"></span></h2>
       <textarea id="annualGoal" placeholder="例：月に1回は授業づくりの相談をする、FWに1回参加する など"></textarea>
-      <div class="notes-meta"><span>※自分だけが見られます</span><span id="annualSavedAt"></span></div>
+      <div class="notes-meta"><span id="annualSavedAt"></span></div>
     </div>
 
 
@@ -1043,15 +1121,15 @@ app.get('/mypage', (c) => {
     <div class="notes-card" style="border-style:solid;border-color:#bbdefb;margin-top:16px">
       <h2 style="color:#1565c0"><i class="fas fa-pen"></i> 今年度の振り返り</h2>
       <textarea id="annualReflection" placeholder="今年度の参加や学び、次につながったことなど"></textarea>
-      <div class="notes-meta"><span>※自分だけが見られます</span><span id="annualSavedAt2"></span></div>
+      <div class="notes-meta"><span id="annualSavedAt2"></span></div>
     </div>
 
 
   </div>
 
   <div class="save-area">
-    <button id="btnSave" type="button" class="btn-sm btn-save" onclick="saveSelections()"><i class="fas fa-save"></i> 保存する</button>
-    <button id="btnPrint" type="button" class="btn-sm" style="background:#eee;color:#666;padding:10px 20px;border:none;border-radius:10px;margin-left:8px;cursor:pointer;font-family:inherit;font-weight:700" onclick="handlePrint()"><i class="fas fa-print"></i> 印刷する</button>
+    <button id="btnSave" type="button" class="btn-sm btn-save"><i class="fas fa-save"></i> 保存する</button>
+    <button id="btnPrint" type="button" class="btn-sm" style="background:#eee;color:#666;padding:10px 20px;border:none;border-radius:10px;margin-left:8px;cursor:pointer;font-family:inherit;font-weight:700"><i class="fas fa-print"></i> 印刷する</button>
     <div class="save-status" id="saveStatus"></div>
   </div>
 
@@ -1068,7 +1146,7 @@ app.get('/mypage', (c) => {
 
 <script>
 const token = localStorage.getItem('token');
-const user = JSON.parse(localStorage.getItem('user') || 'null');
+let user = JSON.parse(localStorage.getItem('user') || 'null');
 
 const viewpoints = ['lesson_plan','lesson_practice','student_eval','connection','research'];
 const selectedByVp = Object.create(null);
@@ -1089,7 +1167,9 @@ function currentFY() {
   return m >= 4 ? y : (y - 1);
 }
 
-let activeFY = currentFY();
+// FYセレクトの表示は「2026年度以降」のみに限定（年度定義は4月始まりのまま）
+const FIRST_FY = 2026;
+let activeFY = Math.max(currentFY(), FIRST_FY);
 
 function esc(s) {
   return (s ?? '').toString().replace(/[&<>"']/g, (ch) => ({
@@ -1117,17 +1197,62 @@ function showSaveStatus(message, ok) {
   showSaveStatus._t = setTimeout(() => { el.style.display = 'none'; }, 4000);
 }
 
+function showSchoolStatus(message, ok) {
+  const el = document.getElementById('schoolSaveStatus');
+  if (!el) return;
+  el.style.color = ok ? '#2e7d32' : '#c62828';
+  el.textContent = message ? message : '';
+  if (showSchoolStatus._t) clearTimeout(showSchoolStatus._t);
+  showSchoolStatus._t = setTimeout(() => { el.textContent = ''; }, 4000);
+}
+
+function updateUserBar() {
+  const userName = document.getElementById('userName');
+  if (userName) userName.textContent = user.name + ' さん' + (user.school ? '（' + user.school + '）' : '');
+}
+
+async function saveSchoolIfChanged(force) {
+  const el = document.getElementById('schoolEdit');
+  if (!el) return;
+  const newSchool = (el.value || '').trim();
+  const oldSchool = (user && user.school) ? String(user.school) : '';
+  if (!force && newSchool === oldSchool) return;
+
+  if (!newSchool) throw new Error('学校名を入力してください');
+
+  const res = await fetchWithTimeout('/api/me/profile', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ school: newSchool })
+  }, 12000);
+
+  if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+  let data = {};
+  try { data = await res.json(); } catch(e) {}
+  if (!res.ok) throw new Error(data.error || ('学校名の更新に失敗しました（' + res.status + '）'));
+
+  if (data.user) {
+    user = data.user;
+    localStorage.setItem('user', JSON.stringify(user));
+    updateUserBar();
+  }
+}
+
 function setupFYSelect() {
   const sel = document.getElementById('fySelect');
   if (!sel) return;
-  const now = currentFY();
+
+  const now = Math.max(currentFY(), FIRST_FY);
+  activeFY = Math.max(activeFY, FIRST_FY);
+
   sel.innerHTML = '';
-  for (let y = now; y >= now - 3; y--) {
+  for (let y = now; y >= FIRST_FY; y--) {
     const opt = document.createElement('option');
     opt.value = String(y);
     opt.textContent = y + '年度';
     sel.appendChild(opt);
   }
+
   sel.value = String(activeFY);
   const label = document.getElementById('fyLabel');
   if (label) label.textContent = '(' + activeFY + '年度)';
@@ -1151,8 +1276,12 @@ async function loadAnnualNotes() {
     const data = await res.json();
     const g = document.getElementById('annualGoal');
     const r = document.getElementById('annualReflection');
-    if (g) g.value = (data.goal || '');
-    if (r) r.value = (data.reflection || '');
+
+    // ユーザーが入力中なら上書きしない
+    if (!annualNotesDirty) {
+      if (g) g.value = (data.goal || '');
+      if (r) r.value = (data.reflection || '');
+    }
 
     const at = data.updated_at ? ('最終更新：' + new Date(data.updated_at).toLocaleString('ja-JP')) : '';
     const s1 = document.getElementById('annualSavedAt');
@@ -1164,11 +1293,27 @@ async function loadAnnualNotes() {
   }
 }
 
+let annualNotesDirty = false;
+
+function setAnnualNotesDirty() {
+  annualNotesDirty = true;
+}
+
 async function saveAnnualNotes() {
   const gEl = document.getElementById('annualGoal');
-  const rEl = document.getElementById('annualReflection');
-  const g = gEl ? gEl.value : '';
-  const r = rEl ? rEl.value : '';
+  // 取り違い防止：複数手段で必ず同一IDを取得
+  const rEl = document.getElementById('annualReflection') || document.querySelector('textarea#annualReflection');
+
+  if (!gEl) throw new Error('目標欄が見つかりません。画面を再読み込みしてください。');
+  if (!rEl) throw new Error('振り返り欄が見つかりません。画面を再読み込みしてください。');
+
+  const g = (gEl.value ?? '').toString();
+  const r = (rEl.value ?? '').toString();
+
+  // 入力したつもりでも空が送られてしまう事故を防ぐ
+  if (annualNotesDirty && !g.trim() && !r.trim()) {
+    throw new Error('目標/振り返りが空です。入力欄をクリックして文字が入っているか確認してください。');
+  }
 
   const res = await fetchWithTimeout('/api/me/annual-notes', {
     method: 'POST',
@@ -1182,7 +1327,10 @@ async function saveAnnualNotes() {
     try { data = await res.json(); } catch(e) {}
     throw new Error(data.error || ('保存に失敗しました（' + res.status + '）'));
   }
+
+  annualNotesDirty = false;
 }
+
 
 function toggleDetail(id) {
   const el = document.getElementById(id);
@@ -1344,7 +1492,10 @@ async function saveSelections() {
   }
 
   const btn = document.getElementById('btnSave');
-  const prev = btn ? btn.innerHTML : '';
+  // 二重送信防止
+  if (btn && btn.disabled) return;
+
+  const prev = '<i class="fas fa-save"></i> 保存する';
   if (btn) {
     btn.disabled = true;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 保存中...';
@@ -1376,6 +1527,9 @@ async function saveSelections() {
         }, 12000));
       }
     }
+
+    // Save school if changed
+    await saveSchoolIfChanged(false);
 
     // Also save annual notes
     await Promise.all(tasks);
@@ -1415,8 +1569,27 @@ async function logout() {
 function init() {
   if (!requireAuth()) return;
 
-  const userName = document.getElementById('userName');
-  if (userName) userName.textContent = user.name + ' さん' + (user.school ? '（' + user.school + '）' : '');
+  updateUserBar();
+
+  const schoolEdit = document.getElementById('schoolEdit');
+  if (schoolEdit) schoolEdit.value = user.school || '';
+
+  const btnSchoolSave = document.getElementById('btnSchoolSave');
+  if (btnSchoolSave) btnSchoolSave.addEventListener('click', async () => {
+    try {
+      await saveSchoolIfChanged(true);
+      showSchoolStatus('学校名を更新しました', true);
+    } catch(e) {
+      console.error(e);
+      showSchoolStatus((e && e.message) ? e.message : '学校名の更新に失敗しました', false);
+    }
+  });
+
+  // 入力の取り違い防止（入力したのに空で保存される事故を防ぐ）
+  const gEl = document.getElementById('annualGoal');
+  const rEl = document.getElementById('annualReflection');
+  if (gEl) gEl.addEventListener('input', setAnnualNotesDirty);
+  if (rEl) rEl.addEventListener('input', setAnnualNotesDirty);
 
   if (user.role === 'admin') {
     const adminLink = document.getElementById('adminLink');
@@ -1557,7 +1730,7 @@ app.get('/admin', (c) => {
 
 <script>
 const token = localStorage.getItem('token');
-const user = JSON.parse(localStorage.getItem('user') || 'null');
+let user = JSON.parse(localStorage.getItem('user') || 'null');
 if (!token || !user || user.role !== 'admin') { window.location.href = '/login'; throw new Error('redirect'); }
 
 let allMembers = [];
@@ -1619,21 +1792,92 @@ function filterMembers() {
   renderMembers(filtered);
 }
 
+const ADMIN_FIRST_FY = 2026;
+function getCurrentFiscalYearClient() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth() + 1;
+  const fy = m >= 4 ? y : y - 1;
+  return Math.max(fy, ADMIN_FIRST_FY);
+}
+
+// XSS対策（管理画面でも一応）
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+async function loadAnnualNotesForMember(userId) {
+  const box = document.getElementById('annualNotesContent');
+  if (!box) return;
+  box.textContent = '読み込み中...';
+
+  const fy = getCurrentFiscalYearClient();
+
+  try {
+    const res = await fetch('/api/admin/annual-notes?user_id=' + encodeURIComponent(userId) + '&fy=' + encodeURIComponent(fy), {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (!res.ok) {
+      box.textContent = '読み込みに失敗しました';
+      return;
+    }
+    const data = await res.json();
+    const goal = (data.goal || '').trim();
+    const reflection = (data.reflection || '').trim();
+    const updated = data.updated_at ? ('最終更新: ' + new Date(data.updated_at).toLocaleString('ja-JP')) : '';
+
+    box.innerHTML =
+      '<div style="margin-bottom:10px"><div style="font-weight:700;color:#555;margin-bottom:4px">目標</div>' +
+      '<div style="white-space:pre-wrap;background:#fff;border:1px solid #eee;border-radius:10px;padding:10px">' +
+        (goal ? escapeHtml(goal) : '<span style="color:#999">未入力</span>') +
+      '</div></div>' +
+      '<div><div style="font-weight:700;color:#555;margin-bottom:4px">振り返り</div>' +
+      '<div style="white-space:pre-wrap;background:#fff;border:1px solid #eee;border-radius:10px;padding:10px">' +
+        (reflection ? escapeHtml(reflection) : '<span style="color:#999">未入力</span>') +
+      '</div></div>' +
+      (updated ? '<div style="margin-top:8px;color:#999;font-size:11px">' + escapeHtml(updated) + '</div>' : '');
+  } catch (e) {
+    box.textContent = '読み込みに失敗しました';
+  }
+}
+
 function showDetail(id) {
   const m = allMembers.find(x => x.id === id);
   if (!m) return;
-  let html = '<h2><i class="fas fa-user"></i> ' + m.name + '</h2>';
-  html += '<p style="color:#888;font-size:13px;margin-bottom:20px">' + (m.school ? ('学校名: ' + m.school + ' | ') : '') + m.email + ' | 登録日: ' + (m.created_at || '-') + '</p>';
+
+  const fy = getCurrentFiscalYearClient();
+
+  let html = '<h2><i class="fas fa-user"></i> ' + escapeHtml(m.name) + '</h2>';
+  html += '<p style="color:#888;font-size:13px;margin-bottom:14px">'
+    + (m.school ? ('学校名: ' + escapeHtml(m.school) + ' | ') : '')
+    + escapeHtml(m.email)
+    + ' | 登録日: ' + escapeHtml(m.created_at || '-')
+    + '</p>';
+
+  // 年度目標・振り返り（今年度のみ）
+  html += '<div style="margin:18px 0 18px;padding:14px;border:2px solid #f0f0f0;border-radius:12px;background:#fafafa">'
+    + '<div style="font-weight:700;color:#1a237e;margin-bottom:10px"><i class="fas fa-bullseye"></i> 年度の目標・振り返り（' + fy + '年度）</div>'
+    + '<div id="annualNotesContent" style="font-size:13px;color:#555">読み込み中...</div>'
+    + '</div>';
+
   for (const vp of vpKeys) {
     const sel = m.selections[vp];
-    html += '<div class="detail-item"><div><div class="vp-name">' + vpLabels[vp] + '</div>';
-    if (sel && sel.memo) html += '<div class="memo">' + sel.memo + '</div>';
+    html += '<div class="detail-item"><div><div class="vp-name">' + escapeHtml(vpLabels[vp]) + '</div>';
+    if (sel && sel.memo) html += '<div class="memo">' + escapeHtml(sel.memo) + '</div>';
     html += '</div>' + stepBadge(sel) + '</div>';
   }
+
   html += '<div style="text-align:center;margin-top:24px"><button class="btn-sm" style="background:#eee;color:#555;padding:8px 24px" id="closeDetailBtn">閉じる</button></div>';
   document.getElementById('detailContent').innerHTML = html;
   document.getElementById('closeDetailBtn').addEventListener('click', function() { document.getElementById('detailModal').classList.remove('show'); });
   document.getElementById('detailModal').classList.add('show');
+
+  loadAnnualNotesForMember(id);
 }
 
 async function toggleRole(id, currentRole) {
@@ -1744,7 +1988,7 @@ app.get('/attend/:code', (c) => {
 <script>
 const CODE = '${code}';
 const token = localStorage.getItem('token');
-const user = JSON.parse(localStorage.getItem('user') || 'null');
+let user = JSON.parse(localStorage.getItem('user') || 'null');
 if (!token || !user) {
   document.getElementById('loading').style.display='none';
   document.getElementById('loginPrompt').style.display='block';
@@ -1756,11 +2000,35 @@ async function loadEvent() {
     if (res.status === 401) { localStorage.clear(); document.getElementById('loading').style.display='none'; document.getElementById('loginPrompt').style.display='block'; return; }
     const data = await res.json();
     if (!res.ok) { document.getElementById('loading').innerHTML='<p style="color:#c62828">'+data.error+'</p>'; return; }
-    // Auto attend
+    // Auto attend（落ちにくくするため軽いリトライ付き）
     if (!data.attendance) {
-      await fetch('/api/events/'+CODE+'/attend', { method:'POST', headers:{'Authorization':'Bearer '+token} });
+      await postAttendWithRetry(3);
     }
     renderEvent(data);
+
+  } catch(e) { document.getElementById('loading').innerHTML='<p style="color:#c62828">エラーが発生しました</p>'; }
+}
+
+async function postAttendWithRetry(maxTry) {
+  let lastErr = null;
+  for (let i = 1; i <= (maxTry || 1); i++) {
+    try {
+      const res = await fetch('/api/events/'+CODE+'/attend', { method:'POST', headers:{'Authorization':'Bearer '+token} });
+      if (res.ok) return true;
+      // 4xx はリトライしても意味が薄い
+      if (res.status >= 400 && res.status < 500) {
+        lastErr = new Error('HTTP ' + res.status);
+        break;
+      }
+      lastErr = new Error('HTTP ' + res.status);
+    } catch (e) {
+      lastErr = e;
+    }
+    // 少し待って再試行（0.2s, 0.4s, 0.8s...）
+    await new Promise(r => setTimeout(r, 200 * Math.pow(2, i - 1)));
+  }
+  console.warn('attendance post failed', lastErr);
+  return false;
   } catch(e) { document.getElementById('loading').innerHTML='<p style="color:#c62828">エラーが発生しました</p>'; }
 }
 
@@ -1849,7 +2117,7 @@ async function submitSurvey() {
 app.get('/admin/events', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <title>イベント管理 - 社会科同好会</title>
-<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
 <style>
   .top-bar { background: #1a237e; color: #fff; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
   .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; font-weight: 700; }
@@ -1916,7 +2184,7 @@ app.get('/admin/events', (c) => {
       <div id="customQuestions"></div>
       <button class="btn-add-q" onclick="addQuestion()"><i class="fas fa-plus"></i> 質問を追加</button>
     </div>
-    <div style="margin-top:16px"><button class="btn-create" onclick="createEvent()"><i class="fas fa-paper-plane"></i> 作成する</button></div>
+    <div style="margin-top:16px"><button class="btn-create" onclick="submitCreateEvent()"><i class="fas fa-paper-plane"></i> 作成する</button></div>
   </div>
   <div class="card">
     <h3><i class="fas fa-list"></i> イベント一覧</h3>
@@ -1945,7 +2213,7 @@ function addQuestion() {
   div.appendChild(item);
 }
 
-async function createEvent() {
+async function submitCreateEvent() {
   const title = document.getElementById('evTitle').value;
   const event_date = document.getElementById('evDate').value;
   const description = document.getElementById('evDesc').value;
@@ -1989,9 +2257,14 @@ function showQR(eventId) {
   document.getElementById('closeQrBtn').addEventListener('click', function() { document.getElementById('qrModal').classList.remove('show'); });
   setTimeout(function() {
     var qrEl = document.getElementById('qrCanvas');
-    if (typeof QRCode !== 'undefined' && qrEl) {
-      qrEl.innerHTML = '';
-      new QRCode(qrEl, { text: url, width: 240, height: 240 });
+    if (!qrEl) return;
+    qrEl.innerHTML = '';
+    if (typeof QRCode !== 'undefined') {
+      var canvas = document.createElement('canvas');
+      qrEl.appendChild(canvas);
+      QRCode.toCanvas(canvas, url, { width: 240, margin: 2 }, function(err) {
+        if (err) qrEl.innerHTML = '<p style="color:#c62828">QR生成エラー: ' + err.message + '<br>URL: ' + url + '</p>';
+      });
     } else {
       qrEl.innerHTML = '<p style="color:#c62828">QRコードライブラリの読み込みに失敗しました。<br>URL: '+url+'</p>';
     }

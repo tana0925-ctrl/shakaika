@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
+  school TEXT NOT NULL DEFAULT '',
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('member', 'admin')),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
