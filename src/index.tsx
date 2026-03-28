@@ -1142,7 +1142,7 @@ app.get('/mypage', (c) => {
       </tr></thead>
       <tbody>
         <tr>
-          <td class="col-category cat-class" rowspan="4">授業<br>実践</td>
+          <td class="col-category cat-class" rowspan="5">授業<br>実践</td>
           <td class="col-viewpoint"><div>授業をつくる</div><div style="font-size:9px;color:#888;margin-top:2px">教材研究・構成</div></td>
           <td class="col-step" data-vp="j_lesson_plan" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">基本型をまねる</span><p>教科書や既存の資料を参考にしながら、地理・歴史・公民の基本的な授業を構成してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
           <td class="col-step" data-vp="j_lesson_plan" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">足でかせいでアレンジ</span><p>先輩の基本型を参考にしながら、身近な地域の事例や時事問題を「足でかせいで」仕入れ、生徒の実態に合わせてアレンジしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
@@ -1171,7 +1171,6 @@ app.get('/mypage', (c) => {
           <td class="col-step" data-vp="j_inquiry" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">高度な探究をデザインする</span><p>教科の枠を超えた複雑な社会課題に対して、生徒が自ら問いを立てて解決策を模索する高度な探究をデザインしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
         </tr>
         <tr>
-          <td class="col-category cat-student">生徒<br>理解</td>
           <td class="col-viewpoint"><div>生徒を見る</div><div style="font-size:9px;color:#888;margin-top:2px">観察・評価</div></td>
           <td class="col-step" data-vp="j_student_eval" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">まずザックリ観察する</span><p>最初はザックリでOK！授業中の生徒の表情や発言に目を向け、「理解できてる？」「関心がある？」を感じ取るところから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
           <td class="col-step" data-vp="j_student_eval" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">「わかった」を言葉にさせる</span><p>ノートや発言からの理解を確認しながら、「わかった」を自分の言葉で表現できる場を気負わずに作ってみたい。毎時間できなくてOK！</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
