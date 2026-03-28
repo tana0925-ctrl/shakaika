@@ -537,14 +537,14 @@ app.get('/api/admin/export', authMiddleware, adminMiddleware, async (c) => {
   const vpLabels: Record<string, string> = {
     lesson_plan: '授業をつくる',
     lesson_practice: '授業をする',
-    student_eval: '子供を見る',
+    student_eval: '子どもを見る',
     connection: 'つながる',
     research: '深める'
   }
   const stepLabels: Record<number, string> = {
     1: 'STEP1(まずはここから)',
     2: 'STEP2(自分で工夫する)',
-    3: 'STEP3(みんなと高める)',
+    3: 'STEP3(みんなと深める)',
     4: 'STEP4(未来を創る)'
   }
   const vps = ['lesson_plan', 'lesson_practice', 'student_eval', 'connection', 'research']
@@ -1936,7 +1936,7 @@ if (!token || !user || user.role !== 'admin') { window.location.href = '/login';
 
 let allMembers = [];
 const vpKeys = ['lesson_plan','lesson_practice','student_eval','connection','research'];
-const vpLabels = { lesson_plan:'授業をつくる', lesson_practice:'授業をする', student_eval:'子供を見る', connection:'つながる', research:'深める' };
+const vpLabels = { lesson_plan:'授業をつくる', lesson_practice:'授業をする', student_eval:'子どもを見る', connection:'つながる', research:'深める' };
 const stepLabels = { 1:'STEP1', 2:'STEP2', 3:'STEP3', 4:'STEP4' };
 
 function stepBadge(sel) {
