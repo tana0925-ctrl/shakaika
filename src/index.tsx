@@ -1055,9 +1055,21 @@ app.get('/mypage', (c) => {
       <div class="notes-meta"><span id="annualSavedAt"></span></div>
     </div>
 
+    <div style="display:flex;align-items:center;gap:10px;margin-left:16px">
+      <span style="font-size:13px;font-weight:700;color:#5d4037">📋 校種を選択：</span>
+      <label id="labelElem" style="cursor:pointer;padding:6px 14px;border:2px solid #e65100;border-radius:20px;font-size:13px;font-weight:700;background:#fff3e0;color:#e65100">
+        <input type="radio" name="schoolType" id="radioElem" value="elementary" checked style="margin-right:4px"> 小学校
+      </label>
+      <label id="labelJunior" style="cursor:pointer;padding:6px 14px;border:2px solid #ddd;border-radius:20px;font-size:13px;font-weight:700;background:#fff;color:#888">
+        <input type="radio" name="schoolType" id="radioJunior" value="junior" style="margin-right:4px"> 中学校
+      </label>
+      <label id="labelAdmin" style="cursor:pointer;padding:6px 14px;border:2px solid #ddd;border-radius:20px;font-size:13px;font-weight:700;background:#fff;color:#888">
+        <input type="radio" name="schoolType" id="radioAdmin" value="admin" style="margin-right:4px"> 管理職
+      </label>
+    </div>
 
     <div class="scroll-hint"><i class="fas fa-arrows-alt-h"></i> 横にスクロールできます</div>
-    <table>
+    <table id="tableElem">
       <thead><tr>
         <th colspan="2" style="background-color: #fff8e1; border-bottom: 3px solid #5d4037;">成長の視点</th>
         <th><div class="step-header"><span class="step-label">STEP 1</span><span class="step-desc">🔰 まずはここから</span></div></th>
@@ -1118,6 +1130,134 @@ app.get('/mypage', (c) => {
       <div style="color:#777;text-align:right;max-width:60%">※これは「ここまでやらなきゃいけない」というノルマではありません。<br>今の自分に合った「次の一歩」を見つけるための地図として使ってください。</div>
     </div>
 
+    <table id="tableJunior" style="display:none">
+      <thead><tr>
+        <th colspan="2" style="background-color: #fff8e1; border-bottom: 3px solid #5d4037;">成長の視点</th>
+        <th><div class="step-header"><span class="step-label">STEP 1</span><span class="step-desc">🔰 まずはここから</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 2</span><span class="step-desc">🏃 自分で工夫する</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 3</span><span class="step-desc">🤝 みんなと高める</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 4</span><span class="step-desc">🌏 未来を創る</span></div></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="col-category cat-class" rowspan="4">授業<br>実践</td>
+          <td class="col-viewpoint"><div>授業をつくる</div><div style="font-size:9px;color:#888;margin-top:2px">教材研究・構成</div></td>
+          <td class="col-step" data-vp="j_lesson_plan" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">基本型をまねる</span><p>教科書や既存の資料を使って、地理・歴史・公民の基本的な授業を構成してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_lesson_plan" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">足でかせいでアレンジ</span><p>先輩の基本型を参考にしながら、身近な地域の事例や時事問題を「足でかせいで」仕入れ、生徒の実態に合わせてアレンジしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_lesson_plan" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">生徒の「なぜ？」をうむ</span><p>生徒が「なぜ？」と自然と問いを持てるような教材を仕掛け、社会的な見方・考え方を働かせる授業を構想してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_lesson_plan" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">単元を自分でつくる</span><p>自分で足を使って教材を発掘し、地理・歴史・公民の各分野を横断したオリジナルの単元を構想・提案してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>【資料】</div><div style="font-size:9px;color:#888;margin-top:2px">読み解く・提示する</div></td>
+          <td class="col-step" data-vp="j_material" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">基本資料を読み解く</span><p>教科書の図版や基本資料を読み解き、授業の基本の流れに組み込んでみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_material" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">多様な資料を足で集める</span><p>新聞記事（NIE）や最新の統計データなど、多様な資料を足で稼いで集め、提示を工夫してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_material" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">複数資料を比較・関連付ける</span><p>地図とグラフ、異なる立場の史料など複数の資料を比較・関連付けさせ、生徒の「なぜ？」を引き出してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_material" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">生徒が主体的に資料を読む</span><p>生徒自身が目的に応じて資料を見つけ出し、多面的・多角的に読み解く力を育ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>【対話】</div><div style="font-size:9px;color:#888;margin-top:2px">意見を交わす・議論する</div></td>
+          <td class="col-step" data-vp="j_dialogue" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">つぶやきを拾って広げる</span><p>生徒の些細なつぶやきや疑問を丁寧に拾い、学級全体に広げることから始めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_dialogue" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">自分の考えを言葉にする場を作る</span><p>ペアやグループワークを効果的に取り入れ、自分の考えを言葉にして伝え合う場を作ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_dialogue" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">意見を戦わせる議論を仕掛ける</span><p>歴史的背景や異なる立場をぶつけ合い、意見を戦わせる議論を仕掛けてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_dialogue" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">合意形成に向かう対話を支援する</span><p>生徒同士の対話から新たな価値観を生み出し、社会的な合意形成に向かう話し合いを支援してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>【探究】</div><div style="font-size:9px;color:#888;margin-top:2px">問いを立てる・追究する</div></td>
+          <td class="col-step" data-vp="j_inquiry" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">調べる・まとめる時間を確保する</span><p>授業の中で、基礎的な知識を「調べる」「まとめる」時間をしっかり確保することから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_inquiry" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">自分ごとして調べる学習を仕掛ける</span><p>ICTを活用したり、身近な地域の事象と結びつけたりして、生徒が自分ごととして調べる学習を仕掛けてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_inquiry" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">「大きな問い」で探究サイクルを作る</span><p>単元を貫く「大きな問い」を設定し、生徒が主体的に探究し続けるサイクルを作ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_inquiry" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">高度な探究をデザインする</span><p>教科の枠を超えた複雑な社会課題に対して、生徒が自ら問いを立てて解決策を模索する高度な探究をデザインしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-connect">仲間<br>活動</td>
+          <td class="col-viewpoint"><div>つながる</div><div style="font-size:9px;color:#888;margin-top:2px">仲間・同僚性</div></td>
+          <td class="col-step" data-vp="j_connection" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">場に参加する</span><p>まずはイベントや例会に参加して、雰囲気を楽しむことから始めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_connection" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">横のつながりを作る</span><p>同世代の仲間と悩みを相談し合える関係を作ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_connection" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">縦のつながりを作る</span><p>先輩後輩の垣根を越えて、互いに学び合える関係を築いてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_connection" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">仲間を支える側に回る</span><p>会の運営やイベント企画に関わり、仲間を支える立場で活躍してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-research">研究<br>発信</td>
+          <td class="col-viewpoint"><div>深める</div><div style="font-size:9px;color:#888;margin-top:2px">研究・発信</div></td>
+          <td class="col-step" data-vp="j_research" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">参加を楽しむ</span><p>研究発表会や勉強会に参加して、他の実践に触れることを楽しんでみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_research" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">インプット・刺激を受ける</span><p>先行研究や他校の実践を積極的に学び、自分の授業に活かすヒントを見つけたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_research" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">実践をアウトプット</span><p>自分の実践を体験記録や研究紀要にまとめ、外に向けて発信してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_research" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">理論を磨き合う</span><p>仲間と議論を重ね、実践を理論づけ、全国に発信してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr class="row-action">
+          <td colspan="2" style="text-align:right;font-weight:bold;padding-right:20px;color:#e65100"><i class="fas fa-shoe-prints"></i> おすすめのアクション</td>
+          <td><ul class="action-list"><li><strong>例会・FWにまず参加</strong></li><li><strong>先輩の授業を見学</strong></li><li><strong>懇親会で顔つなぎ</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>地域教材を足で集める</strong></li><li><strong>体験記録を書いてみる</strong></li><li><strong>NIE実践に挑戦</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>模擬授業で腕試し</strong></li><li><strong>研究部で議論する</strong></li><li><strong>イベントを企画する</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>全国大会で発表</strong></li><li><strong>研究紀要をまとめる</strong></li><li><strong>若手の相談相手に</strong></li></ul></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <table id="tableAdmin" style="display:none">
+      <thead><tr>
+        <th colspan="2" style="background-color: #fff8e1; border-bottom: 3px solid #5d4037;">成長の視点</th>
+        <th><div class="step-header"><span class="step-label">STEP 1</span><span class="step-desc">🔰 まず関わる</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 2</span><span class="step-desc">🔧 仕組みをつくる</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 3</span><span class="step-desc">🌱 人を育てる</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 4</span><span class="step-desc">🏛️ 文化を残す</span></div></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="col-category cat-class" rowspan="2">校内<br>支援</td>
+          <td class="col-viewpoint"><div>校内の社会科を支える</div><div style="font-size:9px;color:#888;margin-top:2px">授業参観・助言</div></td>
+          <td class="col-step" data-vp="a_school_support" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">授業を見に行く</span><p>まずは校内の社会科の授業を見に行き、「いいね」と声をかけることから始めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">授業づくりの相談に乗る</span><p>若手が授業で悩んでいるとき、自分の経験をもとに具体的なアドバイスをしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_support" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">校内研修で社会科の視点を入れる</span><p>校内研修の中に社会科の教材研究や授業づくりの時間を位置づけ、教員全体の力を高めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_support" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">社会科が根づく学校をつくる</span><p>学校教育目標に社会科の学びを位置づけ、「社会科が大事にされている学校」の文化をつくりたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>学校経営に社会科を活かす</div><div style="font-size:9px;color:#888;margin-top:2px">カリキュラム・経営</div></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">年間計画を確認する</span><p>自校の社会科の年間計画に目を通し、「この学年で何を学んでいるか」を把握してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">地域素材を学校に持ち込む</span><p>管理職ならではのネットワークを活かして、地域のゲストティーチャーや見学先を紹介してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">カリキュラムを調整する</span><p>社会科と総合・他教科のつながりを意識して、教務と相談しながらカリキュラムを調整してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">地域と学校をつなぐ拠点にする</span><p>社会科の学びを軸に、地域と学校が互いに学び合う仕組みをデザインしたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-connect" rowspan="2">人材<br>育成</td>
+          <td class="col-viewpoint"><div>会員の成長を支える</div><div style="font-size:9px;color:#888;margin-top:2px">指導・助言</div></td>
+          <td class="col-step" data-vp="a_member_support" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">実践記録を読んで感想を伝える</span><p>会員が書いた実践記録や体験記録を読み、「ここが面白い」と感想を伝えることから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_member_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">論文の方向性を一緒に考える</span><p>「何を書きたいか」を一緒に整理し、論文や実践記録の方向づけを手伝ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_member_support" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">論文を書き上げるまで伴走する</span><p>構成から推敲まで、会員が論文を完成させるまで粘り強く伴走してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_member_support" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">書く文化を会に根づかせる</span><p>「書くことが当たり前」の雰囲気をつくり、会員同士が互いの原稿を読み合う文化を育てたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>次世代リーダーを育てる</div><div style="font-size:9px;color:#888;margin-top:2px">後進育成</div></td>
+          <td class="col-step" data-vp="a_leader_dev" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">若手の話を聞く</span><p>若手会員の悩みや思いに耳を傾け、「聞いてもらえる存在」になることから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_leader_dev" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">役割を任せてみる</span><p>例会やイベントの一部を若手に任せ、経験を積ませる場をつくってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_leader_dev" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">一緒に企画・運営する</span><p>大きなイベントや研究大会の企画を若手と一緒に進め、運営のノウハウを伝えたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_leader_dev" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">任せて見守る</span><p>次世代のリーダーに中心を譲り、困ったときだけ支える「見守る」立場で関わりたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-research" rowspan="2">組織<br>・発信</td>
+          <td class="col-viewpoint"><div>同好会の運営に貢献する</div><div style="font-size:9px;color:#888;margin-top:2px">組織運営</div></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会に参加して助言する</span><p>例会や研究会に参加し、管理職の視点から率直な感想や助言を伝えてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の方向性を一緒に考える</span><p>役員会などで会の今後の方向性やテーマについて、自分の意見を積極的に出してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">大会・イベントの運営を支える</span><p>研究大会やフィールドワークの運営面で、校長会や教育委員会との調整役を担ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の未来を描く</span><p>5年後・10年後の会の姿を構想し、持続可能な組織づくりの道筋をつくりたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>外とつなぐ・知見を還元する</div><div style="font-size:9px;color:#888;margin-top:2px">対外連携・還元</div></td>
+          <td class="col-step" data-vp="a_outreach" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">他の研究会の情報を持ち帰る</span><p>校長会や他教科の研究会で得た情報を、同好会に持ち帰って共有してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_outreach" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">外部講師や連携先を紹介する</span><p>大学の先生や他地区の実践家など、管理職のネットワークを活かして会に紹介してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_outreach" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">自分の実践知を語る</span><p>自分がこれまで積み重ねた社会科の実践知や経営知を、講演や寄稿で次世代に伝えてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_outreach" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">社会科教育の価値を広める</span><p>教育委員会や校長会で社会科教育の重要性を発信し、名古屋の社会科の文化を守り育てたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+        </tr>
+        <tr class="row-action">
+          <td colspan="2" style="text-align:right;font-weight:bold;padding-right:20px;color:#e65100"><i class="fas fa-shoe-prints"></i> おすすめのアクション</td>
+          <td><ul class="action-list"><li><strong>例会・FWに参加して助言</strong></li><li><strong>若手の授業を見に行く</strong></li><li><strong>会員の実践記録を読む</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>校内で社会科研修を企画</strong></li><li><strong>論文指導を引き受ける</strong></li><li><strong>外部講師を紹介する</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>大会運営の調整役を担う</strong></li><li><strong>若手と一緒に企画する</strong></li><li><strong>自分の経験を語る場をつくる</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>会の将来構想を描く</strong></li><li><strong>次世代リーダーに託す</strong></li><li><strong>社会科の価値を外に発信する</strong></li></ul></td>
+        </tr>
+      </tbody>
+    </table>
+
     <div class="notes-card" style="border-style:solid;border-color:#bbdefb;margin-top:16px">
       <h2 style="color:#1565c0"><i class="fas fa-pen"></i> 今年度の振り返り</h2>
       <textarea id="annualReflection" placeholder="今年度の参加や学び、次につながったことなど"></textarea>
@@ -1148,7 +1288,10 @@ app.get('/mypage', (c) => {
 const token = localStorage.getItem('token');
 let user = JSON.parse(localStorage.getItem('user') || 'null');
 
-const viewpoints = ['lesson_plan','lesson_practice','student_eval','connection','research'];
+const viewpointsElem = ['lesson_plan','lesson_practice','student_eval','connection','research'];
+const viewpointsJunior = ['j_lesson_plan','j_material','j_dialogue','j_inquiry','j_connection','j_research'];
+const viewpointsAdmin = ['a_school_support','a_school_mgmt','a_member_support','a_leader_dev','a_org_mgmt','a_outreach'];
+let viewpoints = viewpointsElem;
 const selectedByVp = Object.create(null);
 let selectionsLoaded = false;
 
@@ -1444,7 +1587,8 @@ function attachMemoListeners() {
 
 function clearSelectionsUI() {
   document.querySelectorAll('.col-step.selected').forEach((el) => el.classList.remove('selected'));
-  for (const vp of viewpoints) delete selectedByVp[vp];
+  const allViewpoints = [...viewpointsElem, ...viewpointsJunior, ...viewpointsAdmin];
+  for (const vp of allViewpoints) delete selectedByVp[vp];
 }
 
 async function loadSelections() {
@@ -1467,7 +1611,9 @@ async function loadSelections() {
       selectedByVp[vp] = { step: step, memo: s.memo || '' };
     }
 
-    for (const vp of viewpoints) {
+    // Load selections for all viewpoints (all types)
+    const allViewpoints = [...viewpointsElem, ...viewpointsJunior, ...viewpointsAdmin];
+    for (const vp of allViewpoints) {
       const sel = selectedByVp[vp];
       if (!sel) continue;
       const cell = document.querySelector('.col-step[data-vp="' + vp + '"][data-step="' + sel.step + '"]');
@@ -1566,6 +1712,44 @@ async function logout() {
   window.location.href = '/login';
 }
 
+function switchSchoolType(type) {
+  const tableElem = document.getElementById('tableElem');
+  const tableJunior = document.getElementById('tableJunior');
+  const tableAdmin = document.getElementById('tableAdmin');
+  const labelElem = document.getElementById('labelElem');
+  const labelJunior = document.getElementById('labelJunior');
+  const labelAdmin = document.getElementById('labelAdmin');
+
+  // Hide all
+  if (tableElem) tableElem.style.display = 'none';
+  if (tableJunior) tableJunior.style.display = 'none';
+  if (tableAdmin) tableAdmin.style.display = 'none';
+
+  // Reset label styles
+  const defaultStyle = 'cursor:pointer;padding:6px 14px;border:2px solid #ddd;border-radius:20px;font-size:13px;font-weight:700;background:#fff;color:#888';
+  const activeStyle = 'cursor:pointer;padding:6px 14px;border:2px solid #e65100;border-radius:20px;font-size:13px;font-weight:700;background:#fff3e0;color:#e65100';
+  if (labelElem) labelElem.style.cssText = defaultStyle;
+  if (labelJunior) labelJunior.style.cssText = defaultStyle;
+  if (labelAdmin) labelAdmin.style.cssText = defaultStyle;
+
+  if (type === 'elementary') {
+    if (tableElem) tableElem.style.display = '';
+    if (labelElem) labelElem.style.cssText = activeStyle;
+    viewpoints = viewpointsElem;
+  } else if (type === 'junior') {
+    if (tableJunior) tableJunior.style.display = '';
+    if (labelJunior) labelJunior.style.cssText = activeStyle;
+    viewpoints = viewpointsJunior;
+  } else if (type === 'admin') {
+    if (tableAdmin) tableAdmin.style.display = '';
+    if (labelAdmin) labelAdmin.style.cssText = activeStyle;
+    viewpoints = viewpointsAdmin;
+  }
+
+  // Reload selections for the current type
+  loadSelections();
+}
+
 function init() {
   if (!requireAuth()) return;
 
@@ -1598,6 +1782,13 @@ function init() {
 
   setupFYSelect();
   attachMemoListeners();
+
+  const radioElem = document.getElementById('radioElem');
+  const radioJunior = document.getElementById('radioJunior');
+  const radioAdmin = document.getElementById('radioAdmin');
+  if (radioElem) radioElem.addEventListener('change', () => switchSchoolType('elementary'));
+  if (radioJunior) radioJunior.addEventListener('change', () => switchSchoolType('junior'));
+  if (radioAdmin) radioAdmin.addEventListener('change', () => switchSchoolType('admin'));
 
   const btnSave = document.getElementById('btnSave');
   if (btnSave) btnSave.addEventListener('click', () => saveSelections());
