@@ -928,7 +928,7 @@ app.get('/mypage', (c) => {
   .col-category { width: 30px; text-align: center; font-weight: bold; writing-mode: vertical-rl; letter-spacing: 3px; color: #fff; border-bottom: 1px solid rgba(255,255,255,0.3); }
   .col-viewpoint { width: 85px; background-color: #fff8e1; font-weight: bold; color: #5d4037; font-family: 'Zen Maru Gothic', sans-serif; }
   .col-step { width: 22%; background-color: #fff; vertical-align: top; cursor: pointer; transition: all 0.2s; position: relative; }
-  .col-step:hover { background-color: #fff8e1; }
+  @media (hover: hover) and (pointer: fine) { .col-step:not(.selected):hover { background-color: #fff8e1; } }
   .col-step.selected { background-color: #fff3e0; box-shadow: inset 0 0 0 3px var(--header-line); border-radius: 2px; }
   .col-step.selected::after { content: '\\2713'; position: absolute; top: 4px; right: 6px; color: var(--header-line); font-size: 18px; font-weight: bold; }
   thead th { text-align: center; background-color: #fff; border-bottom: 3px solid var(--header-line); padding: 8px 5px; }
