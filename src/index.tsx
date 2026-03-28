@@ -1574,12 +1574,20 @@ function selectCell(td) {
   const step = parseInt(td.getAttribute('data-step') || '0', 10);
   if (!vp || !step) return;
 
+  const wasSelected = td.classList.contains('selected');
+
   // radio behavior per viewpoint
   document.querySelectorAll('.col-step[data-vp="' + vp + '"]').forEach((el) => el.classList.remove('selected'));
-  td.classList.add('selected');
 
-  const memoEl = td.querySelector('.memo-input');
-  selectedByVp[vp] = { step: step, memo: memoEl ? memoEl.value : '' };
+  if (wasSelected) {
+    // toggle off: deselect
+    delete selectedByVp[vp];
+  } else {
+    // select new cell
+    td.classList.add('selected');
+    const memoEl = td.querySelector('.memo-input');
+    selectedByVp[vp] = { step: step, memo: memoEl ? memoEl.value : '' };
+  }
 }
 
 function attachMemoListeners() {
