@@ -1451,6 +1451,11 @@ async function saveSchoolIfChanged(force) {
       });
       if (!res.ok) throw new Error('保存に失敗しました');
       if (schoolVal) { user.school = schoolVal; var dispEl = document.getElementById('schoolDisplay'); if (dispEl) dispEl.textContent = schoolVal; }
+      user.district = document.getElementById('profile-district').value;
+      user.experience_years = document.getElementById('profile-experience').value;
+      user.grade = gradeVal;
+      user.position = document.getElementById('profile-position').value;
+      localStorage.setItem('user', JSON.stringify(user));
       btn.textContent = '✅ 保存しました';
       setTimeout(() => { btn.textContent = '💾 プロフィールを保存'; btn.disabled = false; }, 2000);
     } catch (e) {
@@ -1811,10 +1816,19 @@ function switchSchoolType(type) {
   loadSelections();
 }
 
-function init() {
+async function init() {
   if (!requireAuth()) return;
 
   updateUserBar();
+
+  // Fetch latest profile from API
+  try {
+    var meRes = await fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (meRes.ok) {
+      var meData = await meRes.json();
+      if (meData.user) { Object.assign(user, meData.user); localStorage.setItem('user', JSON.stringify(user)); }
+    }
+  } catch(e) { /* use cached data */ }
 
   const schoolEdit = document.getElementById('schoolInput');
   if (schoolEdit) schoolEdit.value = user.school || '';
