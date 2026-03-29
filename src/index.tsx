@@ -1804,8 +1804,6 @@ function switchSchoolType(type) {
   if (type === 'elementary' && tElem) tElem.style.display = '';
   if (type === 'junior' && tJunior) tJunior.style.display = '';
   if (type === 'admin' && tAdmin) tAdmin.style.display = '';
-}
-
   // Reload selections for the current type
   loadSelections();
 }
