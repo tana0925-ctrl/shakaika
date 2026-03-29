@@ -1213,19 +1213,19 @@ app.get('/mypage', (c) => {
       </tr></thead>
       <tbody>
         <tr>
-          <td class="col-category cat-class" rowspan="2">校内<br>支援</td>
-          <td class="col-viewpoint"><div>校内の社会科を支える</div><div style="font-size:9px;color:#888;margin-top:2px">授業参観・助言</div></td>
-          <td class="col-step" data-vp="a_school_support" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">授業を見に行く</span><p>まずは校内の社会科の授業を見に行き、「いいね」と声をかけることから始めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
-          <td class="col-step" data-vp="a_school_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">授業づくりの相談に乗る</span><p>若手が授業で悩んでいるとき、自分の経験をもとに具体的なアドバイスをしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
-          <td class="col-step" data-vp="a_school_support" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">校内研修で社会科の視点を入れる</span><p>校内研修の中に社会科の教材研究や授業づくりの時間を位置づけ、教員全体の力を高めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
-          <td class="col-step" data-vp="a_school_support" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">社会科が根づく学校をつくる</span><p>学校教育目標に社会科の学びを位置づけ、「社会科が大事にされている学校」の文化をつくりたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-category cat-class" rowspan="2">同好会<br>支援</td>
+          <td class="col-viewpoint"><div>会の活動を支える</div><div style="font-size:9px;color:#888;margin-top:2px">例会・研究会支援</div></td>
+          <td class="col-step" data-vp="a_school_support" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会に顔を出す</span><p>まずは例会やイベントに参加して、場の雰囲気づくりに協力するところから始めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会場や資源を調整する</span><p>管理職のつながりを活かして、会場確保や資料準備など裏方で会の活動を支えてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_support" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">研究会の内容充実に関わる</span><p>授業検討会やフィールドワークの企画に関わり、会の学びの質を高めることに貢献したい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_support" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の活動基盤を整える</span><p>年間計画や予算など、会が持続的に活動できる仕組みを整え、安定した運営を支えたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
         </tr>
         <tr>
-          <td class="col-viewpoint"><div>学校経営に社会科を活かす</div><div style="font-size:9px;color:#888;margin-top:2px">カリキュラム・経営</div></td>
-          <td class="col-step" data-vp="a_school_mgmt" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">年間計画を確認する</span><p>自校の社会科の年間計画に目を通し、「この学年で何を学んでいるか」を把握してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
-          <td class="col-step" data-vp="a_school_mgmt" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">地域素材を学校に持ち込む</span><p>管理職ならではのネットワークを活かして、地域のゲストティーチャーや見学先を紹介してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
-          <td class="col-step" data-vp="a_school_mgmt" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">カリキュラムを調整する</span><p>社会科と総合・他教科のつながりを意識して、教務と相談しながらカリキュラムを調整してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
-          <td class="col-step" data-vp="a_school_mgmt" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">地域と学校をつなぐ拠点にする</span><p>社会科の学びを軸に、地域と学校が互いに学び合う仕組みをデザインしたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-viewpoint"><div>会員同士をつなぐ</div><div style="font-size:9px;color:#888;margin-top:2px">交流・居場所づくり</div></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">声をかける</span><p>例会で一人でいる会員や新しい会員に声をかけ、「来てよかった」と思える安心感を生みたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">世代をつなぐ</span><p>ベテランと若手の橋渡し役として、会員同士が気軽に話せる関係づくりを促してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">学び合いの場をつくる</span><p>会員同士が実践を見合ったり、気軽に相談し合えるような関係性やグループをつくりたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の一体感を育てる</span><p>会員みんなが「ここが自分の居場所だ」と思える温かい雰囲気をつくり、会の一体感を育てたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
         </tr>
         <tr>
           <td class="col-category cat-connect" rowspan="2">人材<br>育成</td>
@@ -1259,8 +1259,8 @@ app.get('/mypage', (c) => {
         </tr>
         <tr class="row-action">
           <td colspan="2" style="text-align:right;font-weight:bold;padding-right:20px;color:#e65100"><i class="fas fa-shoe-prints"></i> おすすめのアクション</td>
-          <td><ul class="action-list"><li><strong>例会・FWに参加して助言</strong></li><li><strong>若手の授業を見に行く</strong></li><li><strong>会員の実践記録を読む</strong></li></ul></td>
-          <td><ul class="action-list"><li><strong>校内で社会科研修を企画</strong></li><li><strong>論文指導を引き受ける</strong></li><li><strong>外部講師を紹介する</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>例会・FWに参加して助言</strong></li><li><strong>新しい会員に声をかける</strong></li><li><strong>会員の実践記録を読む</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>会場や資料の準備を手伝う</strong></li><li><strong>論文指導を引き受ける</strong></li><li><strong>外部講師を紹介する</strong></li></ul></td>
           <td><ul class="action-list"><li><strong>大会運営の調整役を担う</strong></li><li><strong>若手と一緒に企画する</strong></li><li><strong>自分の経験を語る場をつくる</strong></li></ul></td>
           <td><ul class="action-list"><li><strong>会の将来構想を描く</strong></li><li><strong>次世代リーダーに託す</strong></li><li><strong>社会科の価値を外に発信する</strong></li></ul></td>
         </tr>
