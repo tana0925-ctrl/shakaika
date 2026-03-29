@@ -1919,7 +1919,9 @@ app.get('/admin', (c) => {
   .btn-export { background: #2e7d32; color: #fff; padding: 10px 24px; font-size: 14px; border-radius: 10px; }
   .btn-export:hover { background: #1b5e20; }
   .btn-danger { background: #c62828; color: #fff; font-size: 11px; padding: 4px 10px; }
-  .btn-warning { background: #ff9800; color: #fff; border: none; border-radius: 4px; cursor: pointer; padding: 4px 8px; font-size: 12px; }
+  .member-table th[data-sort]:hover { background: rgba(0,0,0,0.05); }
+.sort-icon { font-size: 10px; opacity: 0.6; }
+.btn-warning { background: #ff9800; color: #fff; border: none; border-radius: 4px; cursor: pointer; padding: 4px 8px; font-size: 12px; }
   .btn-warning:hover { background: #f57c00; }
   .btn-danger:hover { background: #b71c1c; }
   .btn-role { background: #1565c0; color: #fff; font-size: 11px; padding: 4px 10px; }
@@ -1997,19 +1999,19 @@ app.get('/admin', (c) => {
   </div>
 
   <table class="member-table">
-    <thead><tr>
+    <thead id="memberThead"><tr>
       <th style="width:30px">#</th>
-      <th style="width:120px">名前</th>
-      <th style="width:60px">区</th>
-      <th style="width:50px">経験</th>
-      <th style="width:60px">学年</th>
-      <th style="width:80px">所属</th>
+      <th style="width:120px;cursor:pointer;user-select:none" data-sort="name">名前 <span class="sort-icon" data-col="name"></span></th>
+      <th style="width:60px;cursor:pointer;user-select:none" data-sort="district">区 <span class="sort-icon" data-col="district"></span></th>
+      <th style="width:50px;cursor:pointer;user-select:none" data-sort="experience_years">経験 <span class="sort-icon" data-col="experience_years"></span></th>
+      <th style="width:60px;cursor:pointer;user-select:none" data-sort="grade">学年 <span class="sort-icon" data-col="grade"></span></th>
+      <th style="width:80px;cursor:pointer;user-select:none" data-sort="position">所属 <span class="sort-icon" data-col="position"></span></th>
       <th>授業をつくる</th>
       <th>授業をする</th>
       <th>子供を見る</th>
       <th>つながる</th>
       <th>深める</th>
-      <th style="width:130px">操作</th>
+      <th>操作</th>
     </tr></thead>
     <tbody id="memberBody"></tbody>
   </table>
@@ -2034,8 +2036,35 @@ function stepBadge(sel) {
   return '<span class="step-badge step-'+sel.step+'">STEP'+sel.step+'</span>';
 }
 
+var _allMembers = [];
+var _sortCol = '';
+var _sortDir = 1;
+
+function updateSortHeaders() {
+  document.querySelectorAll('.sort-icon').forEach(function(el) {
+    var col = el.getAttribute('data-col');
+    el.textContent = col === _sortCol ? (_sortDir === 1 ? '▲' : '▼') : '⇅';
+  });
+  document.querySelectorAll('[data-sort]').forEach(function(th) {
+    th.style.background = th.getAttribute('data-sort') === _sortCol ? 'rgba(0,0,0,0.08)' : '';
+  });
+}
+
 function renderMembers(members) {
   const body = document.getElementById('memberBody');
+  _allMembers = members;
+  if (_sortCol) {
+    members = members.slice().sort(function(a, b) {
+      var av = a[_sortCol] != null ? a[_sortCol] : '';
+      var bv = b[_sortCol] != null ? b[_sortCol] : '';
+      if (typeof av === 'number' || typeof bv === 'number') {
+        av = (av === null || av === '') ? -1 : Number(av);
+        bv = (bv === null || bv === '') ? -1 : Number(bv);
+      } else { av = String(av).toLowerCase(); bv = String(bv).toLowerCase(); }
+      return av < bv ? -_sortDir : av > bv ? _sortDir : 0;
+    });
+  }
+  updateSortHeaders();
   body.innerHTML = members.map((m, i) => {
     const roleBadge = m.role === 'admin'
       ? '<span class="role-badge role-admin">管理者</span>'
@@ -2078,6 +2107,17 @@ async function loadMembers() {
   allMembers = data.members;
   renderMembers(allMembers);
   updateStats(allMembers);
+  // Sort header click handler (once)
+  if (!document.getElementById('memberThead')._sortReady) {
+    document.getElementById('memberThead')._sortReady = true;
+    document.getElementById('memberThead').addEventListener('click', function(e) {
+      var th = e.target.closest('[data-sort]');
+      if (!th) return;
+      var col = th.getAttribute('data-sort');
+      if (_sortCol === col) { _sortDir = -_sortDir; } else { _sortCol = col; _sortDir = 1; }
+      renderMembers(_allMembers);
+    });
+  }
 }
 
 function filterMembers() {
