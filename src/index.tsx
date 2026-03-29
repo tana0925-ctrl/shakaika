@@ -1052,48 +1052,53 @@ app.get('/mypage', (c) => {
         <div class="subtitle">授業も、つながりも。あなたのペースで歩むガイドマップ</div>
       </div>
     </div>
-    <div class="notes-card" style="border-style:solid;border-color:#c8e6c9;margin-top:16px">
-      <h2 style="color:#1b5e20"><i class="fas fa-school"></i> 学校名（異動したら更新してください）</h2>
-      <input id="schoolEdit" type="text" placeholder="例：橘小学校" style="width:100%;padding:10px 12px;border:2px solid #e0d6c8;border-radius:10px;font-size:14px;font-family:inherit" />
-      <div class="notes-meta"><span id="schoolSaveStatus" style="font-weight:700"></span></div>
-      <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
-        <button id="btnSchoolSave" type="button" class="btn-sm btn-save" style="background:#2e7d32"><i class="fas fa-save"></i> 学校名を保存</button>
+    <div class="container" style="padding: 12px 16px;">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+        <label style="font-weight:bold; color:#1b5e20; white-space:nowrap; font-size:14px;">学校名</label>
+        <input type="text" id="schoolInput" placeholder="例：橘小学校" style="flex:1; padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:14px;">
+        <button id="btnSchoolSave" type="button" class="btn-sm btn-save" style="background:#2e7d32; white-space:nowrap; font-size:13px; padding:6px 12px;"><i class="fas fa-save"></i> 保存</button>
+        <span id="schoolSaveStatus" style="font-weight:700; font-size:12px;"></span>
       </div>
+      <details id="profileDetails" style="margin-top:4px;">
+        <summary style="cursor:pointer; font-weight:bold; color:#e65100; font-size:13px; padding:4px 0;">📋 プロフィール情報（クリックで開閉）</summary>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
+          <div>
+            <label style="font-size:12px; font-weight:bold; color:#5d4037;">区</label>
+            <select id="profile-district" style="width:100%; padding:5px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
+              <option value="">選択してください</option>
+              <option value="千種区">千種区</option><option value="東区">東区</option>
+              <option value="北区">北区</option><option value="西区">西区</option>
+              <option value="中村区">中村区</option><option value="中区">中区</option>
+              <option value="昭和区">昭和区</option><option value="瑞穂区">瑞穂区</option>
+              <option value="熱田区">熱田区</option><option value="中川区">中川区</option>
+              <option value="港区">港区</option><option value="南区">南区</option>
+              <option value="守山区">守山区</option><option value="緑区">緑区</option>
+              <option value="名東区">名東区</option><option value="天白区">天白区</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:12px; font-weight:bold; color:#5d4037;">経験年数</label>
+            <input type="number" id="profile-experience" placeholder="例：5" min="0" max="50" style="width:100%; padding:5px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
+          </div>
+          <div style="grid-column:1/3;">
+            <label style="font-size:12px; font-weight:bold; color:#5d4037;">担当学年（複数選択OK）</label>
+            <div id="profile-grade-checks" style="display:flex; flex-wrap:wrap; gap:4px; margin-top:4px;">
+            </div>
+          </div>
+          <div>
+            <label style="font-size:12px; font-weight:bold; color:#5d4037;">所属・役職</label>
+            <select id="profile-position" style="width:100%; padding:5px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
+              <option value="">選択してください</option>
+              <option value="小学校教諭">小学校教諭</option><option value="中学校教諭">中学校教諭</option>
+              <option value="主幹教諭">主幹教諭</option>
+              <option value="教頭">教頭</option><option value="校長">校長</option>
+              <option value="指導主事">指導主事</option><option value="その他">その他</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn-save" onclick="saveProfile()" id="btn-save-profile" style="margin-top:8px; font-size:13px; padding:8px 16px;">💾 プロフィールを保存</button>
+      </details>
     </div>
-
-  <div class="container" style="margin-top: 16px;">
-    <p style="font-weight: bold; color: #e65100; margin-bottom: 12px;">📋 プロフィール情報</p>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-      <div>
-        <label style="font-size: 13px; font-weight: bold; color: #5d4037;">区の名前</label>
-        <input type="text" id="profile-district" placeholder="例：千種区" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; margin-top: 4px; box-sizing: border-box;">
-      </div>
-      <div>
-        <label style="font-size: 13px; font-weight: bold; color: #5d4037;">経験年数</label>
-        <input type="number" id="profile-experience" placeholder="例：5" min="0" max="50" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; margin-top: 4px; box-sizing: border-box;">
-      </div>
-      <div>
-        <label style="font-size: 13px; font-weight: bold; color: #5d4037;">今年の担当学年</label>
-        <select id="profile-grade" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; margin-top: 4px; box-sizing: border-box; background: #fff;">
-          <option value="">選択してください</option>
-          <option value="1年">1年</option><option value="2年">2年</option><option value="3年">3年</option>
-          <option value="4年">4年</option><option value="5年">5年</option><option value="6年">6年</option>
-          <option value="中1">中1</option><option value="中2">中2</option><option value="中3">中3</option>
-          <option value="特別支援">特別支援</option><option value="専科">専科</option><option value="管理職">管理職</option><option value="その他">その他</option>
-        </select>
-      </div>
-      <div>
-        <label style="font-size: 13px; font-weight: bold; color: #5d4037;">所属・役職</label>
-        <select id="profile-position" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; margin-top: 4px; box-sizing: border-box; background: #fff;">
-          <option value="">選択してください</option>
-          <option value="小学校教諭">小学校教諭</option><option value="中学校教諭">中学校教諭</option>
-          <option value="教頭">教頭</option><option value="校長">校長</option>
-          <option value="指導主事">指導主事</option><option value="その他">その他</option>
-        </select>
-      </div>
-    </div>
-    <button class="btn-save" onclick="saveProfile()" id="btn-save-profile" style="margin-top: 12px;">💾 プロフィールを保存</button>
-  </div>
 
     <div class="notes-card" style="border-style:solid;border-color:#ffe0b2;margin-top:16px">
       <h2 style="color:#e65100"><i class="fas fa-bullseye"></i> 今年度の目標 <span style="font-size:12px;color:#888;font-weight:500" id="fyLabel"></span></h2>
@@ -1439,13 +1444,15 @@ async function saveSchoolIfChanged(force) {
     if (btn.disabled) return;
     btn.disabled = true; btn.textContent = '保存中...';
     try {
+      const gradeChecks = document.querySelectorAll('#profile-grade-checks input:checked');
+      const gradeVal = Array.from(gradeChecks).map(c => c.value).join(',');
       const res = await fetch('/api/me/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           district: document.getElementById('profile-district').value,
           experience_years: document.getElementById('profile-experience').value,
-          grade: document.getElementById('profile-grade').value,
+          grade: gradeVal,
           position: document.getElementById('profile-position').value
         })
       });
@@ -1844,14 +1851,21 @@ function init() {
 
   const btnSchoolSave = document.getElementById('btnSchoolSave');
     // Load profile data into form
-  const districtEl = document.getElementById('profile-district');
-  const experienceEl = document.getElementById('profile-experience');
-  const gradeEl = document.getElementById('profile-grade');
-  const positionEl = document.getElementById('profile-position');
-  if (districtEl && currentUser.district) districtEl.value = currentUser.district;
-  if (experienceEl && currentUser.experience_years != null) experienceEl.value = currentUser.experience_years;
-  if (gradeEl && currentUser.grade) gradeEl.value = currentUser.grade;
-  if (positionEl && currentUser.position) positionEl.value = currentUser.position;
+    const gradeOptions = ['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','管理職','その他'];
+    const gradeContainer = document.getElementById('profile-grade-checks');
+    if (gradeContainer) {
+      const savedGrades = (currentUser.grade || '').split(',').filter(Boolean);
+      gradeContainer.innerHTML = gradeOptions.map(g => '<label style="display:inline-flex;align-items:center;gap:2px;font-size:12px;background:#f5f5f5;padding:3px 8px;border-radius:12px;cursor:pointer;"><input type="checkbox" value="'+g+'"'+(savedGrades.includes(g)?' checked':'')+' style="margin:0;">'+g+'</label>').join('');
+    }
+    const districtEl = document.getElementById('profile-district');
+    const experienceEl = document.getElementById('profile-experience');
+    const positionEl = document.getElementById('profile-position');
+    if (districtEl && currentUser.district) districtEl.value = currentUser.district;
+    if (experienceEl && currentUser.experience_years != null) experienceEl.value = currentUser.experience_years;
+    if (positionEl && currentUser.position) positionEl.value = currentUser.position;
+    if (currentUser.district || currentUser.experience_years || currentUser.grade || currentUser.position) {
+      const det = document.getElementById('profileDetails'); if (det) det.open = true;
+    }
 
   if (btnSchoolSave) btnSchoolSave.addEventListener('click', async () => {
     try {
