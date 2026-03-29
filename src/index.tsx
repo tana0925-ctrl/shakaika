@@ -2150,7 +2150,7 @@ function renderMembers(members) {
       '<td>' + (i + 1) + '</td>' +
       '<td><strong>' + (m.name || '') + '</strong></td>' +
       '<td>' + (m.district || '-') + '</td>' +
-      '<td>' + (m.experience_years != null ? m.experience_years + '年\n目' : '-') + '</td>' +
+      '<td>' + (m.experience_years != null ? m.experience_years + '年目' : '-') + '</td>' +
       '<td>' + (m.grade || '-') + '</td>' +
       '<td>' + (m.position || '-') + '</td>' +
       vpCells +
