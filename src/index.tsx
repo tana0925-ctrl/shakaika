@@ -59,7 +59,7 @@ async function authMiddleware(c: any, next: any) {
   if (!userId) {
     return c.json({ error: 'セッションが無効です。再ログインしてください' }, 401)
   }
-  const user = await c.env.DB.prepare('SELECT id, name, email, school, role FROM users WHERE id = ?').bind(userId).first()
+  const user = await c.env.DB.prepare('SELECT id, name, email, school, role, district, experience_years, grade, position FROM users WHERE id = ?').bind(userId).first()
   if (!user) {
     return c.json({ error: 'ユーザーが見つかりません' }, 401)
   }
@@ -217,7 +217,7 @@ app.post('/api/auth/login', async (c) => {
   }
   const passwordHash = await hashPassword(password)
   const user = await c.env.DB.prepare(
-    'SELECT id, name, email, school, role FROM users WHERE email = ? AND password_hash = ?'
+    'SELECT id, name, email, school, role, district, experience_years, grade, position FROM users WHERE email = ? AND password_hash = ?'
   ).bind(email, passwordHash).first()
   if (!user) {
     return c.json({ error: 'メールアドレスまたはパスワードが正しくありません' }, 401)
@@ -232,34 +232,28 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
   return c.json({ user: c.get('user') })
 })
 
-// Update my profile (currently: school only)
+// Update my profile
 app.post('/api/me/profile', authMiddleware, async (c) => {
   const u = c.get('user')
   const body = await c.req.json().catch(() => ({} as any))
-  const schoolRaw = (body && typeof body.school === 'string') ? body.school : ''
-  const school = schoolRaw.trim()
-
-  if (!school) {
-    return c.json({ error: '学校名を入力してください' }, 400)
-  }
-  if (school.length > 100) {
-    return c.json({ error: '学校名が長すぎます（100文字以内）' }, 400)
-  }
-
-  await c.env.DB
-    .prepare("UPDATE users SET school = ?, updated_at = datetime('now') WHERE id = ?")
-    .bind(school, u.id)
-    .run()
-
-  const updated = await c.env.DB
-    .prepare('SELECT id, name, email, school, role FROM users WHERE id = ?')
-    .bind(u.id)
-    .first()
-
-  if (!updated) {
-    return c.json({ error: '更新に失敗しました' }, 500)
-  }
-
+  const school = typeof body.school === 'string' ? body.school.trim() : undefined
+  const district = typeof body.district === 'string' ? body.district.trim() : undefined
+  const experience_years = body.experience_years !== undefined ? (body.experience_years === '' || body.experience_years === null ? null : parseInt(body.experience_years, 10)) : undefined
+  const grade = typeof body.grade === 'string' ? body.grade.trim() : undefined
+  const position = typeof body.position === 'string' ? body.position.trim() : undefined
+  const sets = []
+  const params = []
+  if (school !== undefined) { sets.push('school = ?'); params.push(school) }
+  if (district !== undefined) { sets.push('district = ?'); params.push(district) }
+  if (experience_years !== undefined) { sets.push('experience_years = ?'); params.push(experience_years) }
+  if (grade !== undefined) { sets.push('grade = ?'); params.push(grade) }
+  if (position !== undefined) { sets.push('position = ?'); params.push(position) }
+  if (sets.length === 0) return c.json({ error: 'No fields' }, 400)
+  sets.push("updated_at = datetime('now')")
+  params.push(u.id)
+  await c.env.DB.prepare('UPDATE users SET ' + sets.join(', ') + ' WHERE id = ?').bind(...params).run()
+  const updated = await c.env.DB.prepare('SELECT id, name, email, school, role, district, experience_years, grade, position FROM users WHERE id = ?').bind(u.id).first()
+  if (!updated) return c.json({ error: 'Failed' }, 500)
   return c.json({ user: updated })
 })
 
@@ -439,7 +433,7 @@ app.get('/api/me/history', authMiddleware, async (c) => {
 // ========== Admin API ==========
 app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
-    `SELECT u.id, u.name, u.school, u.email, u.role,
+    `SELECT u.id, u.name, u.school, u.email, u.role, u.district, u.experience_years, u.grade, u.position,
       datetime(u.created_at, '+9 hours') as created_at,
       GROUP_CONCAT(s.viewpoint || ':' || s.step || ':' || COALESCE(s.memo,''), '||') as selections_raw
      FROM users u
@@ -521,7 +515,7 @@ app.get('/api/admin/annual-notes', authMiddleware, adminMiddleware, async (c) =>
 // ========== CSV Export ==========
 app.get('/api/admin/export', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
-    'SELECT id, name, school, email, role, created_at FROM users ORDER BY created_at'
+    'SELECT id, name, school, email, role, district, experience_years, grade, position, created_at FROM users ORDER BY created_at'
   ).all()
 
   const { results: allSelections } = await c.env.DB.prepare(
@@ -1067,6 +1061,40 @@ app.get('/mypage', (c) => {
       </div>
     </div>
 
+  <div class="container" style="margin-top: 16px;">
+    <p style="font-weight: bold; color: #e65100; margin-bottom: 12px;">📋 プロフィール情報</p>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+      <div>
+        <label style="font-size: 13px; font-weight: bold; color: #5d4037;">区の名前</label>
+        <input type="text" id="profile-district" placeholder="例：千種区" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; margin-top: 4px; box-sizing: border-box;">
+      </div>
+      <div>
+        <label style="font-size: 13px; font-weight: bold; color: #5d4037;">経験年数</label>
+        <input type="number" id="profile-experience" placeholder="例：5" min="0" max="50" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; margin-top: 4px; box-sizing: border-box;">
+      </div>
+      <div>
+        <label style="font-size: 13px; font-weight: bold; color: #5d4037;">今年の担当学年</label>
+        <select id="profile-grade" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; margin-top: 4px; box-sizing: border-box; background: #fff;">
+          <option value="">選択してください</option>
+          <option value="1年">1年</option><option value="2年">2年</option><option value="3年">3年</option>
+          <option value="4年">4年</option><option value="5年">5年</option><option value="6年">6年</option>
+          <option value="中1">中1</option><option value="中2">中2</option><option value="中3">中3</option>
+          <option value="特別支援">特別支援</option><option value="専科">専科</option><option value="管理職">管理職</option><option value="その他">その他</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size: 13px; font-weight: bold; color: #5d4037;">所属・役職</label>
+        <select id="profile-position" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; margin-top: 4px; box-sizing: border-box; background: #fff;">
+          <option value="">選択してください</option>
+          <option value="小学校教諭">小学校教諭</option><option value="中学校教諭">中学校教諭</option>
+          <option value="教頭">教頭</option><option value="校長">校長</option>
+          <option value="指導主事">指導主事</option><option value="その他">その他</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn-save" onclick="saveProfile()" id="btn-save-profile" style="margin-top: 12px;">💾 プロフィールを保存</button>
+  </div>
+
     <div class="notes-card" style="border-style:solid;border-color:#ffe0b2;margin-top:16px">
       <h2 style="color:#e65100"><i class="fas fa-bullseye"></i> 今年度の目標 <span style="font-size:12px;color:#888;font-weight:500" id="fyLabel"></span></h2>
       <textarea id="annualGoal" placeholder="例：月に1回は授業づくりの相談をする、FWに1回参加する など"></textarea>
@@ -1405,6 +1433,29 @@ async function saveSchoolIfChanged(force) {
     updateUserBar();
   }
 }
+
+  async function saveProfile() {
+    const btn = document.getElementById('btn-save-profile');
+    if (btn.disabled) return;
+    btn.disabled = true; btn.textContent = '保存中...';
+    try {
+      const res = await fetch('/api/me/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          district: document.getElementById('profile-district').value,
+          experience_years: document.getElementById('profile-experience').value,
+          grade: document.getElementById('profile-grade').value,
+          position: document.getElementById('profile-position').value
+        })
+      });
+      if (!res.ok) throw new Error('保存に失敗しました');
+      btn.textContent = '✅ 保存しました';
+      setTimeout(() => { btn.textContent = '💾 プロフィールを保存'; btn.disabled = false; }, 2000);
+    } catch (e) {
+      alert(e.message); btn.textContent = '💾 プロフィールを保存'; btn.disabled = false;
+    }
+  }
 
 function setupFYSelect() {
   const sel = document.getElementById('fySelect');
@@ -1792,6 +1843,16 @@ function init() {
   if (schoolEdit) schoolEdit.value = user.school || '';
 
   const btnSchoolSave = document.getElementById('btnSchoolSave');
+    // Load profile data into form
+  const districtEl = document.getElementById('profile-district');
+  const experienceEl = document.getElementById('profile-experience');
+  const gradeEl = document.getElementById('profile-grade');
+  const positionEl = document.getElementById('profile-position');
+  if (districtEl && currentUser.district) districtEl.value = currentUser.district;
+  if (experienceEl && currentUser.experience_years != null) experienceEl.value = currentUser.experience_years;
+  if (gradeEl && currentUser.grade) gradeEl.value = currentUser.grade;
+  if (positionEl && currentUser.position) positionEl.value = currentUser.position;
+
   if (btnSchoolSave) btnSchoolSave.addEventListener('click', async () => {
     try {
       await saveSchoolIfChanged(true);
@@ -1935,8 +1996,11 @@ app.get('/admin', (c) => {
   <table class="member-table">
     <thead><tr>
       <th style="width:30px">#</th>
-      <th style="width:140px">名前</th>
-      <th style="width:100px">役割</th>
+      <th style="width:120px">名前</th>
+      <th style="width:60px">区</th>
+      <th style="width:50px">経験</th>
+      <th style="width:60px">学年</th>
+      <th style="width:80px">所属</th>
       <th>授業をつくる</th>
       <th>授業をする</th>
       <th>子供を見る</th>
@@ -1976,7 +2040,10 @@ function renderMembers(members) {
     return '<tr>' +
       '<td>'+(i+1)+'</td>' +
       '<td class="member-name" style="cursor:pointer" data-action="detail" data-id="'+m.id+'">' + m.name + '</td>' +
-      '<td>' + roleBadge + '</td>' +
+      '<td>' + (m.district || '-') + '</td>' +
+      '<td>' + (m.experience_years != null ? m.experience_years + '年' : '-') + '</td>' +
+      '<td>' + (m.grade || '-') + '</td>' +
+      '<td>' + (m.position || '-') + '</td>' +
       vpKeys.map(vp => '<td>' + stepBadge(m.selections[vp]) + '</td>').join('') +
       '<td>' +
         (m.role !== 'admin' ? '<button class="btn-sm btn-role" data-action="role" data-id="'+m.id+'" data-role="'+m.role+'"><i class="fas fa-user-shield"></i></button> ' : '') +
