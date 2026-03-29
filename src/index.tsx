@@ -1,3 +1,4 @@
+// build trigger: fix profile school_type placement
 renderMembers(getFilteredMembers())Members());
 }import { cors } from 'hono/cors'
 
