@@ -488,6 +488,17 @@ app.put('/api/admin/members/:id/role', authMiddleware, adminMiddleware, async (c
   return c.json({ success: true })
 })
 
+app.patch('/api/admin/members/:id/school_type', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const { school_type } = await c.req.json()
+  const allowed = ['elementary', 'junior_high', 'admin_staff', '']
+  if (!allowed.includes(school_type)) {
+    return c.json({ error: '無効な校種です' }, 400)
+  }
+  await c.env.DB.prepare('UPDATE users SET school_type = ? WHERE id = ?').bind(school_type, id).run()
+  return c.json({ success: true })
+})
+
 app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id'))
   const user = c.get('user')
@@ -2074,6 +2085,7 @@ app.get('/admin', (c) => {
     <button class="admin-tab active" data-tab="elem" onclick="switchAdminTab('elem')">小学校</button>
     <button class="admin-tab" data-tab="junior" onclick="switchAdminTab('junior')">中学校</button>
     <button class="admin-tab" data-tab="admin" onclick="switchAdminTab('admin')">管理職</button>
+    <button class="admin-tab" data-tab="unset" onclick="switchAdminTab('unset')">未設定</button>
   </div>
   <table class="member-table">
     <thead id="memberThead"><tr></tr></thead>
@@ -2141,14 +2153,16 @@ var _vpTabConfig = {
   }
 };
 
-var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff' };
+var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff', unset: '' };
 function getFilteredMembers() {
   var st = _tabSchoolTypeMap[_activeTab];
+  if (_activeTab === 'unset') return _allMembers.filter(function(m) { return !m.school_type || m.school_type === ''; });
   return _allMembers.filter(function(m) { return m.school_type === st; });
 }
-var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff' };
+var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff', unset: '' };
 function getFilteredMembers() {
   var st = _tabSchoolTypeMap[_activeTab];
+  if (_activeTab === 'unset') return _allMembers.filter(function(m) { return !m.school_type || m.school_type === ''; });
   return _allMembers.filter(function(m) { return m.school_type === st; });
 }
 function switchAdminTab(tab) {
@@ -2159,6 +2173,22 @@ function switchAdminTab(tab) {
     btn.classList.toggle('active', btn.getAttribute('data-tab') === tab);
   });
   renderMembers(getFilteredMembers());
+}
+
+function updateSchoolType(sel) {
+  var id = sel.getAttribute('data-id');
+  var school_type = sel.value;
+  fetch('/api/admin/members/' + id + '/school_type', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ school_type: school_type })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.success) {
+      loadMembers();
+    } else {
+      alert('更新に失敗しました');
+    }
+  }).catch(function() { alert('通信エラーが発生しました'); });
 }
 
 function updateSortHeaders() {
@@ -2188,7 +2218,7 @@ function renderMembers(members) {
   for (var vi = 0; vi < vps.length; vi++) {
     hdr += '<th style="cursor:pointer;user-select:none" data-sort="vp_' + vps[vi].key + '">' + vps[vi].label + ' <span class="sort-icon" data-col="vp_' + vps[vi].key + '"></span></th>';
   }
-  hdr += '<th>操作</th></tr>';
+  hdr += (_activeTab === 'unset' ? '<th>校種設定</th>' : '') + '<th>操作</th></tr>';
   thead.innerHTML = hdr;
 
   // Sort
@@ -2232,6 +2262,7 @@ function renderMembers(members) {
       '<td>' + (m.grade || '-') + '</td>' +
       '<td>' + (m.position || '-') + '</td>' +
       vpCells +
+      (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>事務職員</option></select></td>' : '') +
       '<td style="white-space:nowrap">' +
         '<button class="btn-sm btn-warning" data-action="role" data-id="' + m.id + '" data-role="' + m.role + '" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '"><i class="fas ' + (m.role === 'admin' ? 'fa-user-minus' : 'fa-user-plus') + '"></i></button> ' +
         '<button class="btn-sm btn-danger" data-action="delete" data-id="' + m.id + '" title="削除"><i class="fas fa-trash"></i></button>' +
