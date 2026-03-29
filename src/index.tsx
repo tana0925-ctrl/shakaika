@@ -459,6 +459,10 @@ app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
       school: m.school || '',
       email: m.email,
       role: m.role,
+      district: m.district || '',
+      experience_years: m.experience_years,
+      grade: m.grade || '',
+      position: m.position || '',
       created_at: m.created_at,
       selections
     }
