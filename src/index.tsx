@@ -104,10 +104,6 @@ app.get('/api/init', async (c) => {
     if (!hasSchoolType) {
       await db.prepare("ALTER TABLE users ADD COLUMN school_type TEXT NOT NULL DEFAULT ''").run()
     }
-    const hasSchoolType = Array.isArray(cols) && cols.some((c: any) => c.name === 'school_type')
-    if (!hasSchoolType) {
-      await db.prepare("ALTER TABLE users ADD COLUMN school_type TEXT NOT NULL DEFAULT ''").run()
-    }
   } catch (e) {
     // ignore
   }
@@ -249,7 +245,6 @@ app.post('/api/me/profile', authMiddleware, async (c) => {
   const u = c.get('user')
   const body = await c.req.json().catch(() => ({} as any))
   const school = typeof body.school === 'string' ? body.school.trim() : undefined
-  const school_type = typeof body.school_type === 'string' ? body.school_type.trim() : undefined
   const school_type = typeof body.school_type === 'string' ? body.school_type.trim() : undefined
   const district = typeof body.district === 'string' ? body.district.trim() : undefined
   const experience_years = body.experience_years !== undefined ? (body.experience_years === '' || body.experience_years === null ? null : parseInt(body.experience_years, 10)) : undefined
