@@ -59,7 +59,7 @@ async function authMiddleware(c: any, next: any) {
   if (!userId) {
     return c.json({ error: 'セッションが無効です。再ログインしてください' }, 401)
   }
-  const user = await c.env.DB.prepare('SELECT id, name, email, school, role, district, experience_years, grade, position FROM users WHERE id = ?').bind(userId).first()
+  const user = await c.env.DB.prepare('SELECT id, name, email, school, school_type, role, district, experience_years, grade, position FROM users WHERE id = ?').bind(userId).first()
   if (!user) {
     return c.json({ error: 'ユーザーが見つかりません' }, 401)
   }
@@ -95,6 +95,10 @@ app.get('/api/init', async (c) => {
     const hasSchool = Array.isArray(cols) && cols.some((c: any) => c.name === 'school')
     if (!hasSchool) {
       await db.prepare("ALTER TABLE users ADD COLUMN school TEXT NOT NULL DEFAULT ''").run()
+    }
+    const hasSchoolType = Array.isArray(cols) && cols.some((c: any) => c.name === 'school_type')
+    if (!hasSchoolType) {
+      await db.prepare("ALTER TABLE users ADD COLUMN school_type TEXT NOT NULL DEFAULT ''").run()
     }
   } catch (e) {
     // ignore
@@ -187,7 +191,7 @@ app.get('/api/init', async (c) => {
 
 // ========== Auth API ==========
 app.post('/api/auth/register', async (c) => {
-  const { name, school, email, password } = await c.req.json()
+  const { name, school, school_type, district, experience_years, position, email, password } = await c.req.json()
   if (!name || !school || !email || !password) {
     return c.json({ error: '名前・学校名・メールアドレス・パスワードは必須です' }, 400)
   }
@@ -200,8 +204,8 @@ app.post('/api/auth/register', async (c) => {
   }
   const passwordHash = await hashPassword(password)
   const result = await c.env.DB.prepare(
-    'INSERT INTO users (name, email, school, password_hash, role) VALUES (?, ?, ?, ?, ?)'
-  ).bind(name, email, school, passwordHash, 'member').run()
+    'INSERT INTO users (name, email, school, school_type, district, experience_years, position, password_hash, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(name, email, school || '', school_type || '', district || '', experience_years || null, position || '', passwordHash, 'member').run()
 
   const userId = result.meta.last_row_id as number
   const token = generateToken()
@@ -217,7 +221,7 @@ app.post('/api/auth/login', async (c) => {
   }
   const passwordHash = await hashPassword(password)
   const user = await c.env.DB.prepare(
-    'SELECT id, name, email, school, role, district, experience_years, grade, position FROM users WHERE email = ? AND password_hash = ?'
+    'SELECT id, name, email, school, school_type, role, district, experience_years, grade, position FROM users WHERE email = ? AND password_hash = ?'
   ).bind(email, passwordHash).first()
   if (!user) {
     return c.json({ error: 'メールアドレスまたはパスワードが正しくありません' }, 401)
@@ -237,6 +241,7 @@ app.post('/api/me/profile', authMiddleware, async (c) => {
   const u = c.get('user')
   const body = await c.req.json().catch(() => ({} as any))
   const school = typeof body.school === 'string' ? body.school.trim() : undefined
+  const school_type = typeof body.school_type === 'string' ? body.school_type.trim() : undefined
   const district = typeof body.district === 'string' ? body.district.trim() : undefined
   const experience_years = body.experience_years !== undefined ? (body.experience_years === '' || body.experience_years === null ? null : parseInt(body.experience_years, 10)) : undefined
   const grade = typeof body.grade === 'string' ? body.grade.trim() : undefined
@@ -244,6 +249,7 @@ app.post('/api/me/profile', authMiddleware, async (c) => {
   const sets = []
   const params = []
   if (school !== undefined) { sets.push('school = ?'); params.push(school) }
+  if (school_type !== undefined) { sets.push('school_type = ?'); params.push(school_type); }
   if (district !== undefined) { sets.push('district = ?'); params.push(district) }
   if (experience_years !== undefined) { sets.push('experience_years = ?'); params.push(experience_years) }
   if (grade !== undefined) { sets.push('grade = ?'); params.push(grade) }
@@ -252,7 +258,7 @@ app.post('/api/me/profile', authMiddleware, async (c) => {
   sets.push("updated_at = datetime('now')")
   params.push(u.id)
   await c.env.DB.prepare('UPDATE users SET ' + sets.join(', ') + ' WHERE id = ?').bind(...params).run()
-  const updated = await c.env.DB.prepare('SELECT id, name, email, school, role, district, experience_years, grade, position FROM users WHERE id = ?').bind(u.id).first()
+  const updated = await c.env.DB.prepare('SELECT id, name, email, school, school_type, role, district, experience_years, grade, position FROM users WHERE id = ?').bind(u.id).first()
   if (!updated) return c.json({ error: 'Failed' }, 500)
   return c.json({ user: updated })
 })
@@ -825,6 +831,30 @@ app.get('/login', (c) => {
         <input type="text" id="regSchool" required placeholder="〇〇小学校">
       </div>
       <div class="form-group">
+        <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
+        <select id="regSchoolType" required>
+          <option value="">選択してください</option>
+          <option value="elementary">小学校教諭</option>
+          <option value="junior_high">中学校教諭</option>
+          <option value="admin_staff">管理職</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-map-marker-alt"></i> 区</label>
+        <select id="regDistrict" required>
+          <option value="">選択してください</option>
+          <option>千種区</option><option>東区</option><option>北区</option><option>西区</option><option>中村区</option><option>中区</option><option>昭和区</option><option>瑞穂区</option><option>熱田区</option><option>中川区</option><option>港区</option><option>南区</option><option>守山区</option><option>緑区</option><option>名東区</option><option>天白区</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-calendar-alt"></i> 教員経験年数</label>
+        <input type="number" id="regExperience" required min="1" max="45" placeholder="例: 5">
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-users"></i> 所属（担当学年など）</label>
+        <input type="text" id="regPosition" placeholder="例: 4年担任">
+      </div>
+      <div class="form-group">
         <label><i class="fas fa-envelope"></i> メールアドレス</label>
         <input type="email" id="regEmail" required placeholder="example@email.com">
       </div>
@@ -872,7 +902,7 @@ async function handleRegister(e) {
     const res = await fetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: document.getElementById('regName').value, school: document.getElementById('regSchool').value, email: document.getElementById('regEmail').value, password: document.getElementById('regPassword').value })
+      body: JSON.stringify({ name: document.getElementById('regName').value, school: document.getElementById('regSchool').value, school_type: document.getElementById('regSchoolType').value, district: document.getElementById('regDistrict').value, experience_years: parseInt(document.getElementById('regExperience').value) || null, position: document.getElementById('regPosition').value, email: document.getElementById('regEmail').value, password: document.getElementById('regPassword').value })
     });
     const data = await res.json();
     if (!res.ok) { showError(data.error); return false; }
@@ -1063,7 +1093,16 @@ app.get('/mypage', (c) => {
                 <span id="schoolSaveStatus" style="font-weight:700; font-size:12px;"></span>
       </div>
       <details id="profileDetails" style="margin-top:4px;">
-        <summary style="cursor:pointer; font-weight:bold; color:#e65100; font-size:13px; padding:4px 0;">📋 プロフィール情報（クリックで開閉）</summary>
+        <summary style="cursor:pointer; font-weight:b<div class="form-group">
+            <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
+            <select id="profile-school-type">
+              <option value="">未選択</option>
+              <option value="elementary">小学校教諭</option>
+              <option value="junior_high">中学校教諭</option>
+              <option value="admin_staff">管理職</option>
+            </select>
+          </div>
+          old; color:#e65100; font-size:13px; padding:4px 0;">📋 プロフィール情報（クリックで開閉）</summary>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
           <div>
             <label style="font-size:12px; font-weight:bold; color:#5d4037;">区</label>
@@ -1447,6 +1486,7 @@ async function saveSchoolIfChanged(force) {
         headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           school: schoolVal,
+          school_type: document.getElementById('profile-school-type') ? document.getElementById('profile-school-type').value : '',
           district: document.getElementById('profile-district').value,
           experience_years: document.getElementById('profile-experience').value,
           grade: gradeVal,
@@ -1845,6 +1885,8 @@ async function init() {
       const savedGrades = (user.grade || '').split(',').filter(Boolean);
       gradeContainer.innerHTML = gradeOptions.map(g => '<label style="display:inline-flex;align-items:center;gap:2px;font-size:12px;background:#f5f5f5;padding:3px 8px;border-radius:12px;cursor:pointer;"><input type="checkbox" value="'+g+'"'+(savedGrades.includes(g)?' checked':'')+' style="margin:0;">'+g+'</label>').join('');
     }
+    const schoolTypeEl = document.getElementById('profile-school-type');
+    if (schoolTypeEl && user.school_type) schoolTypeEl.value = user.school_type;
     const districtEl = document.getElementById('profile-district');
     const experienceEl = document.getElementById('profile-experience');
     const positionEl = document.getElementById('profile-position');
@@ -2073,6 +2115,11 @@ var _vpTabConfig = {
   }
 };
 
+var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff' };
+function getFilteredMembers() {
+  var st = _tabSchoolTypeMap[_activeTab];
+  return _allMembers.filter(function(m) { return !m.school_type || m.school_type === '' || m.school_type === st; });
+}
 function switchAdminTab(tab) {
   _activeTab = tab;
   _sortCol = '';
@@ -2080,7 +2127,7 @@ function switchAdminTab(tab) {
   document.querySelectorAll('.admin-tab').forEach(function(btn) {
     btn.classList.toggle('active', btn.getAttribute('data-tab') === tab);
   });
-  renderMembers(_allMembers);
+  renderMembers(getFilteredMembers());
 }
 
 function updateSortHeaders() {
@@ -2189,7 +2236,7 @@ function updateStats(members) {
     else none++;
   });
   document.getElementById('totalCount').textContent = total;
-  document.getElementById('allCount').textContent = all;
+  document.getElementById('completeCount').textContent = all;
   document.getElementById('partialCount').textContent = partial;
   document.getElementById('noneCount').textContent = none;
 }
@@ -2200,13 +2247,13 @@ async function loadMembers() {
   if (res.status === 401 || res.status === 403) { localStorage.clear(); window.location.href = '/login'; return; }
   var data = await res.json();
   _allMembers = data.members || [];
-  renderMembers(_allMembers);
+  renderMembers(getFilteredMembers());
 }
 
 loadMembers();
 function filterMembers() {
   const q = document.getElementById('searchBox').value.toLowerCase();
-  const filtered = allMembers.filter(m => m.name.toLowerCase().includes(q) || (m.school || '').toLowerCase().includes(q) || m.email.toLowerCase().includes(q));
+  const filtered = getFilteredMembers().filter(m => m.name.toLowerCase().includes(q) || (m.school || '').toLowerCase().includes(q) || m.email.toLowerCase().includes(q));
   renderMembers(filtered);
 }
 
