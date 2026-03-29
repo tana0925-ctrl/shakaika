@@ -1921,6 +1921,10 @@ app.get('/admin', (c) => {
   .btn-danger { background: #c62828; color: #fff; font-size: 11px; padding: 4px 10px; }
   .member-table th[data-sort]:hover { background: rgba(0,0,0,0.05); }
 .sort-icon { font-size: 10px; opacity: 0.6; }
+.admin-tabs { display: flex; gap: 0; margin: 12px 0 0 0; }
+.admin-tab { padding: 10px 24px; border: 2px solid #ddd; border-bottom: none; border-radius: 10px 10px 0 0; background: #f5f5f5; color: #888; font-weight: 700; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.2s; }
+.admin-tab.active { background: #fff; color: #e65100; border-color: #e65100; position: relative; z-index: 1; margin-bottom: -2px; }
+.admin-tab:hover:not(.active) { background: #fff3e0; color: #e65100; }
 .btn-warning { background: #ff9800; color: #fff; border: none; border-radius: 4px; cursor: pointer; padding: 4px 8px; font-size: 12px; }
   .btn-warning:hover { background: #f57c00; }
   .btn-danger:hover { background: #b71c1c; }
@@ -1998,21 +2002,13 @@ app.get('/admin', (c) => {
 </div>
   </div>
 
+  <div class="admin-tabs">
+    <button class="admin-tab active" data-tab="elem" onclick="switchAdminTab('elem')">小学校</button>
+    <button class="admin-tab" data-tab="junior" onclick="switchAdminTab('junior')">中学校</button>
+    <button class="admin-tab" data-tab="admin" onclick="switchAdminTab('admin')">管理職</button>
+  </div>
   <table class="member-table">
-    <thead id="memberThead"><tr>
-      <th style="width:30px">#</th>
-      <th style="width:120px;cursor:pointer;user-select:none" data-sort="name">名前 <span class="sort-icon" data-col="name"></span></th>
-      <th style="width:60px;cursor:pointer;user-select:none" data-sort="district">区 <span class="sort-icon" data-col="district"></span></th>
-      <th style="width:50px;cursor:pointer;user-select:none" data-sort="experience_years">経験 <span class="sort-icon" data-col="experience_years"></span></th>
-      <th style="width:60px;cursor:pointer;user-select:none" data-sort="grade">学年 <span class="sort-icon" data-col="grade"></span></th>
-      <th style="width:80px;cursor:pointer;user-select:none" data-sort="position">所属 <span class="sort-icon" data-col="position"></span></th>
-      <th style="cursor:pointer;user-select:none" data-sort="vp_授業をつくる">授業をつくる <span class="sort-icon" data-col="vp_授業をつくる"></span></th>
-      <th style="cursor:pointer;user-select:none" data-sort="vp_授業をする">授業をする <span class="sort-icon" data-col="vp_授業をする"></span></th>
-      <th style="cursor:pointer;user-select:none" data-sort="vp_子供を見る">子供を見る <span class="sort-icon" data-col="vp_子供を見る"></span></th>
-      <th style="cursor:pointer;user-select:none" data-sort="vp_つながる">つながる <span class="sort-icon" data-col="vp_つながる"></span></th>
-      <th style="cursor:pointer;user-select:none" data-sort="vp_深める">深める <span class="sort-icon" data-col="vp_深める"></span></th>
-      <th>操作</th>
-    </tr></thead>
+    <thead id="memberThead"><tr></tr></thead>
     <tbody id="memberBody"></tbody>
   </table>
 </div>
@@ -2039,6 +2035,53 @@ function stepBadge(sel) {
 var _allMembers = [];
 var _sortCol = '';
 var _sortDir = 1;
+var _activeTab = 'elem';
+
+var _vpTabConfig = {
+  elem: {
+    label: '小学校',
+    viewpoints: [
+      { key: 'lesson_plan', label: '授業をつくる' },
+      { key: 'lesson_practice', label: '授業をする' },
+      { key: 'student_eval', label: '子どもを見る' },
+      { key: 'connection', label: 'つながる' },
+      { key: 'research', label: '深める' }
+    ]
+  },
+  junior: {
+    label: '中学校',
+    viewpoints: [
+      { key: 'j_lesson_plan', label: '授業をつくる' },
+      { key: 'j_material', label: '【資料】' },
+      { key: 'j_dialogue', label: '【対話】' },
+      { key: 'j_inquiry', label: '【探究】' },
+      { key: 'j_student_eval', label: '生徒を見る' },
+      { key: 'j_connection', label: 'つながる' },
+      { key: 'j_research', label: '深める' }
+    ]
+  },
+  admin: {
+    label: '管理職',
+    viewpoints: [
+      { key: 'a_school_support', label: '会の活動を支える' },
+      { key: 'a_school_mgmt', label: '会員同士をつなぐ' },
+      { key: 'a_member_support', label: '会員の成長を支える' },
+      { key: 'a_leader_dev', label: '次世代リーダー' },
+      { key: 'a_org_mgmt', label: '運営に貢献' },
+      { key: 'a_outreach', label: '外とつなぐ' }
+    ]
+  }
+};
+
+function switchAdminTab(tab) {
+  _activeTab = tab;
+  _sortCol = '';
+  _sortDir = 1;
+  document.querySelectorAll('.admin-tab').forEach(function(btn) {
+    btn.classList.toggle('active', btn.getAttribute('data-tab') === tab);
+  });
+  renderMembers(_allMembers);
+}
 
 function updateSortHeaders() {
   document.querySelectorAll('.sort-icon').forEach(function(el) {
@@ -2051,8 +2094,26 @@ function updateSortHeaders() {
 }
 
 function renderMembers(members) {
-  const body = document.getElementById('memberBody');
+  var body = document.getElementById('memberBody');
+  var thead = document.getElementById('memberThead');
   _allMembers = members;
+
+  var vps = _vpTabConfig[_activeTab].viewpoints;
+
+  // Build thead dynamically
+  var hdr = '<tr><th style="width:30px">#</th>';
+  hdr += '<th style="width:120px;cursor:pointer;user-select:none" data-sort="name">名前 <span class="sort-icon" data-col="name"></span></th>';
+  hdr += '<th style="width:60px;cursor:pointer;user-select:none" data-sort="district">区 <span class="sort-icon" data-col="district"></span></th>';
+  hdr += '<th style="width:50px;cursor:pointer;user-select:none" data-sort="experience_years">経験 <span class="sort-icon" data-col="experience_years"></span></th>';
+  hdr += '<th style="width:60px;cursor:pointer;user-select:none" data-sort="grade">学年 <span class="sort-icon" data-col="grade"></span></th>';
+  hdr += '<th style="width:80px;cursor:pointer;user-select:none" data-sort="position">所属 <span class="sort-icon" data-col="position"></span></th>';
+  for (var vi = 0; vi < vps.length; vi++) {
+    hdr += '<th style="cursor:pointer;user-select:none" data-sort="vp_' + vps[vi].key + '">' + vps[vi].label + ' <span class="sort-icon" data-col="vp_' + vps[vi].key + '"></span></th>';
+  }
+  hdr += '<th>操作</th></tr>';
+  thead.innerHTML = hdr;
+
+  // Sort
   if (_sortCol) {
     var isVp = _sortCol.indexOf('vp_') === 0;
     var vpKey = isVp ? _sortCol.slice(3) : '';
@@ -2074,52 +2135,37 @@ function renderMembers(members) {
     });
   }
   updateSortHeaders();
-  body.innerHTML = members.map((m, i) => {
-    const roleBadge = m.role === 'admin'
-      ? '<span class="role-badge role-admin">管理者</span>'
-      : '<span class="role-badge role-member">会員</span>';
+
+  // Build rows
+  body.innerHTML = members.map(function(m, i) {
+    var vpCells = '';
+    for (var vi = 0; vi < vps.length; vi++) {
+      var vpName = vps[vi].key;
+      var sel = m.selections ? m.selections[vpName] : null;
+      var stepLabel = sel ? 'STEP' + sel.step : '未選択';
+      var stepClass = sel ? 'step' + sel.step : 'none';
+      vpCells += '<td style="text-align:center"><span class="badge-' + stepClass + '">' + stepLabel + '</span></td>';
+    }
     return '<tr>' +
-      '<td>'+(i+1)+'</td>' +
-      '<td class="member-name" style="cursor:pointer" data-action="detail" data-id="'+m.id+'">' + m.name + '</td>' +
+      '<td>' + (i + 1) + '</td>' +
+      '<td><strong>' + (m.name || '') + '</strong></td>' +
       '<td>' + (m.district || '-') + '</td>' +
-      '<td>' + (m.experience_years != null ? m.experience_years + '年目' : '-') + '</td>' +
+      '<td>' + (m.experience_years != null ? m.experience_years + '年\n目' : '-') + '</td>' +
       '<td>' + (m.grade || '-') + '</td>' +
       '<td>' + (m.position || '-') + '</td>' +
-      vpKeys.map(vp => '<td>' + stepBadge(m.selections[vp]) + '</td>').join('') +
-      '<td>' +
-        (m.id !== user.id ? '<button class="btn-sm ' + (m.role === 'admin' ? 'btn-warning' : 'btn-role') + '" data-action="role" data-id="'+m.id+'" data-role="'+m.role+'" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '">' + (m.role === 'admin' ? '<i class="fas fa-user-minus"></i>' : '<i class="fas fa-user-shield"></i>') + '</button> ' : '') +
-        (m.id !== user.id ? '<button class="btn-sm btn-danger" data-action="delete" data-id="'+m.id+'" data-name="'+m.name+'"><i class="fas fa-trash"></i></button>' : '') +
-      '</td>' +
-    '</tr>';
+      vpCells +
+      '<td style="white-space:nowrap">' +
+        '<button class="btn-sm btn-warning" data-action="role" data-id="' + m.id + '" data-role="' + m.role + '" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '"><i class="fas ' + (m.role === 'admin' ? 'fa-user-minus' : 'fa-user-plus') + '"></i></button> ' +
+        '<button class="btn-sm btn-danger" data-action="delete" data-id="' + m.id + '" title="削除"><i class="fas fa-trash"></i></button>' +
+      '</td></tr>';
   }).join('');
-}
 
-function updateStats(members) {
-  const total = members.filter(m => m.role !== 'admin').length;
-  let complete = 0, partial = 0, none = 0;
-  members.filter(m => m.role !== 'admin').forEach(m => {
-    const count = vpKeys.filter(vp => m.selections[vp]).length;
-    if (count === 5) complete++;
-    else if (count > 0) partial++;
-    else none++;
-  });
-  document.getElementById('totalCount').textContent = total;
-  document.getElementById('completeCount').textContent = complete;
-  document.getElementById('partialCount').textContent = partial;
-  document.getElementById('noneCount').textContent = none;
-}
+  updateStats(members);
 
-async function loadMembers() {
-  const res = await fetch('/api/admin/members', { headers: { 'Authorization': 'Bearer ' + token } });
-  if (res.status === 401 || res.status === 403) { localStorage.clear(); window.location.href = '/login'; return; }
-  const data = await res.json();
-  allMembers = data.members;
-  renderMembers(allMembers);
-  updateStats(allMembers);
-  // Sort header click handler (once)
-  if (!document.getElementById('memberThead')._sortReady) {
-    document.getElementById('memberThead')._sortReady = true;
-    document.getElementById('memberThead').addEventListener('click', function(e) {
+  // Setup sort click handler
+  if (!thead._sortReady) {
+    thead._sortReady = true;
+    thead.addEventListener('click', function(e) {
       var th = e.target.closest('[data-sort]');
       if (!th) return;
       var col = th.getAttribute('data-sort');
@@ -2129,6 +2175,35 @@ async function loadMembers() {
   }
 }
 
+function updateStats(members) {
+  var total = members.length;
+  var all = 0, partial = 0, none = 0;
+  var vps = _vpTabConfig[_activeTab].viewpoints;
+  members.forEach(function(m) {
+    var filled = 0;
+    for (var vi = 0; vi < vps.length; vi++) {
+      if (m.selections && m.selections[vps[vi].key]) filled++;
+    }
+    if (filled === vps.length) all++;
+    else if (filled > 0) partial++;
+    else none++;
+  });
+  document.getElementById('totalCount').textContent = total;
+  document.getElementById('allCount').textContent = all;
+  document.getElementById('partialCount').textContent = partial;
+  document.getElementById('noneCount').textContent = none;
+}
+
+async function loadMembers() {
+  var token = localStorage.getItem('token');
+  var res = await fetch('/api/admin/members', { headers: { 'Authorization': 'Bearer ' + token } });
+  if (res.status === 401 || res.status === 403) { localStorage.clear(); window.location.href = '/login'; return; }
+  var data = await res.json();
+  _allMembers = data.members || [];
+  renderMembers(_allMembers);
+}
+
+loadMembers();
 function filterMembers() {
   const q = document.getElementById('searchBox').value.toLowerCase();
   const filtered = allMembers.filter(m => m.name.toLowerCase().includes(q) || (m.school || '').toLowerCase().includes(q) || m.email.toLowerCase().includes(q));
