@@ -274,7 +274,7 @@ app.post('/api/selections', authMiddleware, async (c) => {
     return c.json({ error: '不正な選択です' }, 400)
   }
 
-  const validViewpoints = ['lesson_plan', 'lesson_practice', 'student_eval', 'connection', 'research']
+  const validViewpoints = ['lesson_plan', 'lesson_practice', 'student_eval', 'connection', 'research', 'j_lesson_plan', 'j_material', 'j_dialogue', 'j_inquiry', 'j_student_eval', 'j_connection', 'j_research', 'a_school_support', 'a_school_mgmt', 'a_member_support', 'a_leader_dev', 'a_org_mgmt', 'a_outreach']
   if (!validViewpoints.includes(viewpoint)) {
     return c.json({ error: '不正な視点です' }, 400)
   }
@@ -1233,7 +1233,7 @@ app.get('/mypage', (c) => {
           <td class="col-viewpoint"><div>深める</div><div style="font-size:9px;color:#888;margin-top:2px">研究・発信</div></td>
           <td class="col-step" data-vp="j_research" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">参加を楽しむ</span><p>同好会の雰囲気を知り、まずは参加を楽しんでみたい。「こんな世界があるんだ！」と感じることから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
           <td class="col-step" data-vp="j_research" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">インプット・刺激を受ける</span><p>中学地理・歴史・公民に関する先輩たちの実践記録を読んでインプットし、刺激を受けたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
-          <td class="col-step" data-vp="j_research" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">実践をアウトプット</span><p>自分の実践を<span class="ss-term">「体験実録」</span>として書き、アウトプットしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
+          <td class="col-step" data-vp="j_research" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">実践をアウトプット</span><p>自分の実践を<span class="ss-term">「体験記録」</span>として書き、アウトプットしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
           <td class="col-step" data-vp="j_research" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">理論を磨き合う</span><p>自分の実践を理論づけ、部員に向けて議論し、理論を磨き合いたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea></td>
         </tr>
         <tr class="row-action">
