@@ -440,7 +440,7 @@ app.get('/api/me/history', authMiddleware, async (c) => {
 // ========== Admin API ==========
 app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
-    `SELECT u.id, u.name, u.school, u.email, u.role, u.district, u.experience_years, u.grade, u.position,
+    `SELECT u.id, u.name, u.school, u.email, u.role, u.district, u.experience_years, u.grade, u.position, u.school_type,
       datetime(u.created_at, '+9 hours') as created_at,
       GROUP_CONCAT(s.viewpoint || ':' || s.step || ':' || COALESCE(s.memo,''), '||') as selections_raw
      FROM users u
@@ -2144,12 +2144,12 @@ var _vpTabConfig = {
 var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff' };
 function getFilteredMembers() {
   var st = _tabSchoolTypeMap[_activeTab];
-  return _allMembers.filter(function(m) { return !m.school_type || m.school_type === '' || m.school_type === st; });
+  return _allMembers.filter(function(m) { return m.school_type === st; });
 }
 var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff' };
 function getFilteredMembers() {
   var st = _tabSchoolTypeMap[_activeTab];
-  return _allMembers.filter(function(m) { return !m.school_type || m.school_type === '' || m.school_type === st; });
+  return _allMembers.filter(function(m) { return m.school_type === st; });
 }
 function switchAdminTab(tab) {
   _activeTab = tab;
