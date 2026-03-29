@@ -1851,7 +1851,6 @@ function init() {
       if (posEl.value) switchSchoolType(positionToSchoolType(posEl.value));
     }
 
-  );
 
   // 入力の取り違い防止（入力したのに空で保存される事故を防ぐ）
   const gEl = document.getElementById('annualGoal');
