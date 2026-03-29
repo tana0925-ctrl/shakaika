@@ -1913,8 +1913,6 @@ async function init() {
     }
     const schoolTypeEl = document.getElementById('profile-school-type');
     if (schoolTypeEl && user.school_type) schoolTypeEl.value = user.school_type;
-    const schoolTypeEl = document.getElementById('profile-school-type');
-    if (schoolTypeEl && user.school_type) schoolTypeEl.value = user.school_type;
     const districtEl = document.getElementById('profile-district');
     const experienceEl = document.getElementById('profile-experience');
     const positionEl = document.getElementById('profile-position');
