@@ -1,6 +1,5 @@
-// build trigger: fix profile school_type placement
-renderMembers(getFilteredMembers())Members());
-}import { cors } from 'hono/cors'
+import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 
 type Bindings = {
   DB: D1Database
