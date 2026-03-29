@@ -2006,11 +2006,11 @@ app.get('/admin', (c) => {
       <th style="width:50px;cursor:pointer;user-select:none" data-sort="experience_years">経験 <span class="sort-icon" data-col="experience_years"></span></th>
       <th style="width:60px;cursor:pointer;user-select:none" data-sort="grade">学年 <span class="sort-icon" data-col="grade"></span></th>
       <th style="width:80px;cursor:pointer;user-select:none" data-sort="position">所属 <span class="sort-icon" data-col="position"></span></th>
-      <th>授業をつくる</th>
-      <th>授業をする</th>
-      <th>子供を見る</th>
-      <th>つながる</th>
-      <th>深める</th>
+      <th style="cursor:pointer;user-select:none" data-sort="vp_授業をつくる">授業をつくる <span class="sort-icon" data-col="vp_授業をつくる"></span></th>
+      <th style="cursor:pointer;user-select:none" data-sort="vp_授業をする">授業をする <span class="sort-icon" data-col="vp_授業をする"></span></th>
+      <th style="cursor:pointer;user-select:none" data-sort="vp_子供を見る">子供を見る <span class="sort-icon" data-col="vp_子供を見る"></span></th>
+      <th style="cursor:pointer;user-select:none" data-sort="vp_つながる">つながる <span class="sort-icon" data-col="vp_つながる"></span></th>
+      <th style="cursor:pointer;user-select:none" data-sort="vp_深める">深める <span class="sort-icon" data-col="vp_深める"></span></th>
       <th>操作</th>
     </tr></thead>
     <tbody id="memberBody"></tbody>
@@ -2054,13 +2054,22 @@ function renderMembers(members) {
   const body = document.getElementById('memberBody');
   _allMembers = members;
   if (_sortCol) {
+    var isVp = _sortCol.indexOf('vp_') === 0;
+    var vpKey = isVp ? _sortCol.slice(3) : '';
     members = members.slice().sort(function(a, b) {
-      var av = a[_sortCol] != null ? a[_sortCol] : '';
-      var bv = b[_sortCol] != null ? b[_sortCol] : '';
-      if (typeof av === 'number' || typeof bv === 'number') {
-        av = (av === null || av === '') ? -1 : Number(av);
-        bv = (bv === null || bv === '') ? -1 : Number(bv);
-      } else { av = String(av).toLowerCase(); bv = String(bv).toLowerCase(); }
+      var av, bv;
+      if (isVp) {
+        av = (a.selections && a.selections[vpKey]) ? a.selections[vpKey].step : 0;
+        bv = (b.selections && b.selections[vpKey]) ? b.selections[vpKey].step : 0;
+        av = Number(av) || 0; bv = Number(bv) || 0;
+      } else {
+        av = a[_sortCol] != null ? a[_sortCol] : '';
+        bv = b[_sortCol] != null ? b[_sortCol] : '';
+        if (typeof av === 'number' || typeof bv === 'number') {
+          av = (av === null || av === '') ? -1 : Number(av);
+          bv = (bv === null || bv === '') ? -1 : Number(bv);
+        } else { av = String(av).toLowerCase(); bv = String(bv).toLowerCase(); }
+      }
       return av < bv ? -_sortDir : av > bv ? _sortDir : 0;
     });
   }
