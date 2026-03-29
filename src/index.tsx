@@ -1109,18 +1109,6 @@ app.get('/mypage', (c) => {
       <div class="notes-meta"><span id="annualSavedAt"></span></div>
     </div>
 
-    <div style="display:flex;align-items:center;gap:10px;margin-left:16px">
-      <span style="font-size:13px;font-weight:700;color:#5d4037">📋 校種を選択：</span>
-      <label id="labelElem" style="cursor:pointer;padding:6px 14px;border:2px solid #e65100;border-radius:20px;font-size:13px;font-weight:700;background:#fff3e0;color:#e65100">
-        <input type="radio" name="schoolType" id="radioElem" value="elementary" checked style="margin-right:4px"> 小学校
-      </label>
-      <label id="labelJunior" style="cursor:pointer;padding:6px 14px;border:2px solid #ddd;border-radius:20px;font-size:13px;font-weight:700;background:#fff;color:#888">
-        <input type="radio" name="schoolType" id="radioJunior" value="junior" style="margin-right:4px"> 中学校
-      </label>
-      <label id="labelAdmin" style="cursor:pointer;padding:6px 14px;border:2px solid #ddd;border-radius:20px;font-size:13px;font-weight:700;background:#fff;color:#888">
-        <input type="radio" name="schoolType" id="radioAdmin" value="admin" style="margin-right:4px"> 管理職
-      </label>
-    </div>
 
     <div class="scroll-hint"><i class="fas fa-arrows-alt-h"></i> 横にスクロールできます</div>
     <div class="footer-note">
@@ -1807,38 +1795,16 @@ async function logout() {
 }
 
 function switchSchoolType(type) {
-  const tableElem = document.getElementById('tableElem');
-  const tableJunior = document.getElementById('tableJunior');
-  const tableAdmin = document.getElementById('tableAdmin');
-  const labelElem = document.getElementById('labelElem');
-  const labelJunior = document.getElementById('labelJunior');
-  const labelAdmin = document.getElementById('labelAdmin');
-
-  // Hide all
-  if (tableElem) tableElem.style.display = 'none';
-  if (tableJunior) tableJunior.style.display = 'none';
-  if (tableAdmin) tableAdmin.style.display = 'none';
-
-  // Reset label styles
-  const defaultStyle = 'cursor:pointer;padding:6px 14px;border:2px solid #ddd;border-radius:20px;font-size:13px;font-weight:700;background:#fff;color:#888';
-  const activeStyle = 'cursor:pointer;padding:6px 14px;border:2px solid #e65100;border-radius:20px;font-size:13px;font-weight:700;background:#fff3e0;color:#e65100';
-  if (labelElem) labelElem.style.cssText = defaultStyle;
-  if (labelJunior) labelJunior.style.cssText = defaultStyle;
-  if (labelAdmin) labelAdmin.style.cssText = defaultStyle;
-
-  if (type === 'elementary') {
-    if (tableElem) tableElem.style.display = '';
-    if (labelElem) labelElem.style.cssText = activeStyle;
-    viewpoints = viewpointsElem;
-  } else if (type === 'junior') {
-    if (tableJunior) tableJunior.style.display = '';
-    if (labelJunior) labelJunior.style.cssText = activeStyle;
-    viewpoints = viewpointsJunior;
-  } else if (type === 'admin') {
-    if (tableAdmin) tableAdmin.style.display = '';
-    if (labelAdmin) labelAdmin.style.cssText = activeStyle;
-    viewpoints = viewpointsAdmin;
-  }
+  const tElem = document.getElementById('tableElem');
+  const tJunior = document.getElementById('tableJunior');
+  const tAdmin = document.getElementById('tableAdmin');
+  if (tElem) tElem.style.display = 'none';
+  if (tJunior) tJunior.style.display = 'none';
+  if (tAdmin) tAdmin.style.display = 'none';
+  if (type === 'elementary' && tElem) tElem.style.display = '';
+  if (type === 'junior' && tJunior) tJunior.style.display = '';
+  if (type === 'admin' && tAdmin) tAdmin.style.display = '';
+}
 
   // Reload selections for the current type
   loadSelections();
@@ -1870,6 +1836,20 @@ function init() {
       const det = document.getElementById('profileDetails'); if (det) det.open = true;
     }
 
+    // Auto-switch table based on position
+    function positionToSchoolType(pos) {
+      if (pos === '小学校教諭') return 'elementary';
+      if (pos === '中学校教諭') return 'junior';
+      return 'admin';
+    }
+    const posEl = document.getElementById('profile-position');
+    if (posEl) {
+      posEl.addEventListener('change', function() {
+        switchSchoolType(positionToSchoolType(this.value));
+      });
+      if (posEl.value) switchSchoolType(positionToSchoolType(posEl.value));
+    }
+
   if (btnSchoolSave) btnSchoolSave.addEventListener('click', async () => {
     try {
       await saveSchoolIfChanged(true);
@@ -1894,12 +1874,6 @@ function init() {
   setupFYSelect();
   attachMemoListeners();
 
-  const radioElem = document.getElementById('radioElem');
-  const radioJunior = document.getElementById('radioJunior');
-  const radioAdmin = document.getElementById('radioAdmin');
-  if (radioElem) radioElem.addEventListener('change', () => switchSchoolType('elementary'));
-  if (radioJunior) radioJunior.addEventListener('change', () => switchSchoolType('junior'));
-  if (radioAdmin) radioAdmin.addEventListener('change', () => switchSchoolType('admin'));
 
   const btnSave = document.getElementById('btnSave');
   if (btnSave) btnSave.addEventListener('click', () => saveSelections());
