@@ -1004,6 +1004,22 @@ app.get('/mypage', (c) => {
     .footer-note > div { max-width: 100% !important; text-align: left !important; }
     .save-area { margin-top: 16px; }
     .save-area .btn-sm { padding: 12px 20px; font-size: 15px; }
+
+    /* テーブルのスマホ最適化 */
+    table { min-width: 700px; font-size: 9pt; }
+    th, td { padding: 5px 6px; }
+    .col-category { width: 24px; letter-spacing: 2px; font-size: 10px; }
+    .col-viewpoint { width: 70px; font-size: 10px; }
+    .col-step { font-size: 10px; line-height: 1.5; }
+    .col-step .step-title { font-size: 11px; }
+    .col-step .step-desc { font-size: 10px; line-height: 1.4; }
+    .step-header { font-size: 10px; padding: 3px 6px; }
+    .memo-input { font-size: 10px; padding: 3px 5px; }
+    .action-row td { font-size: 10px; padding: 5px 6px; }
+    .note-text { font-size: 11px; }
+    .school-type-selector { font-size: 13px; }
+    .school-type-selector label { padding: 6px 14px; }
+    .container { padding: 8px; border-width: 1px; }
   }
 
   @media print {
