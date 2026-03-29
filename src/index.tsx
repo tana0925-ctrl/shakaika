@@ -1127,25 +1127,16 @@ app.get('/mypage', (c) => {
                 <span id="schoolSaveStatus" style="font-weight:700; font-size:12px;"></span>
       </div>
       <details id="profileDetails" style="margin-top:4px;">
-        <summary style="cursor:pointer; font-weight:b<div class="form-group">
-            <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
-            <select id="profile-school-type">
-              <option value="">未選択</option>
-              <option value="elementary">小学校教諭</option>
-              <option value="junior_high">中学校教諭</option>
-              <option value="admin_staff">管理職</option>
-            </select>
-          </div>
+        <summary style="cursor:pointer; font-weight:bold; color:#e65100; font-size:13px; padding:4px 0;">📋 プロフィール情報（クリックで開閉）</summary>
           <div class="form-group">
             <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
             <select id="profile-school-type">
               <option value="">未選択</option>
-              <option value="elementary">小学校教諭</option>
-              <option value="junior_high">中学校教諭</option>
+              <option value="elementary">小学校教諸</option>
+              <option value="junior_high">中学校教諸</option>
               <option value="admin_staff">管理職</option>
             </select>
           </div>
-          old; color:#e65100; font-size:13px; padding:4px 0;">📋 プロフィール情報（クリックで開閉）</summary>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
           <div>
             <label style="font-size:12px; font-weight:bold; color:#5d4037;">区</label>
