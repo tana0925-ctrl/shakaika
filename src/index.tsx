@@ -1,5 +1,5 @@
-import { Hono } from 'hono'
-import { cors } from 'hono/cors'
+renderMembers(getFilteredMembers())Members());
+}import { cors } from 'hono/cors'
 
 type Bindings = {
   DB: D1Database
@@ -95,6 +95,14 @@ app.get('/api/init', async (c) => {
     const hasSchool = Array.isArray(cols) && cols.some((c: any) => c.name === 'school')
     if (!hasSchool) {
       await db.prepare("ALTER TABLE users ADD COLUMN school TEXT NOT NULL DEFAULT ''").run()
+    }
+    const hasSchoolType = Array.isArray(cols) && cols.some((c: any) => c.name === 'school_type')
+    if (!hasSchoolType) {
+      await db.prepare("ALTER TABLE users ADD COLUMN school_type TEXT NOT NULL DEFAULT ''").run()
+    }
+    const hasSchoolType = Array.isArray(cols) && cols.some((c: any) => c.name === 'school_type')
+    if (!hasSchoolType) {
+      await db.prepare("ALTER TABLE users ADD COLUMN school_type TEXT NOT NULL DEFAULT ''").run()
     }
     const hasSchoolType = Array.isArray(cols) && cols.some((c: any) => c.name === 'school_type')
     if (!hasSchoolType) {
@@ -242,6 +250,7 @@ app.post('/api/me/profile', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({} as any))
   const school = typeof body.school === 'string' ? body.school.trim() : undefined
   const school_type = typeof body.school_type === 'string' ? body.school_type.trim() : undefined
+  const school_type = typeof body.school_type === 'string' ? body.school_type.trim() : undefined
   const district = typeof body.district === 'string' ? body.district.trim() : undefined
   const experience_years = body.experience_years !== undefined ? (body.experience_years === '' || body.experience_years === null ? null : parseInt(body.experience_years, 10)) : undefined
   const grade = typeof body.grade === 'string' ? body.grade.trim() : undefined
@@ -249,6 +258,7 @@ app.post('/api/me/profile', authMiddleware, async (c) => {
   const sets = []
   const params = []
   if (school !== undefined) { sets.push('school = ?'); params.push(school) }
+  if (school_type !== undefined) { sets.push('school_type = ?'); params.push(school_type); }
   if (school_type !== undefined) { sets.push('school_type = ?'); params.push(school_type); }
   if (district !== undefined) { sets.push('district = ?'); params.push(district) }
   if (experience_years !== undefined) { sets.push('experience_years = ?'); params.push(experience_years) }
@@ -855,6 +865,30 @@ app.get('/login', (c) => {
         <input type="text" id="regPosition" placeholder="例: 4年担任">
       </div>
       <div class="form-group">
+        <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
+        <select id="regSchoolType" required>
+          <option value="">選択してください</option>
+          <option value="elementary">小学校教諭</option>
+          <option value="junior_high">中学校教諭</option>
+          <option value="admin_staff">管理職</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-map-marker-alt"></i> 区</label>
+        <select id="regDistrict" required>
+          <option value="">選択してください</option>
+          <option>千種区</option><option>東区</option><option>北区</option><option>西区</option><option>中村区</option><option>中区</option><option>昭和区</option><option>瑞穂区</option><option>熱田区</option><option>中川区</option><option>港区</option><option>南区</option><option>守山区</option><option>緑区</option><option>名東区</option><option>天白区</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-calendar-alt"></i> 教員経験年数</label>
+        <input type="number" id="regExperience" required min="1" max="45" placeholder="例: 5">
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-users"></i> 所属（担当学年など）</label>
+        <input type="text" id="regPosition" placeholder="例: 4年担任">
+      </div>
+      <div class="form-group">
         <label><i class="fas fa-envelope"></i> メールアドレス</label>
         <input type="email" id="regEmail" required placeholder="example@email.com">
       </div>
@@ -1094,6 +1128,15 @@ app.get('/mypage', (c) => {
       </div>
       <details id="profileDetails" style="margin-top:4px;">
         <summary style="cursor:pointer; font-weight:b<div class="form-group">
+            <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
+            <select id="profile-school-type">
+              <option value="">未選択</option>
+              <option value="elementary">小学校教諭</option>
+              <option value="junior_high">中学校教諭</option>
+              <option value="admin_staff">管理職</option>
+            </select>
+          </div>
+          <div class="form-group">
             <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
             <select id="profile-school-type">
               <option value="">未選択</option>
@@ -1486,6 +1529,7 @@ async function saveSchoolIfChanged(force) {
         headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           school: schoolVal,
+          school_type: document.getElementById('profile-school-type') ? document.getElementById('profile-school-type').value : '',
           school_type: document.getElementById('profile-school-type') ? document.getElementById('profile-school-type').value : '',
           district: document.getElementById('profile-district').value,
           experience_years: document.getElementById('profile-experience').value,
@@ -1887,6 +1931,8 @@ async function init() {
     }
     const schoolTypeEl = document.getElementById('profile-school-type');
     if (schoolTypeEl && user.school_type) schoolTypeEl.value = user.school_type;
+    const schoolTypeEl = document.getElementById('profile-school-type');
+    if (schoolTypeEl && user.school_type) schoolTypeEl.value = user.school_type;
     const districtEl = document.getElementById('profile-district');
     const experienceEl = document.getElementById('profile-experience');
     const positionEl = document.getElementById('profile-position');
@@ -2115,6 +2161,11 @@ var _vpTabConfig = {
   }
 };
 
+var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff' };
+function getFilteredMembers() {
+  var st = _tabSchoolTypeMap[_activeTab];
+  return _allMembers.filter(function(m) { return !m.school_type || m.school_type === '' || m.school_type === st; });
+}
 var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff' };
 function getFilteredMembers() {
   var st = _tabSchoolTypeMap[_activeTab];
