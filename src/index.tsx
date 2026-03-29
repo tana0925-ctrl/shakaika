@@ -1056,8 +1056,7 @@ app.get('/mypage', (c) => {
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
         <label style="font-weight:bold; color:#1b5e20; white-space:nowrap; font-size:14px;">学校名</label>
         <input type="text" id="schoolInput" placeholder="例：橘小学校" style="flex:1; padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:14px;">
-        <button id="btnSchoolSave" type="button" class="btn-sm btn-save" style="background:#2e7d32; white-space:nowrap; font-size:13px; padding:6px 12px;"><i class="fas fa-save"></i> 保存</button>
-        <span id="schoolSaveStatus" style="font-weight:700; font-size:12px;"></span>
+                <span id="schoolSaveStatus" style="font-weight:700; font-size:12px;"></span>
       </div>
       <details id="profileDetails" style="margin-top:4px;">
         <summary style="cursor:pointer; font-weight:bold; color:#e65100; font-size:13px; padding:4px 0;">📋 プロフィール情報（クリックで開閉）</summary>
@@ -1404,7 +1403,7 @@ function updateUserBar() {
 }
 
 async function saveSchoolIfChanged(force) {
-  const el = document.getElementById('schoolEdit');
+  const el = document.getElementById('schoolInput');
   if (!el) return;
   const newSchool = (el.value || '').trim();
   const oldSchool = (user && user.school) ? String(user.school) : '';
@@ -1437,10 +1436,13 @@ async function saveSchoolIfChanged(force) {
     try {
       const gradeChecks = document.querySelectorAll('#profile-grade-checks input:checked');
       const gradeVal = Array.from(gradeChecks).map(c => c.value).join(',');
+      const schoolEl = document.getElementById('schoolEdit') || document.getElementById('schoolInput');
+      const schoolVal = schoolEl ? schoolEl.value.trim() : '';
       const res = await fetch('/api/me/profile', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          school: schoolVal,
           district: document.getElementById('profile-district').value,
           experience_years: document.getElementById('profile-experience').value,
           grade: gradeVal,
@@ -1448,6 +1450,7 @@ async function saveSchoolIfChanged(force) {
         })
       });
       if (!res.ok) throw new Error('保存に失敗しました');
+      if (schoolVal) { user.school = schoolVal; var dispEl = document.getElementById('schoolDisplay'); if (dispEl) dispEl.textContent = schoolVal; }
       btn.textContent = '✅ 保存しました';
       setTimeout(() => { btn.textContent = '💾 プロフィールを保存'; btn.disabled = false; }, 2000);
     } catch (e) {
@@ -1813,7 +1816,7 @@ function init() {
 
   updateUserBar();
 
-  const schoolEdit = document.getElementById('schoolEdit');
+  const schoolEdit = document.getElementById('schoolInput');
   if (schoolEdit) schoolEdit.value = user.school || '';
 
   const btnSchoolSave = document.getElementById('btnSchoolSave');
@@ -1848,15 +1851,7 @@ function init() {
       if (posEl.value) switchSchoolType(positionToSchoolType(posEl.value));
     }
 
-  if (btnSchoolSave) btnSchoolSave.addEventListener('click', async () => {
-    try {
-      await saveSchoolIfChanged(true);
-      showSchoolStatus('学校名を更新しました', true);
-    } catch(e) {
-      console.error(e);
-      showSchoolStatus((e && e.message) ? e.message : '学校名の更新に失敗しました', false);
-    }
-  });
+  );
 
   // 入力の取り違い防止（入力したのに空で保存される事故を防ぐ）
   const gEl = document.getElementById('annualGoal');
