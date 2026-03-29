@@ -1901,6 +1901,8 @@ app.get('/admin', (c) => {
   .btn-export { background: #2e7d32; color: #fff; padding: 10px 24px; font-size: 14px; border-radius: 10px; }
   .btn-export:hover { background: #1b5e20; }
   .btn-danger { background: #c62828; color: #fff; font-size: 11px; padding: 4px 10px; }
+  .btn-warning { background: #ff9800; color: #fff; border: none; border-radius: 4px; cursor: pointer; padding: 4px 8px; font-size: 12px; }
+  .btn-warning:hover { background: #f57c00; }
   .btn-danger:hover { background: #b71c1c; }
   .btn-role { background: #1565c0; color: #fff; font-size: 11px; padding: 4px 10px; }
   .btn-role:hover { background: #0d47a1; }
@@ -2029,7 +2031,7 @@ function renderMembers(members) {
       '<td>' + (m.position || '-') + '</td>' +
       vpKeys.map(vp => '<td>' + stepBadge(m.selections[vp]) + '</td>').join('') +
       '<td>' +
-        (m.role !== 'admin' ? '<button class="btn-sm btn-role" data-action="role" data-id="'+m.id+'" data-role="'+m.role+'"><i class="fas fa-user-shield"></i></button> ' : '') +
+        (m.id !== user.id ? '<button class="btn-sm ' + (m.role === 'admin' ? 'btn-warning' : 'btn-role') + '" data-action="role" data-id="'+m.id+'" data-role="'+m.role+'" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '">' + (m.role === 'admin' ? '<i class="fas fa-user-minus"></i>' : '<i class="fas fa-user-shield"></i>') + '</button> ' : '') +
         (m.id !== user.id ? '<button class="btn-sm btn-danger" data-action="delete" data-id="'+m.id+'" data-name="'+m.name+'"><i class="fas fa-trash"></i></button>' : '') +
       '</td>' +
     '</tr>';
