@@ -1123,6 +1123,10 @@ app.get('/mypage', (c) => {
     </div>
 
     <div class="scroll-hint"><i class="fas fa-arrows-alt-h"></i> 横にスクロールできます</div>
+    <div class="footer-note">
+      <div style="color:#666"><strong>カテゴリ：</strong><span style="color:#8d6e63">■ 授業・準備</span> <span style="color:#66bb6a">■ 仲間・活動</span> <span style="color:#42a5f5">■ 研究・発信</span></div>
+      <div style="color:#777;text-align:right;max-width:60%">※これは「ここまでやらなきゃいけない」というノルマではありません。特にSTEP4は「いつかチャレンジできたら」という可能性の入口です。今の自分に合った「次の一歩」を見つけるための地図として使ってください。</div>
+    </div>
     <table id="tableElem">
       <thead><tr>
         <th colspan="2" style="background-color: #fff8e1; border-bottom: 3px solid #5d4037;">成長の視点</th>
@@ -1179,10 +1183,6 @@ app.get('/mypage', (c) => {
         </tr>
       </tbody>
     </table>
-    <div class="footer-note">
-      <div style="color:#666"><strong>カテゴリ：</strong><span style="color:#8d6e63">■ 授業・準備</span> <span style="color:#66bb6a">■ 仲間・活動</span> <span style="color:#42a5f5">■ 研究・発信</span></div>
-      <div style="color:#777;text-align:right;max-width:60%">※これは「ここまでやらなきゃいけない」というノルマではありません。特にSTEP4は「いつかチャレンジできたら」という可能性の入口です。今の自分に合った「次の一歩」を見つけるための地図として使ってください。</div>
-    </div>
 
     <table id="tableJunior" style="display:none">
       <thead><tr>
