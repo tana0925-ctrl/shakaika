@@ -100,11 +100,7 @@ app.get('/api/init', async (c) => {
     if (!hasSchoolType) {
       await db.prepare("ALTER TABLE users ADD COLUMN school_type TEXT NOT NULL DEFAULT ''").run()
     }
-    const hasSchoolType = Array.isArray(cols) && cols.some((c: any) => c.name === 'school_type')
-    if (!hasSchoolType) {
-      await db.prepare("ALTER TABLE users ADD COLUMN school_type TEXT NOT NULL DEFAULT ''").run()
-    }
-  } catch (e) {
+      } catch (e) {
     // ignore
   }
 
