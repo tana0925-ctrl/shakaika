@@ -1078,7 +1078,10 @@ app.get('/mypage', (c) => {
           </div>
           <div>
             <label style="font-size:12px; font-weight:bold; color:#5d4037;">経験年数</label>
-            <input type="number" id="profile-experience" placeholder="例：5" min="0" max="50" style="width:100%; padding:5px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
+            <div style="display:flex; align-items:center; gap:4px;">
+              <input type="number" id="profile-experience" placeholder="例：5" min="1" max="50" style="flex:1; padding:5px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
+              <span style="font-size:13px; white-space:nowrap;">年目</span>
+            </div>
           </div>
           <div style="grid-column:1/3;">
             <label style="font-size:12px; font-weight:bold; color:#5d4037;">担当学年（複数選択OK）</label>
@@ -1854,16 +1857,16 @@ function init() {
     const gradeOptions = ['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','管理職','その他'];
     const gradeContainer = document.getElementById('profile-grade-checks');
     if (gradeContainer) {
-      const savedGrades = (currentUser.grade || '').split(',').filter(Boolean);
+      const savedGrades = (user.grade || '').split(',').filter(Boolean);
       gradeContainer.innerHTML = gradeOptions.map(g => '<label style="display:inline-flex;align-items:center;gap:2px;font-size:12px;background:#f5f5f5;padding:3px 8px;border-radius:12px;cursor:pointer;"><input type="checkbox" value="'+g+'"'+(savedGrades.includes(g)?' checked':'')+' style="margin:0;">'+g+'</label>').join('');
     }
     const districtEl = document.getElementById('profile-district');
     const experienceEl = document.getElementById('profile-experience');
     const positionEl = document.getElementById('profile-position');
-    if (districtEl && currentUser.district) districtEl.value = currentUser.district;
-    if (experienceEl && currentUser.experience_years != null) experienceEl.value = currentUser.experience_years;
-    if (positionEl && currentUser.position) positionEl.value = currentUser.position;
-    if (currentUser.district || currentUser.experience_years || currentUser.grade || currentUser.position) {
+    if (districtEl && user.district) districtEl.value = user.district;
+    if (experienceEl && user.experience_years != null) experienceEl.value = user.experience_years;
+    if (positionEl && user.position) positionEl.value = user.position;
+    if (user.district || user.experience_years || user.grade || user.position) {
       const det = document.getElementById('profileDetails'); if (det) det.open = true;
     }
 
@@ -2055,7 +2058,7 @@ function renderMembers(members) {
       '<td>'+(i+1)+'</td>' +
       '<td class="member-name" style="cursor:pointer" data-action="detail" data-id="'+m.id+'">' + m.name + '</td>' +
       '<td>' + (m.district || '-') + '</td>' +
-      '<td>' + (m.experience_years != null ? m.experience_years + '年' : '-') + '</td>' +
+      '<td>' + (m.experience_years != null ? m.experience_years + '年目' : '-') + '</td>' +
       '<td>' + (m.grade || '-') + '</td>' +
       '<td>' + (m.position || '-') + '</td>' +
       vpKeys.map(vp => '<td>' + stepBadge(m.selections[vp]) + '</td>').join('') +
