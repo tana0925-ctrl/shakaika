@@ -2171,9 +2171,24 @@ var _vpTabConfig = {
 
 var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff', unset: '' };
 function getFilteredMembers() {
+ var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff', unset: '' };
+function inferSchoolType(m) {
+  if (m.school_type) return m.school_type;
+  var keys = Object.keys(m.selections || {});
+  if (keys.length === 0) return '';
+  var hasJunior = keys.some(function(k) { return k.startsWith('j_'); });
+  var hasAdmin = keys.some(function(k) { return k.startsWith('a_'); });
+  var hasElem = keys.some(function(k) { return !k.startsWith('j_') && !k.startsWith('a_'); });
+  if (hasJunior && !hasElem && !hasAdmin) return 'junior_high';
+  if (hasAdmin && !hasElem && !hasJunior) return 'admin_staff';
+  if (hasElem) return 'elementary';
+  return '';
+}
+function getFilteredMembers() {
   var st = _tabSchoolTypeMap[_activeTab];
-  if (_activeTab === 'unset') return _allMembers.filter(function(m) { return !m.school_type || m.school_type === ''; });
-  return _allMembers.filter(function(m) { return m.school_type === st; });
+  if (_activeTab === 'unset') return _allMembers.filter(function(m) { return !inferSchoolType(m); });
+  return _allMembers.filter(function(m) { return inferSchoolType(m) === st; });
+}
 }
 function switchAdminTab(tab) {
   _activeTab = tab;
@@ -2220,7 +2235,8 @@ function renderMembers(members) {
 
   // Build thead dynamically
   var hdr = '<tr><th style="width:30px">#</th>';
-  hdr += '<th style="width:120px;cursor:pointer;user-select:none" data-sort="name">名前 <span class="sort-icon" data-col="name"></span></th>';
+   hdr += '<th style="width:120px;cursor:pointer;user-select:none" data-sort="name">名前 <span class="sort-icon" data-col="name"></span></th>';
+  hdr += '<th style="width:120px;cursor:pointer;user-select:none" data-sort="school">学校名 <span class="sort-icon" data-col="school"></span></th>';
   hdr += '<th style="width:60px;cursor:pointer;user-select:none" data-sort="district">区 <span class="sort-icon" data-col="district"></span></th>';
   hdr += '<th style="width:50px;cursor:pointer;user-select:none" data-sort="experience_years">経験 <span class="sort-icon" data-col="experience_years"></span></th>';
   hdr += '<th style="width:60px;cursor:pointer;user-select:none" data-sort="grade">学年 <span class="sort-icon" data-col="grade"></span></th>';
@@ -2266,7 +2282,8 @@ function renderMembers(members) {
     }
     return '<tr>' +
       '<td>' + (i + 1) + '</td>' +
-      '<td><strong>' + (m.name || '') + '</strong></td>' +
+         '<td><strong>' + (m.name || '') + '</strong></td>' +
+      '<td>' + (m.school || '-') + '</td>' +
       '<td>' + (m.district || '-') + '</td>' +
       '<td>' + (m.experience_years != null ? m.experience_years + '年目' : '-') + '</td>' +
       '<td>' + (m.grade || '-') + '</td>' +
