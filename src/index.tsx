@@ -1977,7 +1977,9 @@ app.get('/admin', (c) => {
 .badge-step1 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#e3f2fd; color:#1565c0; }
 .badge-step2 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#e8f5e9; color:#2e7d32; }
 .badge-step3 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#fff3e0; color:#e65100; }
-.badge-step4 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#fce4ec; color:#c62828; }
+.badge-step4 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#fce4ec; color:#c62828; }.badge-step1[data-memo]:hover, .badge-step2[data-memo]:hover, .badge-step3[data-memo]:hover, .badge-step4[data-memo]:hover { opacity: 0.75; transform: scale(1.08); transition: all 0.15s; }
+.badge-step1[data-memo]::after, .badge-step2[data-memo]::after, .badge-step3[data-memo]::after, .badge-step4[data-memo]::after { content: ""; display:inline-block; width:5px; height:5px; border-radius:50%; background:currentColor; margin-left:4px; vertical-align:middle; opacity:0.7; }
+
 .admin-tabs { display: flex; gap: 0; margin: 12px 0 0 0; }
 .admin-tab { padding: 10px 24px; border: 2px solid #ddd; border-bottom: none; border-radius: 10px 10px 0 0; background: #f5f5f5; color: #888; font-weight: 700; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.2s; }
 .admin-tab.active { background: #fff; color: #e65100; border-color: #e65100; position: relative; z-index: 1; margin-bottom: -2px; }
@@ -2178,6 +2180,16 @@ function switchAdminTab(tab) {
   renderMembers(getFilteredMembers());
 }
 
+function showAdminMemo(el) {
+  var memo = el.getAttribute('data-memo') || '';
+  var name = el.getAttribute('data-name') || '';
+  var vp = el.getAttribute('data-vp') || '';
+  var modal = document.getElementById('adminMemoModal');
+  document.getElementById('adminMemoName').textContent = name;
+  document.getElementById('adminMemoVp').textContent = vp;
+  document.getElementById('adminMemoText').textContent = memo;
+  modal.style.display = 'flex';
+}
 function updateSchoolType(sel) {
   var id = sel.getAttribute('data-id');
   var school_type = sel.value;
@@ -2256,7 +2268,7 @@ function renderMembers(members) {
       var sel = m.selections ? m.selections[vpName] : null;
       var stepLabel = sel ? 'STEP' + sel.step : '未選択';
       var stepClass = sel ? 'step' + sel.step : 'none';
-      vpCells += '<td style="text-align:center"><span class="badge-' + stepClass + '">' + stepLabel + '</span></td>';
+      var memo = sel && sel.memo ? sel.memo : ''; var vpLabel = vps[vi].label || vpName; vpCells += '<td style="text-align:center"><span class="badge-' + stepClass + '"' + (memo ? ' style="cursor:pointer" data-memo="' + memo.replace(/"/g, '&quot;') + '" data-name="' + (m.name||'').replace(/"/g, '&quot;') + '" data-vp="' + vpLabel + '" onclick="showAdminMemo(this)"' : '') + '>' + stepLabel + '</span></td>';
     }
     return '<tr>' +
       '<td>' + (i + 1) + '</td>' +
@@ -2464,6 +2476,8 @@ document.addEventListener('click', function(e) {
 
 loadMembers();
 </script>
+
+<div id="adminMemoModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'"><div style="background:#fff;border-radius:12px;padding:28px 32px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.18);position:relative"><button onclick="document.getElementById('adminMemoModal').style.display='none'" style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:22px;cursor:pointer;color:#999">&times;</button><div style="font-size:13px;color:#999;margin-bottom:4px" id="adminMemoVp"></div><div style="font-size:15px;font-weight:700;color:#333;margin-bottom:16px" id="adminMemoName"></div><div style="font-size:15px;color:#444;line-height:1.7;white-space:pre-wrap;background:#f8f8f8;padding:16px;border-radius:8px" id="adminMemoText"></div></div></div>
 </body></html>`)
 })
 
