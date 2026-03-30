@@ -879,6 +879,7 @@ app.get('/login', (c) => {
         <input type="password" id="regPassword" required placeholder="4文字以上" minlength="4">
       </div>
       <button type="submit" class="btn btn-primary"><i class="fas fa-user-plus"></i> 登録する</button>
+      <p style="margin-top:10px; font-size:11px; color:#aaa; text-align:center; line-height:1.6;">ご登録いただいた情報は、社会科同好会の活動運営にのみ使用します。<br>第三者への提供・会外での利用は一切行いません。</p>
     </form>
   </div>
 </div>
