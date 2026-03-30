@@ -1973,6 +1973,11 @@ app.get('/admin', (c) => {
   .btn-danger { background: #c62828; color: #fff; font-size: 11px; padding: 4px 10px; }
   .member-table th[data-sort]:hover { background: rgba(0,0,0,0.05); }
 .sort-icon { font-size: 10px; opacity: 0.6; }
+.badge-none { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:500; background:#f0f0f0; color:#aaa; }
+.badge-step1 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#e3f2fd; color:#1565c0; }
+.badge-step2 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#e8f5e9; color:#2e7d32; }
+.badge-step3 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#fff3e0; color:#e65100; }
+.badge-step4 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#fce4ec; color:#c62828; }
 .admin-tabs { display: flex; gap: 0; margin: 12px 0 0 0; }
 .admin-tab { padding: 10px 24px; border: 2px solid #ddd; border-bottom: none; border-radius: 10px 10px 0 0; background: #f5f5f5; color: #888; font-weight: 700; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.2s; }
 .admin-tab.active { background: #fff; color: #e65100; border-color: #e65100; position: relative; z-index: 1; margin-bottom: -2px; }
