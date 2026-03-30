@@ -2556,7 +2556,6 @@ async function postAttendWithRetry(maxTry) {
   }
   console.warn('attendance post failed', lastErr);
   return false;
-  } catch(e) { document.getElementById('loading').innerHTML='<p style="color:#c62828">エラーが発生しました</p>'; }
 }
 
 let satisfaction = 0;
