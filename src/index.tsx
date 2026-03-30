@@ -2166,9 +2166,13 @@ var _vpTabConfig = {
       { key: 'a_org_mgmt', label: '運営に貢献' },
       { key: 'a_outreach', label: '外とつなぐ' }
     ]
+     ]
+  },
+  unset: {
+    label: '未設定',
+    viewpoints: []
   }
 };
-
 var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff', unset: '' };
 function inferSchoolType(m) {
   if (m.school_type) return m.school_type;
