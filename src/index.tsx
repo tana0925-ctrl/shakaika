@@ -469,6 +469,7 @@ app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
       experience_years: m.experience_years,
       grade: m.grade || '',
       position: m.position || '',
+      school_type: m.school_type || '',
       created_at: m.created_at,
       selections
     }
@@ -1133,8 +1134,8 @@ app.get('/mypage', (c) => {
             <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
             <select id="profile-school-type">
               <option value="">未選択</option>
-              <option value="elementary">小学校教諸</option>
-              <option value="junior_high">中学校教諸</option>
+              <option value="elementary">小学校教諭</option>
+              <option value="junior_high">中学校教諭</option>
               <option value="admin_staff">管理職</option>
             </select>
           </div>
