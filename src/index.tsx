@@ -2170,8 +2170,6 @@ var _vpTabConfig = {
 };
 
 var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff', unset: '' };
-function getFilteredMembers() {
- var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff', unset: '' };
 function inferSchoolType(m) {
   if (m.school_type) return m.school_type;
   var keys = Object.keys(m.selections || {});
@@ -2188,7 +2186,6 @@ function getFilteredMembers() {
   var st = _tabSchoolTypeMap[_activeTab];
   if (_activeTab === 'unset') return _allMembers.filter(function(m) { return !inferSchoolType(m); });
   return _allMembers.filter(function(m) { return inferSchoolType(m) === st; });
-}
 }
 function switchAdminTab(tab) {
   _activeTab = tab;
