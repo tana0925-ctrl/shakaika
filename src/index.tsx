@@ -1110,15 +1110,6 @@ app.get('/mypage', (c) => {
       </div>
       <details id="profileDetails" style="margin-top:4px;">
         <summary style="cursor:pointer; font-weight:bold; color:#e65100; font-size:13px; padding:4px 0;">📋 プロフィール情報（クリックで開閉）</summary>
-          <div class="form-group">
-            <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
-            <select id="profile-school-type">
-              <option value="">未選択</option>
-              <option value="elementary">小学校教諭</option>
-              <option value="junior_high">中学校教諭</option>
-              <option value="admin_staff">管理職</option>
-            </select>
-          </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
           <div>
             <label style="font-size:12px; font-weight:bold; color:#5d4037;">区</label>
@@ -1147,13 +1138,16 @@ app.get('/mypage', (c) => {
             </div>
           </div>
           <div>
-            <label style="font-size:12px; font-weight:bold; color:#5d4037;">所属・役職</label>
+            <label style="font-size:12px; font-weight:bold; color:#5d4037;">役職</label>
             <select id="profile-position" style="width:100%; padding:5px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
               <option value="">選択してください</option>
-              <option value="小学校教諭">小学校教諭</option><option value="中学校教諭">中学校教諭</option>
+              <option value="小学校教諭">小学校教諭</option>
+              <option value="中学校教諭">中学校教諭</option>
               <option value="主幹教諭">主幹教諭</option>
-              <option value="教頭">教頭</option><option value="校長">校長</option>
-              <option value="指導主事">指導主事</option><option value="その他">その他</option>
+              <option value="教頭">教頭</option>
+              <option value="校長">校長</option>
+              <option value="指導主事">指導主事</option>
+              <option value="その他">その他</option>
             </select>
           </div>
         </div>
@@ -1502,8 +1496,7 @@ async function saveSchoolIfChanged(force) {
         headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           school: schoolVal,
-          school_type: document.getElementById('profile-school-type') ? document.getElementById('profile-school-type').value : '',
-          school_type: document.getElementById('profile-school-type') ? document.getElementById('profile-school-type').value : '',
+          school_type: (function(pos){ if(pos==='小学校教諭') return 'elementary'; if(pos==='中学校教諭') return 'junior_high'; if(['主幹教諭','教頭','校長','指導主事'].includes(pos)) return 'admin_staff'; return ''; })(document.getElementById('profile-position').value),
           district: document.getElementById('profile-district').value,
           experience_years: document.getElementById('profile-experience').value,
           grade: gradeVal,
@@ -1902,8 +1895,6 @@ async function init() {
       const savedGrades = (user.grade || '').split(',').filter(Boolean);
       gradeContainer.innerHTML = gradeOptions.map(g => '<label style="display:inline-flex;align-items:center;gap:2px;font-size:12px;background:#f5f5f5;padding:3px 8px;border-radius:12px;cursor:pointer;"><input type="checkbox" value="'+g+'"'+(savedGrades.includes(g)?' checked':'')+' style="margin:0;">'+g+'</label>').join('');
     }
-    const schoolTypeEl = document.getElementById('profile-school-type');
-    if (schoolTypeEl && user.school_type) schoolTypeEl.value = user.school_type;
     const districtEl = document.getElementById('profile-district');
     const experienceEl = document.getElementById('profile-experience');
     const positionEl = document.getElementById('profile-position');
@@ -1918,7 +1909,8 @@ async function init() {
     function positionToSchoolType(pos) {
       if (pos === '小学校教諭') return 'elementary';
       if (pos === '中学校教諭') return 'junior';
-      return 'admin';
+      if (['主幹教諭','教頭','校長','指導主事'].includes(pos)) return 'admin';
+      return 'elementary';
     }
     const posEl = document.getElementById('profile-position');
     if (posEl) {
