@@ -2166,7 +2166,6 @@ var _vpTabConfig = {
       { key: 'a_org_mgmt', label: '運営に貢献' },
       { key: 'a_outreach', label: '外とつなぐ' }
     ]
-     ]
   },
   unset: {
     label: '未設定',
