@@ -250,7 +250,6 @@ app.post('/api/me/profile', authMiddleware, async (c) => {
   const params = []
   if (school !== undefined) { sets.push('school = ?'); params.push(school) }
   if (school_type !== undefined) { sets.push('school_type = ?'); params.push(school_type); }
-  if (school_type !== undefined) { sets.push('school_type = ?'); params.push(school_type); }
   if (district !== undefined) { sets.push('district = ?'); params.push(district) }
   if (experience_years !== undefined) { sets.push('experience_years = ?'); params.push(experience_years) }
   if (grade !== undefined) { sets.push('grade = ?'); params.push(grade) }
@@ -2053,6 +2052,20 @@ app.get('/admin', (c) => {
   .detail-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #eee; }
   .detail-item .vp-name { font-weight: 700; color: #555; }
   .detail-item .memo { font-size: 12px; color: #888; margin-top: 4px; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 2px solid #e65100; border-radius: 0 0 12px 12px; border-top: none; }
+  @media (max-width: 640px) {
+    .admin-tabs { flex-wrap: wrap; border-bottom: 2px solid #e65100; margin-bottom: 0; }
+    .admin-tab { padding: 8px 14px; font-size: 12px; border-radius: 8px 8px 0 0; border-bottom: none; flex: 1 1 auto; text-align: center; }
+    .top-bar { flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 16px; }
+    .top-bar .user-info { flex-wrap: wrap; gap: 8px; }
+    .toolbar { flex-direction: column; align-items: stretch; }
+    .search-box { width: 100%; box-sizing: border-box; }
+    .member-table { font-size: 11px; }
+    .member-table thead th { padding: 8px 6px; }
+    .member-table tbody td { padding: 8px 6px; }
+    .stat-card { padding: 12px; }
+    .stat-card .num { font-size: 28px; }
+  }
 </style>
 </head><body>
 <div class="top-bar">
@@ -2087,10 +2100,12 @@ app.get('/admin', (c) => {
     <button class="admin-tab" data-tab="admin" onclick="switchAdminTab('admin')">管理職</button>
     <button class="admin-tab" data-tab="unset" onclick="switchAdminTab('unset')">未設定</button>
   </div>
-  <table class="member-table">
-    <thead id="memberThead"><tr></tr></thead>
-    <tbody id="memberBody"></tbody>
-  </table>
+  <div class="table-wrap">
+    <table class="member-table">
+      <thead id="memberThead"><tr></tr></thead>
+      <tbody id="memberBody"></tbody>
+    </table>
+  </div>
 </div>
 
 <div class="detail-modal" id="detailModal" onclick="if(event.target===this)this.classList.remove('show')">
@@ -2159,12 +2174,6 @@ function getFilteredMembers() {
   if (_activeTab === 'unset') return _allMembers.filter(function(m) { return !m.school_type || m.school_type === ''; });
   return _allMembers.filter(function(m) { return m.school_type === st; });
 }
-var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff', unset: '' };
-function getFilteredMembers() {
-  var st = _tabSchoolTypeMap[_activeTab];
-  if (_activeTab === 'unset') return _allMembers.filter(function(m) { return !m.school_type || m.school_type === ''; });
-  return _allMembers.filter(function(m) { return m.school_type === st; });
-}
 function switchAdminTab(tab) {
   _activeTab = tab;
   _sortCol = '';
@@ -2204,7 +2213,7 @@ function updateSortHeaders() {
 function renderMembers(members) {
   var body = document.getElementById('memberBody');
   var thead = document.getElementById('memberThead');
-  _allMembers = members;
+  // NOTE: _allMembers is NOT overwritten here; it stays as the full list loaded from API.
 
   var vps = _vpTabConfig[_activeTab].viewpoints;
 
@@ -2279,7 +2288,7 @@ function renderMembers(members) {
       if (!th) return;
       var col = th.getAttribute('data-sort');
       if (_sortCol === col) { _sortDir = -_sortDir; } else { _sortCol = col; _sortDir = 1; }
-      renderMembers(_allMembers);
+      renderMembers(getFilteredMembers());
     });
   }
 }
