@@ -867,30 +867,6 @@ app.get('/login', (c) => {
         <input type="text" id="regPosition" placeholder="例: 4年担任">
       </div>
       <div class="form-group">
-        <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
-        <select id="regSchoolType" required>
-          <option value="">選択してください</option>
-          <option value="elementary">小学校教諭</option>
-          <option value="junior_high">中学校教諭</option>
-          <option value="admin_staff">管理職</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label><i class="fas fa-map-marker-alt"></i> 区</label>
-        <select id="regDistrict" required>
-          <option value="">選択してください</option>
-          <option>千種区</option><option>東区</option><option>北区</option><option>西区</option><option>中村区</option><option>中区</option><option>昭和区</option><option>瑞穂区</option><option>熱田区</option><option>中川区</option><option>港区</option><option>南区</option><option>守山区</option><option>緑区</option><option>名東区</option><option>天白区</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label><i class="fas fa-calendar-alt"></i> 教員経験年数</label>
-        <input type="number" id="regExperience" required min="1" max="45" placeholder="例: 5">
-      </div>
-      <div class="form-group">
-        <label><i class="fas fa-users"></i> 所属（担当学年など）</label>
-        <input type="text" id="regPosition" placeholder="例: 4年担任">
-      </div>
-      <div class="form-group">
         <label><i class="fas fa-envelope"></i> メールアドレス</label>
         <input type="email" id="regEmail" required placeholder="example@email.com">
       </div>
