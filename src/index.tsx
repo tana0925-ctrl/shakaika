@@ -191,7 +191,7 @@ app.get('/api/init', async (c) => {
 
 // ========== Auth API ==========
 app.post('/api/auth/register', async (c) => {
-  const { name, school, school_type, district, experience_years, position, email, password } = await c.req.json()
+  const { name, school, school_type, district, experience_years, grade, email, password } = await c.req.json()
   if (!name || !school || !email || !password) {
     return c.json({ error: '名前・学校名・メールアドレス・パスワードは必須です' }, 400)
   }
@@ -204,8 +204,8 @@ app.post('/api/auth/register', async (c) => {
   }
   const passwordHash = await hashPassword(password)
   const result = await c.env.DB.prepare(
-    'INSERT INTO users (name, email, school, school_type, district, experience_years, position, password_hash, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).bind(name, email, school || '', school_type || '', district || '', experience_years || null, position || '', passwordHash, 'member').run()
+    'INSERT INTO users (name, email, school, school_type, district, experience_years, grade, password_hash, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(name, email, school || '', school_type || '', district || '', experience_years || null, grade || '', passwordHash, 'member').run()
 
   const userId = result.meta.last_row_id as number
   const token = generateToken()
@@ -863,8 +863,12 @@ app.get('/login', (c) => {
         <input type="number" id="regExperience" required min="1" max="45" placeholder="例: 5">
       </div>
       <div class="form-group">
-        <label><i class="fas fa-users"></i> 所属（担当学年など）</label>
-        <input type="text" id="regPosition" placeholder="例: 4年担任">
+        <label><i class="fas fa-users"></i> 担当学年（複数選択OK）</label>
+        <div id="regGradeChecks" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">
+          ${['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','管理職','その他'].map(g =>
+            `<label style="display:inline-flex;align-items:center;gap:3px;font-size:13px;background:#f5f5f5;padding:4px 10px;border-radius:14px;cursor:pointer;"><input type="checkbox" value="${g}" style="margin:0;">${g}</label>`
+          ).join('')}
+        </div>
       </div>
       <div class="form-group">
         <label><i class="fas fa-envelope"></i> メールアドレス</label>
@@ -914,7 +918,7 @@ async function handleRegister(e) {
     const res = await fetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: document.getElementById('regName').value, school: document.getElementById('regSchool').value, school_type: document.getElementById('regSchoolType').value, district: document.getElementById('regDistrict').value, experience_years: parseInt(document.getElementById('regExperience').value) || null, position: document.getElementById('regPosition').value, email: document.getElementById('regEmail').value, password: document.getElementById('regPassword').value })
+      body: JSON.stringify({ name: document.getElementById('regName').value, school: document.getElementById('regSchool').value, school_type: document.getElementById('regSchoolType').value, district: document.getElementById('regDistrict').value, experience_years: parseInt(document.getElementById('regExperience').value) || null, grade: Array.from(document.querySelectorAll('#regGradeChecks input:checked')).map(function(c){return c.value;}).join(','), email: document.getElementById('regEmail').value, password: document.getElementById('regPassword').value })
     });
     const data = await res.json();
     if (!res.ok) { showError(data.error); return false; }
