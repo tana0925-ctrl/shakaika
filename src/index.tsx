@@ -1291,7 +1291,7 @@ app.get('/mypage', (c) => {
         <tr class="row-action">
           <td colspan="2" style="text-align:right;font-weight:bold;padding-right:20px;color:#e65100"><i class="fas fa-shoe-prints"></i> おすすめのアクション</td>
           <td><ul class="action-list"><li><strong>若手交流会</strong>で仲間作り</li><li><strong>スキルアップ研修</strong>を聞く</li><li><strong>懇親会</strong>にとりあえず行く</li></ul></td>
-          <td><ul class="action-list"><li><strong>スキルアップ研修</strong>に参加（まずこれ！）</li><li><strong>新聞・統計</strong>の資料を集める</li><li><strong>体験記録</strong>を書いてみる</li></ul></td>
+          <td><ul class="action-list"><li><strong>スキルアップ研修</strong>に参加（まずこれ！）</li><li><strong>FW（フィールドワーク）</strong>へGO!</li><li><strong>新聞・統計</strong>の資料を集める</li></ul></td>
           <td><ul class="action-list"><li><strong>模擬授業</strong>をやってみる</li><li><strong>FW・イベント</strong>を企画する</li><li><strong>研究部の議論</strong>に参加する</li><li><strong>体験記録</strong>を書いてみる</li></ul></td>
           <td><ul class="action-list"><li><strong>同好会</strong>で発表する</li><li><strong>研究員応募論文</strong>を書いてみる</li><li><strong>全国大会</strong>の情報をチェック</li></ul></td>
         </tr>
