@@ -2619,7 +2619,7 @@ function renderEvent(data) {
         for (const o of opts) html += '<div class="checkbox-option" onclick="toggleCheckbox(this,'+q.id+')">'+o+'</div>';
         html += '</div>';
       } else if (q.question_type === 'rating') {
-        html += '<div class="rating-stars" id="cq_'+q.id+'">;;
+        html += '<div class="rating-stars" id="cq_'+q.id+'">';
         for (let i=1;i<=5;i++) html += '<span class="rating-star" data-qid="'+q.id+'" data-val="'+i+'" onclick="setRating('+q.id+','+i+')">★</span>';
         html += '</div>';
       }
