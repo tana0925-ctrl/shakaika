@@ -2600,14 +2600,10 @@ function renderEvent(data) {
     html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
   } else {
     html += '<hr style="border:none;border-top:2px dashed #eee;margin:16px 0"><h3 style="font-family:Zen Maru Gothic;color:#5d4037;font-size:16px;margin:0 0 16px"><i class="fas fa-clipboard-list"></i> アンケート</h3>';
-    html += '<div class="form-group"><label>満足度</label><div class="hint">タップで選択してください</div><div class="stars" id="stars">';
-    for (let i=1;i<=5;i++) html += '<span class="star" data-val="'+i+'" onclick="setStar('+i+')">★</span>';
-    html += '</div></div>';
-    html += '<div class="form-group"><label>感想・コメント</label><textarea id="comment" placeholder="自由にお書きください"></textarea></div>';
     for (const q of qs) {
       html += '<div class="form-group"><label>'+q.question_text+'</label>';
       if (q.question_type === 'text') {
-        html += '<input type="text" id="cq_'+q.id+'" placeholder="回答を入力">';
+        html += '<textarea id="cq_'+q.id+'" placeholder="回答を入力" rows="2" oninput="this.style.height=\'auto\';this.style.height=this.scrollHeight+\'px\'" style="width:100%;resize:none;overflow:hidden;min-height:48px"></textarea>';
       } else if (q.question_type === 'radio') {
         const opts = q.options ? q.options.split('|') : [];
         html += '<div class="radio-group" id="cq_'+q.id+'">';
@@ -2657,13 +2653,12 @@ async function submitSurvey() {
   const custom_answers = [];
   qs.forEach(el => {
     const qid = parseInt(el.id.replace('cq_',''));
-    if (el.tagName === 'INPUT') { customData[qid] = el.value; }
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') { customData[qid] = el.value; }
     if (customData[qid]) custom_answers.push({ question_id: qid, answer_text: customData[qid] });
   });
-  const comment = document.getElementById('comment')?.value || '';
   const res = await fetch('/api/events/'+CODE+'/survey', {
     method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
-    body: JSON.stringify({ satisfaction, comment, custom_answers })
+    body: JSON.stringify({ satisfaction: null, comment: '', custom_answers })
   });
   if (res.ok) {
     document.getElementById('content').innerHTML = '<div class="success-box"><i class="fas fa-heart"></i><p>回答ありがとうございました！</p></div><a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
