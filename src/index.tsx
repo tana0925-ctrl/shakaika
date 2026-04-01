@@ -133,7 +133,7 @@ app.get('/api/init', async (c) => {
   )`).run()
   await db.prepare(`CREATE TABLE IF NOT EXISTS survey_questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, question_text TEXT NOT NULL,
-    question_type TEXT NOT NULL CHECK(question_type IN ('text','radio','rating')),
+    question_type TEXT NOT NULL CHECK(question_type IN ('text','radio','rating','checkbox')),
     options TEXT DEFAULT '', sort_order INTEGER DEFAULT 0,
     FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
   )`).run()
@@ -2511,6 +2511,9 @@ app.get('/attend/:code', (c) => {
   .radio-group { display: flex; flex-wrap: wrap; gap: 8px; }
   .radio-option { padding: 8px 16px; border: 2px solid #e0d6c8; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
   .radio-option.selected { border-color: var(--header-line); background: #fff3e0; color: var(--header-line); font-weight: 700; }
+  .checkbox-group { display: flex; flex-wrap: wrap; gap: 8px; }
+  .checkbox-option { padding: 8px 16px; border: 2px solid #e0d6c8; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
+  .checkbox-option.selected { border-color: #1565c0; background: #e3f2fd; color: #1565c0; font-weight: 700; }
   .rating-stars { display: flex; gap: 4px; }
   .rating-star { font-size: 26px; cursor: pointer; color: #ddd; transition: color 0.15s; }
   .rating-star.active { color: #ffb300; }
@@ -2610,8 +2613,13 @@ function renderEvent(data) {
         html += '<div class="radio-group" id="cq_'+q.id+'">';
         for (const o of opts) html += '<div class="radio-option" onclick="selectRadio(this,'+q.id+')">'+o+'</div>';
         html += '</div>';
+      } else if (q.question_type === 'checkbox') {
+        const opts = q.options ? q.options.split('|') : [];
+        html += '<div class="checkbox-group" id="cq_'+q.id+'">';
+        for (const o of opts) html += '<div class="checkbox-option" onclick="toggleCheckbox(this,'+q.id+')">'+o+'</div>';
+        html += '</div>';
       } else if (q.question_type === 'rating') {
-        html += '<div class="rating-stars" id="cq_'+q.id+'">';
+        html += '<div class="rating-stars" id="cq_'+q.id+'">;;
         for (let i=1;i<=5;i++) html += '<span class="rating-star" data-qid="'+q.id+'" data-val="'+i+'" onclick="setRating('+q.id+','+i+')">★</span>';
         html += '</div>';
       }
@@ -2633,6 +2641,11 @@ function setStar(v) { satisfaction=v; document.querySelectorAll('#stars .star').
 function selectRadio(el, qid) {
   el.parentElement.querySelectorAll('.radio-option').forEach(o=>o.classList.remove('selected'));
   el.classList.add('selected'); customData[qid]=el.textContent;
+}
+function toggleCheckbox(el, qid) {
+  el.classList.toggle('selected');
+  const selected = Array.from(el.parentElement.querySelectorAll('.checkbox-option.selected')).map(o=>o.textContent);
+  customData[qid] = selected.join('、');
 }
 function setRating(qid, v) {
   customData[qid]=String(v);
@@ -2703,6 +2716,10 @@ app.get('/admin/events', (c) => {
   .custom-q-item .q-text { flex: 1; min-width: 150px; }
   .remove-q { background: none; border: none; color: #c62828; cursor: pointer; font-size: 16px; }
   .btn-add-q { background: #f5f5f5; color: #555; border: 2px dashed #ccc; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-family: inherit; width: 100%; margin-top: 8px; }
+  .preset-area { margin-bottom: 10px; }
+  .preset-label { font-size: 11px; color: #999; margin-bottom: 6px; }
+  .preset-btn { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; padding: 5px 12px; border-radius: 20px; cursor: pointer; font-size: 12px; font-family: inherit; margin-right: 6px; margin-bottom: 4px; }
+  .preset-btn:hover { background: #c8e6c9; }
   @media print {
     .top-bar, .main { display: none !important; }
     .qr-modal { position: static !important; display: block !important; background: none !important; }
@@ -2728,6 +2745,11 @@ app.get('/admin/events', (c) => {
     </div>
     <div class="custom-q-area">
       <strong style="font-size:13px;color:#555"><i class="fas fa-question-circle"></i> カスタム質問（任意）</strong>
+      <div class="preset-area" style="margin-top:8px">
+        <div class="preset-label">プリセット：</div>
+        <button class="preset-btn" onclick="applyPreset('checkout')"><i class="fas fa-clipboard-check"></i> チェックアウト基本3問</button>
+        <button class="preset-btn" onclick="applyPreset('feedback')"><i class="fas fa-comment"></i> ご意見ご感想のみ</button>
+      </div>
       <div id="customQuestions"></div>
       <button class="btn-add-q" onclick="addQuestion()"><i class="fas fa-plus"></i> 質問を追加</button>
     </div>
@@ -2747,18 +2769,38 @@ const user = JSON.parse(localStorage.getItem('user')||'null');
 if (!token||!user||user.role!=='admin') { window.location.href='/login'; throw new Error('redirect'); }
 
 let qCount = 0;
-function addQuestion() {
+function addQuestion(questionText, questionType, questionOpts) {
   qCount++;
   const div = document.getElementById('customQuestions');
   const item = document.createElement('div');
   item.className = 'custom-q-item';
   item.id = 'q_'+qCount;
-  item.innerHTML = '<input class="q-text" type="text" placeholder="質問文"><select class="q-type"><option value="text">テキスト入力</option><option value="radio">選択式</option><option value="rating">5段階評価</option></select><input class="q-opts" type="text" placeholder="選択肢（|区切り）" style="display:none;min-width:120px"><button class="remove-q" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>';
-  item.querySelector('.q-type').addEventListener('change', function() {
-    item.querySelector('.q-opts').style.display = this.value==='radio'?'block':'none';
+  item.innerHTML = '<input class="q-text" type="text" placeholder="質問文"><select class="q-type"><option value="text">テキスト入力</option><option value="radio">選択式（1つ）</option><option value="checkbox">複数選択</option><option value="rating">5段階評価</option></select><input class="q-opts" type="text" placeholder="選択肢（|区切り）" style="display:none;min-width:120px"><button class="remove-q" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>';
+  const typeEl = item.querySelector('.q-type');
+  const optsEl = item.querySelector('.q-opts');
+  typeEl.addEventListener('change', function() {
+    optsEl.style.display = (this.value==='radio'||this.value==='checkbox') ? 'block' : 'none';
   });
+  if (questionText) item.querySelector('.q-text').value = questionText;
+  if (questionType) { typeEl.value = questionType; optsEl.style.display = (questionType==='radio'||questionType==='checkbox') ? 'block' : 'none'; }
+  if (questionOpts) optsEl.value = questionOpts;
   div.appendChild(item);
 }
+
+function applyPreset(type) {
+  document.getElementById('customQuestions').innerHTML = '';
+  qCount = 0;
+  if (type === 'checkout') {
+    const vpOpts = '授業をつくる|授業をする・磨く|子どもを見る・評価する|仲間とつながる|研究・発信する';
+    addQuestion('今日唣激を受けた「成長の視点」はどれですか？（複数選択OK）', 'checkbox', vpOpts);
+    addQuestion('それを選んだ理由は？（一言でOK）', 'text', '');
+    addQuestion('明日以降、試してみたいことは？', 'text', '');
+    addQuestion('ご意見・ご感想（任意）', 'text', '');
+  } else if (type === 'feedback') {
+    addQuestion('ご意見・ご感想（任意）', 'text', '');
+  }
+}
+
 
 async function submitCreateEvent() {
   const title = document.getElementById('evTitle').value;
