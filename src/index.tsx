@@ -908,7 +908,8 @@ async function handleLogin(e) {
     if (!res.ok) { showError(data.error); return false; }
     localStorage.setItem('token', data.token);
     localStorage.setItem('user', JSON.stringify(data.user));
-    window.location.href = data.user.role === 'admin' ? '/admin' : '/mypage';
+    const redirectTo = new URLSearchParams(window.location.search).get('redirect');
+    window.location.href = redirectTo || (data.user.role === 'admin' ? '/admin' : '/mypage');
   } catch(err) { showError('通信エラーが発生しました'); }
   return false;
 }
@@ -925,7 +926,8 @@ async function handleRegister(e) {
     if (!res.ok) { showError(data.error); return false; }
     localStorage.setItem('token', data.token);
     localStorage.setItem('user', JSON.stringify(data.user));
-    window.location.href = '/mypage';
+    const redirectTo = new URLSearchParams(window.location.search).get('redirect');
+    window.location.href = redirectTo || '/mypage';
   } catch(err) { showError('通信エラーが発生しました'); }
   return false;
 }
@@ -935,7 +937,7 @@ const token = localStorage.getItem('token');
 if (token) {
   fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } })
     .then(r => { if (!r.ok) { localStorage.clear(); return {}; } return r.json(); })
-    .then(d => { if (d.user) window.location.href = d.user.role === 'admin' ? '/admin' : '/mypage'; })
+    .then(d => { if (d.user) { const redirectTo = new URLSearchParams(window.location.search).get('redirect'); window.location.href = redirectTo || (d.user.role === 'admin' ? '/admin' : '/mypage'); } })
     .catch(() => { localStorage.clear(); });
 }
 </script>
@@ -2545,9 +2547,19 @@ if (!token || !user) {
   document.getElementById('loginPrompt').style.display='block';
 } else { loadEvent(); }
 
+async function fetchWithTimeout(url, options, ms) {
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), ms || 10000);
+  try {
+    return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
 async function loadEvent() {
   try {
-    const res = await fetch('/api/events/'+CODE, { headers:{'Authorization':'Bearer '+token} });
+    const res = await fetchWithTimeout('/api/events/'+CODE, { headers:{'Authorization':'Bearer '+token} }, 10000);
     if (res.status === 401) { localStorage.clear(); document.getElementById('loading').style.display='none'; document.getElementById('loginPrompt').style.display='block'; return; }
     const data = await res.json();
     if (!res.ok) { document.getElementById('loading').innerHTML='<p style="color:#c62828">'+data.error+'</p>'; return; }
@@ -2557,7 +2569,10 @@ async function loadEvent() {
     }
     renderEvent(data);
 
-  } catch(e) { document.getElementById('loading').innerHTML='<p style="color:#c62828">エラーが発生しました</p>'; }
+  } catch(e) {
+    const msg = e && e.name === 'AbortError' ? '通信がタイムアウトしました。再読み込みしてください。' : 'エラーが発生しました';
+    document.getElementById('loading').innerHTML='<p style="color:#c62828">'+msg+'</p><button onclick="loadEvent()" style="margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border:none;border-radius:20px;font-size:14px;cursor:pointer">再試行</button>';
+  }
 }
 
 async function postAttendWithRetry(maxTry) {
