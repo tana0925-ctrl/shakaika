@@ -717,7 +717,7 @@ app.get('/api/events/:code', authMiddleware, async (c) => {
   const attendance = await db.prepare('SELECT * FROM attendances WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
   const survey = await db.prepare('SELECT * FROM survey_answers WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
   const { results: myCustom } = await db.prepare('SELECT * FROM custom_answers WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).all()
-  return c.json({ event, questions, attendance, survey, customAnswers: myCustom })
+  return c.json({ event, questions, attendance, survey, customAnswers: myCustom, userSchoolType: (user as any).school_type || '' })
 })
 
 app.post('/api/events/:code/attend', authMiddleware, async (c) => {
@@ -2516,6 +2516,10 @@ app.get('/attend/:code', (c) => {
   .checkbox-group { display: flex; flex-wrap: wrap; gap: 8px; }
   .checkbox-option { padding: 8px 16px; border: 2px solid #e0d6c8; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
   .checkbox-option.selected { border-color: #1565c0; background: #e3f2fd; color: #1565c0; font-weight: 700; }
+  .vp-detail-toggle { font-size: 12px; color: #888; cursor: pointer; margin-top: 6px; padding: 4px 0; }
+  .vp-detail-box { background: #faf6f0; border-radius: 8px; padding: 10px 14px; margin-top: 6px; }
+  .vp-detail-item { font-size: 12px; color: #666; padding: 3px 0; }
+  .vp-detail-item b { color: #5d4037; }
   .rating-stars { display: flex; gap: 4px; }
   .rating-star { font-size: 26px; cursor: pointer; color: #ddd; transition: color 0.15s; }
   .rating-star.active { color: #ffb300; }
@@ -2600,10 +2604,38 @@ async function postAttendWithRetry(maxTry) {
 let satisfaction = 0;
 let customData = {};
 
+const growthViewpoints = {
+  'elementary': [
+    {l:'授業をつくる',d:'教材研究・授業構成'},
+    {l:'授業をする',d:'実践・対話'},
+    {l:'子どもを見る',d:'観察・評価'},
+    {l:'つながる',d:'同僚性・仲間づくり'},
+    {l:'深める',d:'研究・発信'}
+  ],
+  'junior_high': [
+    {l:'授業をつくる',d:'教材研究・授業構成'},
+    {l:'資料',d:'読み解く・提示する'},
+    {l:'対話',d:'意見を交わす・議論する'},
+    {l:'探究',d:'問いを立てる・追究する'},
+    {l:'生徒を見る',d:'観察・評価'},
+    {l:'つながる',d:'仲間・同僚性'},
+    {l:'深める',d:'研究・発信'}
+  ],
+  'admin_staff': [
+    {l:'校内支援',d:'校内の社会科の授業を支える'},
+    {l:'学校経営',d:'社会科をカリキュラムに活かす'},
+    {l:'会員支援',d:'実践記録・論文の伴走'},
+    {l:'後進育成',d:'次世代リーダーを育てる'},
+    {l:'運営貢献',d:'同好会の運営や大会調整'},
+    {l:'対外連携',d:'外部講師の紹介・知見の還元'}
+  ],
+};
+
 function renderEvent(data) {
   const ev = data.event;
   const qs = data.questions || [];
   const hasSurvey = !!data.survey;
+  const userSchoolType = data.userSchoolType || '';
   document.getElementById('loading').style.display='none';
   const c = document.getElementById('content');
   c.style.display='block';
@@ -2625,10 +2657,22 @@ function renderEvent(data) {
         for (const o of opts) html += '<div class="radio-option" onclick="selectRadio(this,'+q.id+')">'+o+'</div>';
         html += '</div>';
       } else if (q.question_type === 'checkbox') {
-        const opts = q.options ? q.options.split('|') : [];
-        html += '<div class="checkbox-group" id="cq_'+q.id+'">';
-        for (const o of opts) html += '<div class="checkbox-option" onclick="toggleCheckbox(this,'+q.id+')">'+o+'</div>';
-        html += '</div>';
+        const isGrowth = q.question_text.includes('成長の視点') && growthViewpoints[userSchoolType];
+        if (isGrowth) {
+          const vps = growthViewpoints[userSchoolType];
+          html += '<div class="checkbox-group" id="cq_'+q.id+'">';
+          for (const v of vps) html += '<div class="checkbox-option" onclick="toggleCheckbox(this,'+q.id+')">'+v.l+'</div>';
+          html += '</div>';
+          html += '<div class="vp-detail-toggle" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\';this.textContent=this.nextElementSibling.style.display===\'none\'?\'\u25B6 視点の説明を見る\':\'\u25BC 閉じる\'">▶ 視点の説明を見る</div>';
+          html += '<div class="vp-detail-box" style="display:none">';
+          for (const v of vps) html += '<div class="vp-detail-item"><b>'+v.l+'</b>…'+v.d+'</div>';
+          html += '</div>';
+        } else {
+          const opts = q.options ? q.options.split('|') : [];
+          html += '<div class="checkbox-group" id="cq_'+q.id+'">';
+          for (const o of opts) html += '<div class="checkbox-option" onclick="toggleCheckbox(this,'+q.id+')">'+o+'</div>';
+          html += '</div>';
+        }
       } else if (q.question_type === 'rating') {
         html += '<div class="rating-stars" id="cq_'+q.id+'">';
         for (let i=1;i<=5;i++) html += '<span class="rating-star" data-qid="'+q.id+'" data-val="'+i+'" onclick="setRating('+q.id+','+i+')">★</span>';
