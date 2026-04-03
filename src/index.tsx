@@ -1202,17 +1202,22 @@ app.get('/mypage', (c) => {
       </details>
     </div>
 
-    <div class="notes-card" style="border-style:solid;border-color:#ffe0b2;margin-top:16px" id="travelCard">
-      <h2 style="color:#e65100;margin-bottom:12px"><i class="fas fa-globe-asia"></i> 社会科の旅 <span style="font-size:12px;color:#888;font-weight:500" id="travelFyLabel"></span></h2>
-      <div id="travelContent" style="text-align:center;padding:8px 0;">
-        <div style="font-size:14px;font-weight:700;color:#5d4037;margin-bottom:4px" id="travelStage"></div>
-        <div style="font-size:22px;margin-bottom:6px" id="travelIcon"></div>
-        <div style="font-size:13px;color:#888;margin-bottom:8px" id="travelTitle"></div>
-        <div style="background:#f5f0e8;border-radius:12px;height:22px;overflow:hidden;max-width:400px;margin:0 auto 8px">
-          <div id="travelBar" style="height:100%;border-radius:12px;transition:width 0.8s ease;background:linear-gradient(90deg,#ff8a65,#d84315);width:0%"></div>
+    <div style="background:#fff;border:1px solid #ffe0b2;border-radius:10px;padding:10px 14px;margin-top:12px" id="travelCard">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-family:'Zen Maru Gothic',sans-serif;font-size:14px;font-weight:700;color:#e65100"><i class="fas fa-globe-asia"></i> 社会科の旅</span>
+        <span style="font-size:11px;color:#888" id="travelFyLabel"></span>
+        <span id="travelStageLabel" style="font-size:13px;font-weight:700"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span id="travelIcon" style="font-size:18px"></span>
+        <div style="flex:1;background:#f5f0e8;border-radius:8px;height:16px;overflow:hidden">
+          <div id="travelBar" style="height:100%;border-radius:8px;transition:width 0.8s ease;width:0%"></div>
         </div>
-        <div style="font-size:12px;color:#888" id="travelProgress"></div>
-        <div style="font-size:11px;color:#bbb;margin-top:6px" id="travelNext"></div>
+        <span id="travelProgress" style="font-size:11px;color:#888;white-space:nowrap"></span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+        <span id="travelNext" style="font-size:10px;color:#bbb"></span>
+        <span style="font-size:10px;color:#bbb">💡 例会・研修でアンケートに回答すると1pt</span>
       </div>
     </div>
 
@@ -2040,23 +2045,23 @@ async function loadTravelProgress() {
     const stage = TRAVEL_STAGES.find(s => pts >= s.min && pts <= s.max) || TRAVEL_STAGES[0];
     const nextStage = TRAVEL_STAGES[TRAVEL_STAGES.indexOf(stage) + 1];
 
-    document.getElementById('travelFyLabel').textContent = data.fiscal_year + '年度';
+    document.getElementById('travelFyLabel').textContent = '(' + data.fiscal_year + '年度)';
     document.getElementById('travelIcon').textContent = stage.icon;
-    document.getElementById('travelStage').textContent = '現在地：' + stage.name;
-    document.getElementById('travelStage').style.color = stage.color;
-    document.getElementById('travelTitle').textContent = '称号：' + stage.title;
+    var sl = document.getElementById('travelStageLabel');
+    sl.textContent = stage.icon + ' ' + stage.name;
+    sl.style.color = stage.color;
 
     if (nextStage) {
       const pctInStage = ((pts - stage.min) / (stage.max - stage.min + 1)) * 100;
       document.getElementById('travelBar').style.width = Math.min(pctInStage, 100) + '%';
       document.getElementById('travelBar').style.background = 'linear-gradient(90deg,' + stage.color + '80,' + stage.color + ')';
-      document.getElementById('travelProgress').textContent = pts + ' pt（次のステージまで あと ' + (nextStage.min - pts) + ' pt）';
-      document.getElementById('travelNext').textContent = '次の目的地：' + nextStage.icon + ' ' + nextStage.name + '（' + nextStage.title + '）';
+      document.getElementById('travelProgress').textContent = pts + ' / ' + nextStage.min + ' pt';
+      document.getElementById('travelNext').textContent = '次：' + nextStage.icon + ' ' + nextStage.name + '（あと' + (nextStage.min - pts) + 'pt）';
     } else {
       document.getElementById('travelBar').style.width = '100%';
       document.getElementById('travelBar').style.background = 'linear-gradient(90deg,#ff8a65,#d84315,#5c6bc0,#42a5f5)';
-      document.getElementById('travelProgress').textContent = pts + ' pt — 最高ステージ到達！';
-      document.getElementById('travelNext').textContent = '';
+      document.getElementById('travelProgress').textContent = pts + ' pt';
+      document.getElementById('travelNext').textContent = '🎉 最高ステージ到達！';
     }
   } catch(e) { /* ignore */ }
 }
