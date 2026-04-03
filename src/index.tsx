@@ -976,6 +976,8 @@ app.get('/mypage', (c) => {
   .col-viewpoint { width: 85px; background-color: #fff8e1; font-weight: bold; color: #5d4037; font-family: 'Zen Maru Gothic', sans-serif; cursor: pointer; user-select: none; }
   .col-viewpoint:hover { background-color: #fff0c0; }
   .vp-toggle { font-size: 10px; color: #aaa; margin-right: 2px; }
+  .vp-hint { display: block; font-size: 9px; color: #aaa; font-weight: normal; margin-top: 4px; }
+  tr:not(.vp-collapsed) .vp-hint { display: none; }
   tr.vp-collapsed .col-step .cell-content p { display: none; }
   tr.vp-collapsed .col-step .memo-input { display: none; }
   tr.vp-collapsed .col-step .memo-hint { display: none; }
@@ -1951,7 +1953,7 @@ async function init() {
     var tr = vp.closest('tr');
     if (tr) {
       tr.classList.add('vp-collapsed');
-      vp.innerHTML = '<span class="vp-toggle">\u25B6</span> ' + vp.innerHTML;
+      vp.innerHTML = '<span class="vp-toggle">\u25B6</span> ' + vp.innerHTML + '<span class="vp-hint">◀ タップで展開</span>';
       vp.addEventListener('click', function(e) {
         e.stopPropagation();
         tr.classList.toggle('vp-collapsed');
