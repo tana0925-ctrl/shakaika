@@ -2053,7 +2053,7 @@ async function loadTravelProgress() {
     document.getElementById('travelFyLabel').textContent = '(' + data.fiscal_year + '年度)';
     document.getElementById('travelIcon').textContent = stage.icon;
     var sl = document.getElementById('travelStageLabel');
-    sl.textContent = stage.icon + ' ' + stage.name;
+    sl.textContent = '現在のステージ…' + stage.icon + ' ' + stage.name;
     sl.style.color = stage.color;
 
     if (nextStage) {
