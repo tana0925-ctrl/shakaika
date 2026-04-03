@@ -1144,10 +1144,28 @@ app.get('/mypage', (c) => {
   </div>
 
   <div class="container">
-    <div class="header">
-      <div class="title-block">
+    <div class="header" style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
+      <div class="title-block" style="flex-shrink:0">
         <h1>社会科同好会 成長の道しるべ</h1>
         <div class="subtitle">授業も、つながりも。あなたのペースで歩むガイドマップ</div>
+      </div>
+      <div id="travelCard" style="flex:1;min-width:260px;max-width:420px;background:#fffaf0;border:1px solid #ffe0b2;border-radius:10px;padding:8px 12px">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-family:'Zen Maru Gothic',sans-serif;font-size:12px;font-weight:700;color:#e65100"><i class="fas fa-globe-asia"></i> 社会科の旅</span>
+          <span style="font-size:10px;color:#888" id="travelFyLabel"></span>
+          <span id="travelStageLabel" style="font-size:12px;font-weight:700"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span id="travelIcon" style="font-size:16px"></span>
+          <div style="flex:1;background:#f5f0e8;border-radius:6px;height:14px;overflow:hidden">
+            <div id="travelBar" style="height:100%;border-radius:6px;transition:width 0.8s ease;width:0%"></div>
+          </div>
+          <span id="travelProgress" style="font-size:10px;color:#888;white-space:nowrap"></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
+          <span id="travelNext" style="font-size:9px;color:#bbb"></span>
+          <span style="font-size:9px;color:#bbb">💡 アンケート回答で1pt</span>
+        </div>
       </div>
     </div>
     <!-- Profile Modal -->
@@ -1205,25 +1223,6 @@ app.get('/mypage', (c) => {
           </div>
           <button class="btn-save" onclick="saveProfile()" id="btn-save-profile" style="font-size:14px;padding:10px 16px;width:100%">保存する</button>
         </div>
-      </div>
-    </div>
-
-    <div style="background:#fff;border:1px solid #ffe0b2;border-radius:10px;padding:10px 14px;margin-top:12px" id="travelCard">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-        <span style="font-family:'Zen Maru Gothic',sans-serif;font-size:14px;font-weight:700;color:#e65100"><i class="fas fa-globe-asia"></i> 社会科の旅</span>
-        <span style="font-size:11px;color:#888" id="travelFyLabel"></span>
-        <span id="travelStageLabel" style="font-size:13px;font-weight:700"></span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span id="travelIcon" style="font-size:18px"></span>
-        <div style="flex:1;background:#f5f0e8;border-radius:8px;height:16px;overflow:hidden">
-          <div id="travelBar" style="height:100%;border-radius:8px;transition:width 0.8s ease;width:0%"></div>
-        </div>
-        <span id="travelProgress" style="font-size:11px;color:#888;white-space:nowrap"></span>
-      </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
-        <span id="travelNext" style="font-size:10px;color:#bbb"></span>
-        <span style="font-size:10px;color:#bbb">💡 例会・研修でアンケートに回答すると1pt</span>
       </div>
     </div>
 
