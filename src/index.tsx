@@ -1132,6 +1132,7 @@ app.get('/mypage', (c) => {
   <div class="user-info">
     <span class="name" id="userName"></span>
     <span id="adminLink"></span>
+    <button class="btn-sm" style="background:#fff3e0;color:#e65100" onclick="document.getElementById('profileModal').style.display='flex'"><i class="fas fa-user-edit"></i> プロフィール</button>
     <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i> ログアウト</button>
   </div>
 </div>
@@ -1149,44 +1150,49 @@ app.get('/mypage', (c) => {
         <div class="subtitle">授業も、つながりも。あなたのペースで歩むガイドマップ</div>
       </div>
     </div>
-    <div class="container" style="padding: 12px 16px;">
-      <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
-        <label style="font-weight:bold; color:#1b5e20; white-space:nowrap; font-size:14px;">学校名</label>
-        <input type="text" id="schoolInput" placeholder="例：橘小学校" style="flex:1; padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:14px;">
-                <span id="schoolSaveStatus" style="font-weight:700; font-size:12px;"></span>
-      </div>
-      <details id="profileDetails" style="margin-top:4px;">
-        <summary style="cursor:pointer; font-weight:bold; color:#e65100; font-size:13px; padding:4px 0;">📋 プロフィール情報（クリックで開閉）</summary>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
+    <!-- Profile Modal -->
+    <div id="profileModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:1000;justify-content:center;align-items:center;padding:16px" onclick="if(event.target===this)this.style.display='none'">
+      <div style="background:#fff;border-radius:16px;padding:24px;max-width:480px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,0.15)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <h2 style="margin:0;font-family:'Zen Maru Gothic',sans-serif;color:#e65100;font-size:18px"><i class="fas fa-user-edit"></i> プロフィール設定</h2>
+          <button onclick="document.getElementById('profileModal').style.display='none'" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;padding:4px 8px">&times;</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;">
           <div>
-            <label style="font-size:12px; font-weight:bold; color:#5d4037;">区</label>
-            <select id="profile-district" style="width:100%; padding:5px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
-              <option value="">選択してください</option>
-              <option value="千種区">千種区</option><option value="東区">東区</option>
-              <option value="北区">北区</option><option value="西区">西区</option>
-              <option value="中村区">中村区</option><option value="中区">中区</option>
-              <option value="昭和区">昭和区</option><option value="瑞穂区">瑞穂区</option>
-              <option value="熱田区">熱田区</option><option value="中川区">中川区</option>
-              <option value="港区">港区</option><option value="南区">南区</option>
-              <option value="守山区">守山区</option><option value="緑区">緑区</option>
-              <option value="名東区">名東区</option><option value="天白区">天白区</option>
-            </select>
+            <label style="font-size:12px;font-weight:bold;color:#5d4037;">学校名</label>
+            <input type="text" id="schoolInput" placeholder="例：橘小学校" style="width:100%;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:14px;margin-top:2px">
+            <span id="schoolSaveStatus" style="font-weight:700;font-size:12px"></span>
           </div>
-          <div>
-            <label style="font-size:12px; font-weight:bold; color:#5d4037;">経験年数</label>
-            <div style="display:flex; align-items:center; gap:4px;">
-              <input type="number" id="profile-experience" placeholder="例：5" min="1" max="50" style="flex:1; padding:5px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
-              <span style="font-size:13px; white-space:nowrap;">年目</span>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div>
+              <label style="font-size:12px;font-weight:bold;color:#5d4037;">区</label>
+              <select id="profile-district" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;">
+                <option value="">選択してください</option>
+                <option value="千種区">千種区</option><option value="東区">東区</option>
+                <option value="北区">北区</option><option value="西区">西区</option>
+                <option value="中村区">中村区</option><option value="中区">中区</option>
+                <option value="昭和区">昭和区</option><option value="瑞穂区">瑞穂区</option>
+                <option value="熱田区">熱田区</option><option value="中川区">中川区</option>
+                <option value="港区">港区</option><option value="南区">南区</option>
+                <option value="守山区">守山区</option><option value="緑区">緑区</option>
+                <option value="名東区">名東区</option><option value="天白区">天白区</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:bold;color:#5d4037;">経験年数</label>
+              <div style="display:flex;align-items:center;gap:4px">
+                <input type="number" id="profile-experience" placeholder="例：5" min="1" max="50" style="flex:1;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;">
+                <span style="font-size:13px;white-space:nowrap">年目</span>
+              </div>
             </div>
           </div>
-          <div style="grid-column:1/3;">
-            <label style="font-size:12px; font-weight:bold; color:#5d4037;">担当学年（複数選択OK）</label>
-            <div id="profile-grade-checks" style="display:flex; flex-wrap:wrap; gap:4px; margin-top:4px;">
-            </div>
+          <div>
+            <label style="font-size:12px;font-weight:bold;color:#5d4037;">担当学年（複数選択OK）</label>
+            <div id="profile-grade-checks" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px"></div>
           </div>
           <div>
-            <label style="font-size:12px; font-weight:bold; color:#5d4037;">役職</label>
-            <select id="profile-position" style="width:100%; padding:5px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
+            <label style="font-size:12px;font-weight:bold;color:#5d4037;">役職</label>
+            <select id="profile-position" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;">
               <option value="">選択してください</option>
               <option value="小学校教諭">小学校教諭</option>
               <option value="中学校教諭">中学校教諭</option>
@@ -1197,9 +1203,9 @@ app.get('/mypage', (c) => {
               <option value="その他">その他</option>
             </select>
           </div>
+          <button class="btn-save" onclick="saveProfile()" id="btn-save-profile" style="font-size:14px;padding:10px 16px;width:100%">保存する</button>
         </div>
-        <button class="btn-save" onclick="saveProfile()" id="btn-save-profile" style="margin-top:8px; font-size:13px; padding:8px 16px;">💾 プロフィールを保存</button>
-      </details>
+      </div>
     </div>
 
     <div style="background:#fff;border:1px solid #ffe0b2;border-radius:10px;padding:10px 14px;margin-top:12px" id="travelCard">
@@ -1968,7 +1974,7 @@ async function init() {
     if (experienceEl && user.experience_years != null) experienceEl.value = user.experience_years;
     if (positionEl && user.position) positionEl.value = user.position;
     if (user.district || user.experience_years || user.grade || user.position) {
-      const det = document.getElementById('profileDetails'); if (det) det.open = true;
+      document.getElementById('profileModal').style.display = 'flex';
     }
 
     // Auto-switch table based on position
