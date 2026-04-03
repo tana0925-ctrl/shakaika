@@ -973,7 +973,13 @@ app.get('/mypage', (c) => {
   table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 10.5pt; table-layout: fixed; border-radius: 8px; overflow: hidden; border: 1px solid #ddd; min-width: 900px; }
   th, td { border: 1px solid #e0e0e0; padding: 7px 9px; vertical-align: middle; word-wrap: break-word; }
   .col-category { width: 30px; text-align: center; font-weight: bold; writing-mode: vertical-rl; letter-spacing: 3px; color: #fff; border-bottom: 1px solid rgba(255,255,255,0.3); }
-  .col-viewpoint { width: 85px; background-color: #fff8e1; font-weight: bold; color: #5d4037; font-family: 'Zen Maru Gothic', sans-serif; }
+  .col-viewpoint { width: 85px; background-color: #fff8e1; font-weight: bold; color: #5d4037; font-family: 'Zen Maru Gothic', sans-serif; cursor: pointer; user-select: none; }
+  .col-viewpoint:hover { background-color: #fff0c0; }
+  .vp-toggle { font-size: 10px; color: #aaa; margin-right: 2px; }
+  tr.vp-collapsed .col-step .cell-content p { display: none; }
+  tr.vp-collapsed .col-step .memo-input { display: none; }
+  tr.vp-collapsed .col-step .memo-hint { display: none; }
+  tr.vp-collapsed .col-step { padding: 5px 7px; vertical-align: middle; }
   .col-step { width: 22%; background-color: #fff; vertical-align: top; cursor: pointer; transition: all 0.2s; position: relative; }
   @media (hover: hover) and (pointer: fine) { .col-step:not(.selected):hover { background-color: #f5f5f5; } }
   .col-step.selected { background-color: #fff3e0; box-shadow: inset 0 0 0 3px var(--header-line); border-radius: 2px; }
@@ -1940,6 +1946,20 @@ async function init() {
   setupFYSelect();
   attachMemoListeners();
 
+  // 折りたたみ初期化
+  document.querySelectorAll('.col-viewpoint').forEach(function(vp) {
+    var tr = vp.closest('tr');
+    if (tr) {
+      tr.classList.add('vp-collapsed');
+      vp.innerHTML = '<span class="vp-toggle">\u25B6</span> ' + vp.innerHTML;
+      vp.addEventListener('click', function(e) {
+        e.stopPropagation();
+        tr.classList.toggle('vp-collapsed');
+        var tog = vp.querySelector('.vp-toggle');
+        if (tog) tog.textContent = tr.classList.contains('vp-collapsed') ? '\u25B6' : '\u25BC';
+      });
+    }
+  });
 
   const btnSave = document.getElementById('btnSave');
   if (btnSave) btnSave.addEventListener('click', () => saveSelections());
