@@ -1014,6 +1014,7 @@ app.get('/mypage', (c) => {
   tr:not(.vp-collapsed) .vp-hint { display: none; }
   tr.vp-collapsed .col-step .cell-content p { display: none; }
   tr.vp-collapsed .col-step .memo-input { display: none; }
+  tr.vp-collapsed .col-step.selected .memo-input { display: block; }
   tr.vp-collapsed .col-step .memo-hint { display: none; }
   tr.vp-collapsed .col-step { padding: 5px 7px; vertical-align: middle; }
   .col-step { width: 22%; background-color: #fff; vertical-align: top; cursor: pointer; transition: all 0.2s; position: relative; }
