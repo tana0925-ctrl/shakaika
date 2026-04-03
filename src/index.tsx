@@ -180,6 +180,21 @@ app.get('/api/init', async (c) => {
   )`).run()
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_annual_notes_user_year ON annual_notes(user_id, fiscal_year)').run()
 
+  // Points table for gamification
+  await db.prepare(`CREATE TABLE IF NOT EXISTS points (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    event_id INTEGER,
+    points INTEGER NOT NULL DEFAULT 1,
+    reason TEXT NOT NULL DEFAULT 'event_survey',
+    fiscal_year INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE SET NULL,
+    UNIQUE(user_id, event_id)
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_points_user_fy ON points(user_id, fiscal_year)').run()
+
   // Create default admin if not exists
   const adminHash = await hashPassword('admin123')
   await db.prepare(
@@ -357,6 +372,19 @@ app.post('/api/me/annual-notes', authMiddleware, async (c) => {
   `).bind(user.id, fiscal_year, goal, reflection).run()
 
   return c.json({ success: true })
+})
+
+// ========== Points API ==========
+app.get('/api/me/points', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const qfy = c.req.query('fy')
+  const fy = qfy ? parseInt(qfy) : getCurrentFiscalYear()
+  const fiscalYear = Number.isFinite(fy) ? fy : getCurrentFiscalYear()
+  const db = c.env.DB
+  const row = await db.prepare(
+    'SELECT COALESCE(SUM(points), 0) as total FROM points WHERE user_id = ? AND fiscal_year = ?'
+  ).bind(user.id, fiscalYear).first() as any
+  return c.json({ fiscal_year: fiscalYear, total_points: row?.total || 0 })
 })
 
 app.get('/api/me/history', authMiddleware, async (c) => {
@@ -756,6 +784,12 @@ app.post('/api/events/:code/survey', authMiddleware, async (c) => {
       await db.prepare('INSERT INTO custom_answers (event_id, user_id, question_id, answer_text) VALUES (?,?,?,?) ON CONFLICT(event_id, user_id, question_id) DO UPDATE SET answer_text=excluded.answer_text').bind(event.id, user.id, ca.question_id, ca.answer_text || '').run()
     }
   }
+  // Grant point for survey completion (1 point per event, idempotent)
+  const eventDate = new Date(event.event_date)
+  const fy = eventDate.getMonth() + 1 >= 4 ? eventDate.getFullYear() : eventDate.getFullYear() - 1
+  await db.prepare(
+    'INSERT OR IGNORE INTO points (user_id, event_id, points, reason, fiscal_year) VALUES (?, ?, 1, ?, ?)'
+  ).bind(user.id, event.id, 'event_survey', fy).run()
   return c.json({ success: true })
 })
 
@@ -1166,6 +1200,20 @@ app.get('/mypage', (c) => {
         </div>
         <button class="btn-save" onclick="saveProfile()" id="btn-save-profile" style="margin-top:8px; font-size:13px; padding:8px 16px;">💾 プロフィールを保存</button>
       </details>
+    </div>
+
+    <div class="notes-card" style="border-style:solid;border-color:#ffe0b2;margin-top:16px" id="travelCard">
+      <h2 style="color:#e65100;margin-bottom:12px"><i class="fas fa-globe-asia"></i> 社会科の旅 <span style="font-size:12px;color:#888;font-weight:500" id="travelFyLabel"></span></h2>
+      <div id="travelContent" style="text-align:center;padding:8px 0;">
+        <div style="font-size:14px;font-weight:700;color:#5d4037;margin-bottom:4px" id="travelStage"></div>
+        <div style="font-size:22px;margin-bottom:6px" id="travelIcon"></div>
+        <div style="font-size:13px;color:#888;margin-bottom:8px" id="travelTitle"></div>
+        <div style="background:#f5f0e8;border-radius:12px;height:22px;overflow:hidden;max-width:400px;margin:0 auto 8px">
+          <div id="travelBar" style="height:100%;border-radius:12px;transition:width 0.8s ease;background:linear-gradient(90deg,#ff8a65,#d84315);width:0%"></div>
+        </div>
+        <div style="font-size:12px;color:#888" id="travelProgress"></div>
+        <div style="font-size:11px;color:#bbb;margin-top:6px" id="travelNext"></div>
+      </div>
     </div>
 
     <div class="notes-card" style="border-style:solid;border-color:#ffe0b2;margin-top:16px">
@@ -1971,6 +2019,46 @@ async function init() {
   loadSelections();
   loadAnnualNotes();
   loadHistory();
+  loadTravelProgress();
+}
+
+const TRAVEL_STAGES = [
+  { min: 0, max: 2, icon: '🏫', name: '学校', title: '社会科見習い', color: '#8d6e63' },
+  { min: 3, max: 5, icon: '🏙️', name: '名古屋', title: '街の実践者', color: '#ff8a65' },
+  { min: 6, max: 9, icon: '🗾', name: '愛知', title: '愛知の探究者', color: '#66bb6a' },
+  { min: 10, max: 14, icon: '🗾', name: '日本', title: '全国の挑戦者', color: '#42a5f5' },
+  { min: 15, max: 19, icon: '🌏', name: '世界', title: '世界を見る人', color: '#5c6bc0' },
+  { min: 20, max: 9999, icon: '🚀', name: '宇宙', title: '宇宙の社会科人', color: '#d84315' }
+];
+
+async function loadTravelProgress() {
+  try {
+    const res = await fetch('/api/me/points', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) return;
+    const data = await res.json();
+    const pts = data.total_points || 0;
+    const stage = TRAVEL_STAGES.find(s => pts >= s.min && pts <= s.max) || TRAVEL_STAGES[0];
+    const nextStage = TRAVEL_STAGES[TRAVEL_STAGES.indexOf(stage) + 1];
+
+    document.getElementById('travelFyLabel').textContent = data.fiscal_year + '年度';
+    document.getElementById('travelIcon').textContent = stage.icon;
+    document.getElementById('travelStage').textContent = '現在地：' + stage.name;
+    document.getElementById('travelStage').style.color = stage.color;
+    document.getElementById('travelTitle').textContent = '称号：' + stage.title;
+
+    if (nextStage) {
+      const pctInStage = ((pts - stage.min) / (stage.max - stage.min + 1)) * 100;
+      document.getElementById('travelBar').style.width = Math.min(pctInStage, 100) + '%';
+      document.getElementById('travelBar').style.background = 'linear-gradient(90deg,' + stage.color + '80,' + stage.color + ')';
+      document.getElementById('travelProgress').textContent = pts + ' pt（次のステージまで あと ' + (nextStage.min - pts) + ' pt）';
+      document.getElementById('travelNext').textContent = '次の目的地：' + nextStage.icon + ' ' + nextStage.name + '（' + nextStage.title + '）';
+    } else {
+      document.getElementById('travelBar').style.width = '100%';
+      document.getElementById('travelBar').style.background = 'linear-gradient(90deg,#ff8a65,#d84315,#5c6bc0,#42a5f5)';
+      document.getElementById('travelProgress').textContent = pts + ' pt — 最高ステージ到達！';
+      document.getElementById('travelNext').textContent = '';
+    }
+  } catch(e) { /* ignore */ }
 }
 
 if (document.readyState === 'loading') {
