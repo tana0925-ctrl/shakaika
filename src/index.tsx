@@ -2725,10 +2725,22 @@ async function fetchWithTimeout(url, options, ms) {
 
 async function loadEvent() {
   try {
-    const res = await fetchWithTimeout('/api/events/'+CODE, { headers:{'Authorization':'Bearer '+token} }, 10000);
-    if (res.status === 401) { localStorage.clear(); document.getElementById('loading').style.display='none'; document.getElementById('loginPrompt').style.display='block'; return; }
-    const data = await res.json();
-    if (!res.ok) { document.getElementById('loading').innerHTML='<p style="color:#c62828">'+data.error+'</p>'; return; }
+    var res;
+    try {
+      res = await fetchWithTimeout('/api/events/'+CODE, { headers:{'Authorization':'Bearer '+token} }, 10000);
+    } catch(netErr) {
+      var msg2 = netErr && netErr.name === 'AbortError' ? '通信がタイムアウトしました。' : '通信エラーが発生しました。';
+      document.getElementById('loading').innerHTML='<p style="color:#c62828">'+msg2+'</p><button onclick="location.reload()" style="margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border:none;border-radius:20px;font-size:14px;cursor:pointer">再試行</button>';
+      return;
+    }
+    if (res.status === 401 || res.status === 403) { localStorage.clear(); document.getElementById('loading').style.display='none'; document.getElementById('loginPrompt').style.display='block'; return; }
+    if (!res.ok) {
+      var errData = {};
+      try { errData = await res.json(); } catch(e2) {}
+      document.getElementById('loading').innerHTML='<p style="color:#c62828">'+(errData.error||'エラーが発生しました（'+res.status+'）')+'</p><button onclick="location.reload()" style="margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border:none;border-radius:20px;font-size:14px;cursor:pointer">再試行</button>';
+      return;
+    }
+    var data = await res.json();
     // Auto attend（落ちにくくするため軽いリトライ付き）
     if (!data.attendance) {
       await postAttendWithRetry(3);
@@ -2736,8 +2748,8 @@ async function loadEvent() {
     renderEvent(data);
 
   } catch(e) {
-    const msg = e && e.name === 'AbortError' ? '通信がタイムアウトしました。再読み込みしてください。' : 'エラーが発生しました';
-    document.getElementById('loading').innerHTML='<p style="color:#c62828">'+msg+'</p><button onclick="loadEvent()" style="margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border:none;border-radius:20px;font-size:14px;cursor:pointer">再試行</button>';
+    console.error('loadEvent error', e);
+    document.getElementById('loading').innerHTML='<p style="color:#c62828">エラーが発生しました</p><button onclick="location.reload()" style="margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border:none;border-radius:20px;font-size:14px;cursor:pointer">再試行</button>';
   }
 }
 
