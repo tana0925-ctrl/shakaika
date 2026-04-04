@@ -1429,11 +1429,11 @@ app.get('/mypage', (c) => {
         </tr>
         <tr>
           <td class="col-category cat-connect" rowspan="2">人材<br>育成</td>
-          <td class="col-viewpoint"><div>会員の成長を支える</div><div style="font-size:9px;color:#888;margin-top:2px">指導・助言</div></td>
-          <td class="col-step" data-vp="a_member_support" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">実践記録を読んで感想を伝える</span><p>会員が書いた実践記録や体験記録を読み、「ここが面白い」と感想を伝えることから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
-          <td class="col-step" data-vp="a_member_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">論文の方向性を一緒に考える</span><p>「何を書きたいか」を一緒に整理し、論文や実践記録の方向づけを手伝ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
-          <td class="col-step" data-vp="a_member_support" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">論文を書き上げるまで伴走する</span><p>構成から推敲まで、会員が論文を完成させるまで粘り強く伴走してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
-          <td class="col-step" data-vp="a_member_support" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">書く文化を会に根づかせる</span><p>「書いてみようかな」と思える雰囲気をつくり、会員同士が互いの原稿を読み合う文化を育てたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-viewpoint"><div>会員の成長を支える</div><div style="font-size:9px;color:#888;margin-top:2px">傾聴・伴走</div></td>
+          <td class="col-step" data-vp="a_member_support" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">やってみたことを聞いて感想を伝える</span><p>「授業でこうしてみた」という話を聞き、「それ面白いね」「子どもが変わったね」と伝えることから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_member_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">実践を言葉にする手助けをする</span><p>やってみたことを記録や発表にまとめるきっかけづくり（「書いてみない？」の声かけ等）をしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_member_support" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">論文・記録の方向性を一緒に考える</span><p>「何を書きたいか」を整理し、実践記録や論文の方向づけを手伝ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_member_support" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">書き上げるまで伴走し、書く文化を広げる</span><p>構成から推敲まで粘り強く伴走し、「書いてみようかな」と思える雰囲気を会に広げたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
         </tr>
         <tr>
           <td class="col-viewpoint"><div>次世代リーダーを育てる</div><div style="font-size:9px;color:#888;margin-top:2px">後進育成</div></td>
@@ -2798,7 +2798,7 @@ const growthViewpoints = {
   'admin_staff': [
     {l:'校内支援',d:'校内の社会科の授業を支える'},
     {l:'学校経営',d:'社会科をカリキュラムに活かす'},
-    {l:'会員支援',d:'実践記録・論文の伴走'},
+    {l:'会員支援',d:'実践に寄り添い、言葉にする手助け'},
     {l:'後進育成',d:'次世代リーダーを育てる'},
     {l:'運営貢献',d:'同好会の運営や大会調整'},
     {l:'対外連携',d:'外部講師の紹介・知見の還元'}
