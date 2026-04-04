@@ -1080,6 +1080,31 @@ app.get('/mypage', (c) => {
   .scroll-hint { display: none; text-align: center; color: #999; font-size: 12px; margin-bottom: 8px; animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:0.5} 50%{opacity:1} }
 
+  /* Mobile cards (hidden on desktop) */
+  .mobile-cards { display: none; }
+  .mc-card { background: #fff; border: 2px solid #f0e6d2; border-radius: 12px; margin-bottom: 8px; overflow: hidden; }
+  .mc-card-header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; cursor: pointer; user-select: none; }
+  .mc-card-header .mc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .mc-card-header .mc-vp { font-weight: 700; font-size: 14px; color: #5d4037; font-family: 'Zen Maru Gothic', sans-serif; }
+  .mc-card-header .mc-sub { font-size: 11px; color: #888; }
+  .mc-card-header .mc-cur { margin-left: auto; font-size: 11px; font-weight: 700; color: #d84315; background: #fff3e0; padding: 3px 10px; border-radius: 20px; white-space: nowrap; }
+  .mc-card-header .mc-cur.none { background: #f5f5f5; color: #bbb; }
+  .mc-card-header .mc-arrow { color: #ccc; font-size: 11px; margin-left: 4px; transition: transform 0.2s; }
+  .mc-card.open .mc-arrow { transform: rotate(90deg); }
+  .mc-card-body { display: none; padding: 0 12px 12px; }
+  .mc-card.open .mc-card-body { display: block; }
+  .mc-opt { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 2px solid #eee; border-radius: 10px; margin-bottom: 6px; cursor: pointer; transition: all 0.15s; -webkit-tap-highlight-color: transparent; }
+  .mc-opt:active { background: #fff8f0; }
+  .mc-opt.selected { border-color: #d84315; background: #fff3e0; }
+  .mc-opt .mc-badge { flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #fff; background: #ddd; }
+  .mc-opt.selected .mc-badge { background: #d84315; }
+  .mc-opt .mc-info { flex: 1; }
+  .mc-opt .mc-kw { font-weight: 700; font-size: 13px; color: #5d4037; }
+  .mc-opt .mc-desc { font-size: 11px; color: #888; margin-top: 2px; line-height: 1.4; }
+  .mc-opt .mc-check { flex-shrink: 0; font-size: 18px; color: #ddd; align-self: center; }
+  .mc-opt.selected .mc-check { color: #d84315; }
+  .mc-memo { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: inherit; resize: none; min-height: 50px; margin-top: 4px; }
+
   @media (max-width: 768px) {
     /* B: トップバー最適化 */
     .top-bar { padding: 8px 12px; flex-wrap: wrap; gap: 6px; }
@@ -1124,6 +1149,10 @@ app.get('/mypage', (c) => {
 
     /* 目標・振り返りのタッチ改善 */
     .notes-card textarea { font-size: 15px; padding: 12px; min-height: 100px; }
+
+    /* A: テーブル→カード切り替え */
+    #tableElem, #tableJunior, #tableAdmin, .scroll-hint, .row-action, .footer-note { display: none !important; }
+    .mobile-cards { display: block !important; }
   }
 
   @media print {
@@ -1451,6 +1480,8 @@ app.get('/mypage', (c) => {
 
 
   </div>
+
+  <div class="mobile-cards" id="mobileCards"></div>
 
   <div class="save-area">
     <button id="btnSave" type="button" class="btn-sm btn-save"><i class="fas fa-save"></i> 保存する</button>
@@ -1855,7 +1886,170 @@ async function loadSelections() {
     console.error(e);
   } finally {
     selectionsLoaded = true;
+    buildMobileCards();
   }
+}
+
+// ========== Mobile Cards ==========
+const catColors = { 'lesson_plan':'#8d6e63','lesson_practice':'#8d6e63','student_eval':'#8d6e63',
+  'connection':'#66bb6a','research':'#42a5f5',
+  'j_lesson_plan':'#8d6e63','j_material':'#8d6e63','j_dialogue':'#8d6e63','j_inquiry':'#8d6e63','j_student_eval':'#8d6e63',
+  'j_connection':'#66bb6a','j_research':'#42a5f5',
+  'a_school_support':'#8d6e63','a_school_mgmt':'#66bb6a','a_member_support':'#66bb6a',
+  'a_leader_dev':'#42a5f5','a_org_mgmt':'#42a5f5','a_outreach':'#5c6bc0' };
+
+function buildMobileCards() {
+  const container = document.getElementById('mobileCards');
+  if (!container) return;
+  container.innerHTML = '';
+
+  // Find the currently visible table
+  const tables = [document.getElementById('tableElem'), document.getElementById('tableJunior'), document.getElementById('tableAdmin')];
+  let activeTable = tables.find(t => t && t.style.display !== 'none');
+  if (!activeTable) activeTable = tables[0];
+  if (!activeTable) return;
+
+  // Group cells by viewpoint
+  const vpMap = new Map();
+  activeTable.querySelectorAll('.col-step').forEach(cell => {
+    const vp = cell.getAttribute('data-vp');
+    const step = parseInt(cell.getAttribute('data-step') || '0');
+    if (!vp || !step) return;
+    if (!vpMap.has(vp)) vpMap.set(vp, []);
+    // Get keyword and description
+    const kwEl = cell.querySelector('.keyword');
+    const pEl = cell.querySelector('.cell-content p');
+    vpMap.get(vp).push({
+      step, vp,
+      keyword: kwEl ? kwEl.textContent : ('STEP ' + step),
+      desc: pEl ? pEl.textContent : ''
+    });
+  });
+
+  // Get viewpoint labels from table
+  const vpLabels = {};
+  activeTable.querySelectorAll('.col-viewpoint').forEach(vpCell => {
+    const tr = vpCell.closest('tr');
+    if (!tr) return;
+    const firstStep = tr.querySelector('.col-step');
+    if (!firstStep) return;
+    const vp = firstStep.getAttribute('data-vp');
+    if (!vp) return;
+    const nameDiv = vpCell.querySelector('div');
+    const subDiv = vpCell.querySelectorAll('div')[1];
+    vpLabels[vp] = {
+      name: nameDiv ? nameDiv.textContent.trim() : vp,
+      sub: subDiv ? subDiv.textContent.trim() : ''
+    };
+  });
+
+  vpMap.forEach((steps, vp) => {
+    const label = vpLabels[vp] || { name: vp, sub: '' };
+    const sel = selectedByVp[vp];
+    const color = catColors[vp] || '#8d6e63';
+
+    const card = document.createElement('div');
+    card.className = 'mc-card';
+    card.setAttribute('data-mc-vp', vp);
+
+    // Header
+    const curLabel = sel ? ('STEP ' + sel.step) : '未選択';
+    const curClass = sel ? '' : ' none';
+    card.innerHTML = '<div class="mc-card-header" onclick="this.parentElement.classList.toggle(\'open\')">'
+      + '<div class="mc-dot" style="background:' + color + '"></div>'
+      + '<div><div class="mc-vp">' + label.name + '</div>'
+      + (label.sub ? '<div class="mc-sub">' + label.sub + '</div>' : '')
+      + '</div>'
+      + '<div class="mc-cur' + curClass + '">' + curLabel + '</div>'
+      + '<div class="mc-arrow">▶</div></div>';
+
+    // Body
+    const body = document.createElement('div');
+    body.className = 'mc-card-body';
+
+    steps.forEach(s => {
+      const isSelected = sel && sel.step === s.step;
+      const opt = document.createElement('div');
+      opt.className = 'mc-opt' + (isSelected ? ' selected' : '');
+      opt.setAttribute('data-mc-vp', s.vp);
+      opt.setAttribute('data-mc-step', String(s.step));
+      opt.innerHTML = '<div class="mc-badge">' + s.step + '</div>'
+        + '<div class="mc-info"><div class="mc-kw">' + s.keyword + '</div>'
+        + (s.desc ? '<div class="mc-desc">' + s.desc + '</div>' : '')
+        + '</div><div class="mc-check">✓</div>';
+      opt.addEventListener('click', function(e) {
+        e.stopPropagation();
+        selectFromCard(s.vp, s.step, card);
+      });
+      body.appendChild(opt);
+    });
+
+    // Memo
+    const memoWrap = document.createElement('div');
+    memoWrap.style.display = sel ? 'block' : 'none';
+    memoWrap.className = 'mc-memo-wrap';
+    const memo = document.createElement('textarea');
+    memo.className = 'mc-memo';
+    memo.placeholder = 'メモ（任意）';
+    memo.value = sel ? (sel.memo || '') : '';
+    memo.addEventListener('input', function() {
+      const cur = selectedByVp[vp];
+      if (cur) {
+        cur.memo = this.value;
+        // Sync to table memo
+        const tableCell = document.querySelector('.col-step[data-vp="' + vp + '"][data-step="' + cur.step + '"]');
+        if (tableCell) {
+          const tableMemo = tableCell.querySelector('.memo-input');
+          if (tableMemo) tableMemo.value = this.value;
+        }
+      }
+    });
+    memo.addEventListener('click', function(e) { e.stopPropagation(); });
+    memoWrap.appendChild(memo);
+    body.appendChild(memoWrap);
+
+    card.appendChild(body);
+    container.appendChild(card);
+  });
+}
+
+function selectFromCard(vp, step, card) {
+  // Update selectedByVp (toggle if same)
+  const prev = selectedByVp[vp];
+  const wasSelected = prev && prev.step === step;
+
+  // Deselect all options in this card
+  card.querySelectorAll('.mc-opt').forEach(o => o.classList.remove('selected'));
+
+  // Also deselect in table
+  document.querySelectorAll('.col-step[data-vp="' + vp + '"]').forEach(el => el.classList.remove('selected'));
+
+  if (wasSelected) {
+    delete selectedByVp[vp];
+  } else {
+    selectedByVp[vp] = { step: step, memo: prev ? prev.memo : '' };
+    // Select in card
+    const opt = card.querySelector('.mc-opt[data-mc-step="' + step + '"]');
+    if (opt) opt.classList.add('selected');
+    // Select in table
+    const tableCell = document.querySelector('.col-step[data-vp="' + vp + '"][data-step="' + step + '"]');
+    if (tableCell) {
+      tableCell.classList.add('selected');
+      const tableMemo = tableCell.querySelector('.memo-input');
+      if (tableMemo && prev) tableMemo.value = prev.memo || '';
+    }
+  }
+
+  // Update card header badge
+  const cur = selectedByVp[vp];
+  const badge = card.querySelector('.mc-cur');
+  if (badge) {
+    badge.textContent = cur ? ('STEP ' + cur.step) : '未選択';
+    badge.className = 'mc-cur' + (cur ? '' : ' none');
+  }
+  // Show/hide memo
+  const memoWrap = card.querySelector('.mc-memo-wrap');
+  if (memoWrap) memoWrap.style.display = cur ? 'block' : 'none';
 }
 
 async function saveSelections() {
@@ -1881,12 +2075,18 @@ async function saveSelections() {
     for (const vp of viewpoints) {
       const sel = selectedByVp[vp];
       if (sel && sel.step) {
-        // Get latest memo from DOM (in case)
+        // Get latest memo from DOM (table or mobile card)
         const cell = document.querySelector('.col-step[data-vp="' + vp + '"][data-step="' + sel.step + '"]');
         let memo = sel.memo || '';
         if (cell) {
           const memoEl = cell.querySelector('.memo-input');
           if (memoEl) memo = memoEl.value;
+        }
+        // Also check mobile card memo
+        const mcCard = document.querySelector('.mc-card[data-mc-vp="' + vp + '"]');
+        if (mcCard) {
+          const mcMemo = mcCard.querySelector('.mc-memo');
+          if (mcMemo && mcMemo.value) memo = mcMemo.value;
         }
 
         tasks.push(fetchWithTimeout('/api/selections', {
