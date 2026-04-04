@@ -999,7 +999,8 @@ app.get('/mypage', (c) => {
   .guide { background: #fff3e0; border-left: 4px solid #ffb74d; padding: 12px 16px; border-radius: 0 8px 8px 0; margin-bottom: 20px; font-size: 13px; color: #5d4037; }
   .guide strong { color: #e65100; }
 
-  .container { max-width: 1250px; margin: 0 auto; background-color: #fff; padding: 20px 24px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-radius: 12px; border: 2px solid #f0e6d2; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .container { max-width: 1250px; margin: 0 auto; background-color: #fff; padding: 20px 24px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-radius: 12px; border: 2px solid #f0e6d2; overflow-x: hidden; }
+  .table-scroll-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 3px dashed var(--header-line); padding-bottom: 8px; margin-bottom: 15px; }
   .title-block h1 { font-family: 'Zen Maru Gothic', sans-serif; font-size: 22px; margin: 0; line-height: 1.2; color: var(--header-line); }
   .title-block .subtitle { font-size: 12px; color: #666; margin-top: 4px; font-weight: 500; }
@@ -1251,6 +1252,7 @@ app.get('/mypage', (c) => {
       <div style="color:#666"><strong>カテゴリ：</strong><span style="color:#8d6e63">■ 授業・準備</span> <span style="color:#66bb6a">■ 仲間・活動</span> <span style="color:#42a5f5">■ 研究・発信</span></div>
       <div style="color:#777;text-align:right;max-width:60%">※これは「ここまでやらなきゃいけない」というノルマではありません。特にSTEP4は「いつかチャレンジできたら」という可能性の入口です。今の自分に合った「次の一歩」を見つけるための地図として使ってください。</div>
     </div>
+    <div class="table-scroll-wrap">
     <table id="tableElem">
       <thead><tr>
         <th colspan="2" style="background-color: #fff8e1; border-bottom: 3px solid #5d4037;">成長の視点</th>
@@ -1442,6 +1444,7 @@ app.get('/mypage', (c) => {
         </tr>
       </tbody>
     </table>
+    </div>
 
     <div class="notes-card" style="border-style:solid;border-color:#bbdefb;margin-top:16px">
       <h2 style="color:#1565c0"><i class="fas fa-pen"></i> 今年度の振り返り</h2>
