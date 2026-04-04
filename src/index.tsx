@@ -1744,8 +1744,7 @@ function renderHistory(events) {
       : '<span class="tag tag-pending">未回答</span>';
 
     const detailId = 'detail_' + ev.event_id;
-    const sat = (ev.survey && ev.survey.satisfaction) ? ('満足度：' + ev.survey.satisfaction + ' / 5') : '満足度：—';
-    const comment = (ev.survey && ev.survey.comment) ? esc(ev.survey.comment) : '（自由記述なし）';
+    const comment = (ev.survey && ev.survey.comment) ? esc(ev.survey.comment) : '';
 
     let qaHtml = '';
     if (Array.isArray(ev.questions) && ev.questions.length > 0) {
@@ -1771,8 +1770,7 @@ function renderHistory(events) {
       +     '<button class="toggle-btn" type="button" data-detail="' + esc(detailId) + '"><i class="fas fa-eye"></i> 振り返りを見る</button>'
       +   '</div>'
       +   '<div class="event-detail" id="' + esc(detailId) + '">'
-      +     '<div style="font-weight:700;color:#555">' + esc(sat) + '</div>'
-      +     '<div style="margin-top:6px;color:#555;white-space:pre-wrap">' + comment + '</div>'
+      +     (comment ? '<div style="color:#555;white-space:pre-wrap">' + comment + '</div>' : '')
       +     qaHtml
       +   '</div>'
       + '</div>';
@@ -2807,7 +2805,10 @@ function renderEvent(data) {
   let html = '<div class="success-box"><i class="fas fa-check-circle"></i><p>出席を記録しました！</p></div>';
   html += '<div class="card"><h2>'+escHtml(ev.title)+'</h2><div class="date"><i class="fas fa-calendar"></i> '+escHtml(ev.event_date)+'</div>';
   if (ev.description) html += '<div class="desc">'+escHtml(ev.description)+'</div>';
-  if (hasSurvey) {
+  if (qs.length === 0) {
+    html += '</div>';
+    html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
+  } else if (hasSurvey) {
     html += '<div class="already"><i class="fas fa-clipboard-check"></i> アンケートは回答済みです。ありがとうございました！</div></div>';
     html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
   } else {
@@ -3160,14 +3161,13 @@ function renderDetail(el, d, tab) {
       var userIds = Object.keys(ansMap);
       Object.keys(caByUser).forEach(function(uid) { if (userIds.indexOf(uid) === -1) userIds.push(uid); });
 
-      html += '<table><tr><th>名前</th><th>満足度</th>';
+      html += '<table><tr><th>名前</th>';
       if (d.questions.length) html += '<th>回答</th>';
       html += '</tr>';
       userIds.forEach(function(uid) {
         var ans = ansMap[uid];
         var name = ans ? escHtml(ans.name) : (caByUser[uid] && caByUser[uid][0] ? escHtml(caByUser[uid][0].name) : '?');
-        var sat = ans && ans.satisfaction ? '★'+ans.satisfaction : '-';
-        html += '<tr><td>'+name+'</td><td>'+sat+'</td>';
+        html += '<tr><td>'+name+'</td>';
         if (d.questions.length) {
           var parts = [];
           (caByUser[uid]||[]).forEach(function(ca) {
