@@ -2828,7 +2828,7 @@ function renderEvent(data) {
     for (const q of qs) {
       html += '<div class="form-group"><label>'+escHtml(q.question_text)+'</label>';
       if (q.question_type === 'text') {
-        html += '<textarea id="cq_'+q.id+'" placeholder="回答を入力" rows="2" oninput="this.style.height=\'auto\';this.style.height=this.scrollHeight+\'px\'" style="width:100%;resize:none;overflow:hidden;min-height:48px"></textarea>';
+        html += '<textarea id="cq_'+q.id+'" placeholder="回答を入力" rows="2" oninput="this.style.height=&quot;auto&quot;;this.style.height=this.scrollHeight+&quot;px&quot;" style="width:100%;resize:none;overflow:hidden;min-height:48px"></textarea>';
       } else if (q.question_type === 'radio') {
         const opts = q.options ? q.options.split('|') : [];
         html += '<div class="radio-group" id="cq_'+q.id+'">';
@@ -2841,7 +2841,7 @@ function renderEvent(data) {
           html += '<div class="checkbox-group" id="cq_'+q.id+'">';
           for (const v of vps) html += '<div class="checkbox-option" onclick="toggleCheckbox(this,'+q.id+')">'+v.l+'</div>';
           html += '</div>';
-          html += '<div class="vp-detail-toggle" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\';this.textContent=this.nextElementSibling.style.display===\'none\'?\'\u25B6 視点の説明を見る\':\'\u25BC 閉じる\'">▶ 視点の説明を見る</div>';
+          html += '<div class="vp-detail-toggle" onclick="var el=this.nextElementSibling;if(el.style.display===&quot;none&quot;){el.style.display=&quot;block&quot;;this.textContent=&quot;\u25BC 閉じる&quot;}else{el.style.display=&quot;none&quot;;this.textContent=&quot;\u25B6 視点の説明を見る&quot;}">▶ 視点の説明を見る</div>';
           html += '<div class="vp-detail-box" style="display:none">';
           for (const v of vps) html += '<div class="vp-detail-item"><b>'+v.l+'</b>…'+v.d+'</div>';
           html += '</div>';
