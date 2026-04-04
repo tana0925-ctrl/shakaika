@@ -1898,25 +1898,44 @@ const catColors = { 'lesson_plan':'#8d6e63','lesson_practice':'#8d6e63','student
   'a_school_support':'#8d6e63','a_school_mgmt':'#66bb6a','a_member_support':'#66bb6a',
   'a_leader_dev':'#42a5f5','a_org_mgmt':'#42a5f5','a_outreach':'#5c6bc0' };
 
+// Viewpoint display names
+const vpDisplayNames = {
+  'lesson_plan': { name: '授業をつくる', sub: '教材研究・構成' },
+  'lesson_practice': { name: '授業をする', sub: '実践・対話' },
+  'student_eval': { name: '子どもを見る', sub: '観察・評価' },
+  'connection': { name: 'つながる', sub: '同僚性・楽しさ' },
+  'research': { name: '深める', sub: '探究・理論' },
+  'j_lesson_plan': { name: '授業をつくる', sub: '教材研究・構成' },
+  'j_material': { name: '資料', sub: '読み解く・提示する' },
+  'j_dialogue': { name: '対話', sub: '意見を交わす・議論する' },
+  'j_inquiry': { name: '探究', sub: '問いを立てる・追究する' },
+  'j_student_eval': { name: '生徒を見る', sub: '観察・評価' },
+  'j_connection': { name: 'つながる', sub: '仲間・同僚性' },
+  'j_research': { name: '深める', sub: '研究・発信' },
+  'a_school_support': { name: '会の活動を支える', sub: '' },
+  'a_school_mgmt': { name: '会員同士をつなぐ', sub: '' },
+  'a_member_support': { name: '会員の成長を支える', sub: '' },
+  'a_leader_dev': { name: '次世代リーダーを育てる', sub: '' },
+  'a_org_mgmt': { name: '運営に貢献', sub: '' },
+  'a_outreach': { name: '外とつなぐ', sub: '' }
+};
+
 function buildMobileCards() {
   const container = document.getElementById('mobileCards');
   if (!container) return;
   container.innerHTML = '';
 
-  // Find the currently visible table
-  const tables = [document.getElementById('tableElem'), document.getElementById('tableJunior'), document.getElementById('tableAdmin')];
-  let activeTable = tables.find(t => t && t.style.display !== 'none');
-  if (!activeTable) activeTable = tables[0];
-  if (!activeTable) return;
+  // Use current viewpoints array to determine which cards to build
+  const activeVps = viewpoints;
 
-  // Group cells by viewpoint
+  // Collect cell data from ALL tables (they exist in DOM regardless of display)
   const vpMap = new Map();
-  activeTable.querySelectorAll('.col-step').forEach(cell => {
+  document.querySelectorAll('.col-step').forEach(cell => {
     const vp = cell.getAttribute('data-vp');
     const step = parseInt(cell.getAttribute('data-step') || '0');
     if (!vp || !step) return;
+    if (!activeVps.includes(vp)) return;
     if (!vpMap.has(vp)) vpMap.set(vp, []);
-    // Get keyword and description
     const kwEl = cell.querySelector('.keyword');
     const pEl = cell.querySelector('.cell-content p');
     vpMap.get(vp).push({
@@ -1926,25 +1945,8 @@ function buildMobileCards() {
     });
   });
 
-  // Get viewpoint labels from table
-  const vpLabels = {};
-  activeTable.querySelectorAll('.col-viewpoint').forEach(vpCell => {
-    const tr = vpCell.closest('tr');
-    if (!tr) return;
-    const firstStep = tr.querySelector('.col-step');
-    if (!firstStep) return;
-    const vp = firstStep.getAttribute('data-vp');
-    if (!vp) return;
-    const nameDiv = vpCell.querySelector('div');
-    const subDiv = vpCell.querySelectorAll('div')[1];
-    vpLabels[vp] = {
-      name: nameDiv ? nameDiv.textContent.trim() : vp,
-      sub: subDiv ? subDiv.textContent.trim() : ''
-    };
-  });
-
   vpMap.forEach((steps, vp) => {
-    const label = vpLabels[vp] || { name: vp, sub: '' };
+    const label = vpDisplayNames[vp] || { name: vp, sub: '' };
     const sel = selectedByVp[vp];
     const color = catColors[vp] || '#8d6e63';
 
@@ -2150,7 +2152,11 @@ function switchSchoolType(type) {
   if (type === 'elementary' && tElem) tElem.style.display = '';
   if (type === 'junior' && tJunior) tJunior.style.display = '';
   if (type === 'admin' && tAdmin) tAdmin.style.display = '';
-  // Reload selections for the current type
+  // Update active viewpoints for mobile cards
+  if (type === 'elementary') viewpoints = viewpointsElem;
+  else if (type === 'junior') viewpoints = viewpointsJunior;
+  else if (type === 'admin') viewpoints = viewpointsAdmin;
+  // Reload selections for the current type (also rebuilds mobile cards)
   loadSelections();
 }
 
