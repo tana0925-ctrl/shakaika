@@ -2917,9 +2917,22 @@ app.get('/admin/events', (c) => {
   .event-item:last-child { border-bottom: none; }
   .event-info .title { font-weight: 700; font-size: 15px; }
   .event-info .meta { font-size: 12px; color: #888; margin-top: 2px; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 10px; font-weight: 700; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 10px; font-weight: 700; cursor: pointer; transition: opacity 0.2s; }
+  .badge:hover { opacity: 0.7; }
   .badge-att { background: #e3f2fd; color: #1565c0; }
   .badge-sur { background: #f3e5f5; color: #7b1fa2; }
+  .event-detail { background: #fafafa; border-radius: 8px; padding: 14px 16px; margin-top: 8px; font-size: 13px; display: none; width: 100%; }
+  .event-detail.show { display: block; }
+  .event-detail h4 { font-size: 13px; font-weight: 700; margin: 0 0 8px; color: #333; }
+  .event-detail table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  .event-detail th, .event-detail td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; font-size: 12px; }
+  .event-detail th { background: #f0f0f0; font-weight: 700; }
+  .event-detail .no-data { color: #aaa; font-size: 12px; }
+  .detail-tabs { display: flex; gap: 0; margin-bottom: 10px; }
+  .detail-tab { padding: 6px 16px; font-size: 12px; font-weight: 700; cursor: pointer; border: 1px solid #ddd; background: #f5f5f5; color: #888; }
+  .detail-tab:first-child { border-radius: 6px 0 0 6px; }
+  .detail-tab:last-child { border-radius: 0 6px 6px 0; }
+  .detail-tab.active { background: #1a237e; color: #fff; border-color: #1a237e; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .qr-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200; align-items: center; justify-content: center; }
   .qr-modal.show { display: flex; }
@@ -3051,7 +3064,7 @@ async function loadEvents() {
   const list = document.getElementById('eventList');
   if (!eventsData.length) { list.innerHTML='<p style="color:#888;text-align:center">まだイベントがありません</p>'; return; }
   list.innerHTML = eventsData.map(function(ev) {
-    return '<div class="event-item"><div class="event-info"><div class="title">'+ev.title+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+ev.title.replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div>';
+    return '<div class="event-item-wrap" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+ev.title+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+ev.title.replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
   }).join('');
 }
 
@@ -3093,6 +3106,98 @@ async function deleteEvent(id, title) {
   loadEvents();
 }
 
+async function showEventDetail(eventId, tab) {
+  const detail = document.getElementById('evDetail_'+eventId);
+  if (!detail) return;
+  // Toggle: if already showing same tab, close
+  if (detail.classList.contains('show') && detail.dataset.activeTab === tab) {
+    detail.classList.remove('show');
+    return;
+  }
+  detail.dataset.activeTab = tab;
+  detail.innerHTML = '<p style="color:#888">読み込み中...</p>';
+  detail.classList.add('show');
+  try {
+    const res = await fetch('/api/admin/events/'+eventId, { headers:{'Authorization':'Bearer '+token} });
+    if (!res.ok) { detail.innerHTML = '<p style="color:#c62828">読み込みに失敗しました</p>'; return; }
+    const d = await res.json();
+    renderDetail(detail, d, tab);
+  } catch(e) { detail.innerHTML = '<p style="color:#c62828">エラーが発生しました</p>'; }
+}
+
+function renderDetail(el, d, tab) {
+  var html = '<div class="detail-tabs">';
+  html += '<div class="detail-tab'+(tab==='att'?' active':'')+'" data-dtab="att" data-eid="'+d.event.id+'"><i class="fas fa-users"></i> 出席 ('+d.attendances.length+')</div>';
+  html += '<div class="detail-tab'+(tab==='sur'?' active':'')+'" data-dtab="sur" data-eid="'+d.event.id+'"><i class="fas fa-clipboard"></i> 回答 ('+d.answers.length+')</div>';
+  html += '</div>';
+
+  if (tab === 'att') {
+    if (!d.attendances.length) { html += '<div class="no-data">まだ出席者がいません</div>'; }
+    else {
+      html += '<table><tr><th>#</th><th>名前</th><th>出席時刻</th></tr>';
+      d.attendances.forEach(function(a, i) {
+        var t = a.attended_at ? new Date(a.attended_at).toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-';
+        html += '<tr><td>'+(i+1)+'</td><td>'+escHtml(a.name)+'</td><td>'+t+'</td></tr>';
+      });
+      html += '</table>';
+    }
+  } else {
+    if (!d.answers.length && !d.customAnswers.length) { html += '<div class="no-data">まだ回答がありません</div>'; }
+    else {
+      // satisfaction answers
+      var ansMap = {};
+      d.answers.forEach(function(a) { ansMap[a.user_id] = a; });
+      // custom answers grouped by user
+      var caByUser = {};
+      d.customAnswers.forEach(function(ca) {
+        if (!caByUser[ca.user_id]) caByUser[ca.user_id] = [];
+        caByUser[ca.user_id].push(ca);
+      });
+      // question lookup
+      var qMap = {};
+      d.questions.forEach(function(q) { qMap[q.id] = q.question_text; });
+
+      var userIds = Object.keys(ansMap);
+      Object.keys(caByUser).forEach(function(uid) { if (userIds.indexOf(uid) === -1) userIds.push(uid); });
+
+      html += '<table><tr><th>名前</th><th>満足度</th>';
+      if (d.questions.length) html += '<th>回答</th>';
+      html += '</tr>';
+      userIds.forEach(function(uid) {
+        var ans = ansMap[uid];
+        var name = ans ? escHtml(ans.name) : (caByUser[uid] && caByUser[uid][0] ? escHtml(caByUser[uid][0].name) : '?');
+        var sat = ans && ans.satisfaction ? '★'+ans.satisfaction : '-';
+        html += '<tr><td>'+name+'</td><td>'+sat+'</td>';
+        if (d.questions.length) {
+          var parts = [];
+          (caByUser[uid]||[]).forEach(function(ca) {
+            var ql = qMap[ca.question_id] || '質問';
+            parts.push('<b>'+escHtml(ql)+'</b>: '+escHtml(ca.answer_text));
+          });
+          html += '<td style="font-size:11px;line-height:1.5">'+(parts.length ? parts.join('<br>') : '-')+'</td>';
+        }
+        html += '</tr>';
+      });
+      html += '</table>';
+    }
+  }
+  el.innerHTML = html;
+  el.dataset.eventData = JSON.stringify(d);
+
+  // Tab switching within detail
+  el.querySelectorAll('.detail-tab').forEach(function(t) {
+    t.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var newTab = t.dataset.dtab;
+      var cached = JSON.parse(el.dataset.eventData);
+      el.dataset.activeTab = newTab;
+      renderDetail(el, cached, newTab);
+    });
+  });
+}
+
+function escHtml(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
 // Event delegation for event list buttons
 document.addEventListener('click', function(e) {
   const btn = e.target.closest('[data-action]');
@@ -3102,6 +3207,7 @@ document.addEventListener('click', function(e) {
   if (action === 'qr') showQR(id);
   else if (action === 'export') exportEvent(id);
   else if (action === 'delete-ev') deleteEvent(id, btn.dataset.title);
+  else if (action === 'detail') showEventDetail(id, btn.dataset.tab);
 });
 
 loadEvents();
