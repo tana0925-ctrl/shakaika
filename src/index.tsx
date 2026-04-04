@@ -1081,37 +1081,49 @@ app.get('/mypage', (c) => {
   @keyframes pulse { 0%,100%{opacity:0.5} 50%{opacity:1} }
 
   @media (max-width: 768px) {
+    /* B: トップバー最適化 */
     .top-bar { padding: 8px 12px; flex-wrap: wrap; gap: 6px; }
-    .top-bar .logo { font-size: 15px; }
-    .top-bar .user-info { gap: 6px; font-size: 11px; }
+    .top-bar .logo { font-size: 14px; }
+    .top-bar .user-info { gap: 4px; font-size: 11px; }
     .top-bar .user-info .name { display: none; }
-    .btn-sm { padding: 5px 10px; font-size: 11px; }
+    .btn-sm { padding: 6px 8px; font-size: 11px; }
+    .btn-sm .btn-label { display: none; }
+
     .main { padding: 0 8px; margin: 12px auto; }
     .guide { font-size: 12px; padding: 10px 12px; }
     .container { padding: 12px; border-radius: 8px; }
-    .header { flex-direction: column; align-items: flex-start; }
-    .title-block h1 { font-size: 18px; }
+
+    /* C: 旅カードをスマホでは横幅いっぱいに */
+    .header { flex-direction: column; align-items: stretch !important; gap: 8px !important; }
+    .title-block h1 { font-size: 16px; }
+    #travelCard { max-width: 100% !important; min-width: 0 !important; }
+
     .scroll-hint { display: block; }
     .footer-note { flex-direction: column; gap: 8px; }
     .footer-note > div { max-width: 100% !important; text-align: left !important; }
     .save-area { margin-top: 16px; }
-    .save-area .btn-sm { padding: 12px 20px; font-size: 15px; }
+    .save-area .btn-sm { padding: 14px 24px; font-size: 16px; }
 
-    /* テーブルのスマホ最適化 */
-    table { min-width: 700px; font-size: 9pt; }
-    th, td { padding: 5px 6px; }
+    /* D: テーブルのタッチ操作改善 */
+    table { min-width: 650px; font-size: 9pt; }
+    th, td { padding: 8px 6px; }
     .col-category { width: 24px; letter-spacing: 2px; font-size: 10px; }
-    .col-viewpoint { width: 70px; font-size: 10px; }
-    .col-step { font-size: 10px; line-height: 1.5; }
+    .col-viewpoint { width: 70px; font-size: 11px; padding: 10px 6px; }
+    .col-step { font-size: 10px; line-height: 1.5; padding: 10px 8px; min-height: 60px; }
+    .col-step.selected { box-shadow: inset 0 0 0 3px var(--header-line); background-color: #fff3e0; }
+    .col-step.selected::after { font-size: 22px; top: 2px; right: 4px; }
     .col-step .step-title { font-size: 11px; }
     .col-step .step-desc { font-size: 10px; line-height: 1.4; }
     .step-header { font-size: 10px; padding: 3px 6px; }
-    .memo-input { font-size: 10px; padding: 3px 5px; }
+    .memo-input { font-size: 13px; padding: 6px 8px; min-height: 44px; }
     .action-row td { font-size: 10px; padding: 5px 6px; }
     .note-text { font-size: 11px; }
     .school-type-selector { font-size: 13px; }
     .school-type-selector label { padding: 6px 14px; }
     .container { padding: 8px; border-width: 1px; }
+
+    /* 目標・振り返りのタッチ改善 */
+    .notes-card textarea { font-size: 15px; padding: 12px; min-height: 100px; }
   }
 
   @media print {
@@ -1133,8 +1145,8 @@ app.get('/mypage', (c) => {
   <div class="user-info">
     <span class="name" id="userName"></span>
     <span id="adminLink"></span>
-    <button class="btn-sm" style="background:#fff3e0;color:#e65100" onclick="document.getElementById('profileModal').style.display='flex'"><i class="fas fa-user-edit"></i> プロフィール</button>
-    <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i> ログアウト</button>
+    <button class="btn-sm" style="background:#fff3e0;color:#e65100" onclick="document.getElementById('profileModal').style.display='flex'"><i class="fas fa-user-edit"></i><span class="btn-label"> プロフィール</span></button>
+    <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i><span class="btn-label"> ログアウト</span></button>
   </div>
 </div>
 
