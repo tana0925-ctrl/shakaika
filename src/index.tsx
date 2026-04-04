@@ -1985,9 +1985,7 @@ async function init() {
     if (districtEl && user.district) districtEl.value = user.district;
     if (experienceEl && user.experience_years != null) experienceEl.value = user.experience_years;
     if (positionEl && user.position) positionEl.value = user.position;
-    if (user.district || user.experience_years || user.grade || user.position) {
-      document.getElementById('profileModal').style.display = 'flex';
-    }
+    // Profile modal is now opened only by button click
 
     // Auto-switch table based on position
     function positionToSchoolType(pos) {
