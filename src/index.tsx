@@ -78,6 +78,11 @@ async function adminMiddleware(c: any, next: any) {
 // ========== DB Init ==========
 app.get('/api/init', async (c) => {
   const db = c.env.DB
+  // Block if admin already exists (prevent repeated init)
+  try {
+    const existing = await db.prepare('SELECT id FROM users WHERE role = ? LIMIT 1').bind('admin').first()
+    if (existing) return c.json({ message: '既に初期化済みです' })
+  } catch(e) { /* table may not exist yet, continue */ }
   await db.prepare(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -508,6 +513,9 @@ app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
 
 app.put('/api/admin/members/:id/role', authMiddleware, adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const user = c.get('user')
+  if (user.id === id) return c.json({ error: '自分自身の役割は変更できません' }, 400)
   const { role } = await c.req.json()
   if (!['member', 'admin'].includes(role)) {
     return c.json({ error: '不正な役割です' }, 400)
@@ -518,6 +526,7 @@ app.put('/api/admin/members/:id/role', authMiddleware, adminMiddleware, async (c
 
 app.patch('/api/admin/members/:id/school_type', authMiddleware, adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
   const { school_type } = await c.req.json()
   const allowed = ['elementary', 'junior_high', 'admin_staff', '']
   if (!allowed.includes(school_type)) {
@@ -529,6 +538,7 @@ app.patch('/api/admin/members/:id/school_type', authMiddleware, adminMiddleware,
 
 app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
   const user = c.get('user')
   if (user.id === id) {
     return c.json({ error: '自分自身は削除できません' }, 400)
@@ -648,11 +658,20 @@ app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
   const { title, description, event_date, custom_questions } = await c.req.json()
   if (!title || !event_date) return c.json({ error: 'タイトルと日付は必須です' }, 400)
   const db = c.env.DB
-  const code = generateEventCode()
   const user = c.get('user')
-  const res = await db.prepare(
-    'INSERT INTO events (title, description, event_date, event_code, created_by) VALUES (?,?,?,?,?)'
-  ).bind(title, description || '', event_date, code, user.id).run()
+  let code = ''
+  let res: any
+  for (let attempt = 0; attempt < 5; attempt++) {
+    code = generateEventCode()
+    try {
+      res = await db.prepare(
+        'INSERT INTO events (title, description, event_date, event_code, created_by) VALUES (?,?,?,?,?)'
+      ).bind(title, description || '', event_date, code, user.id).run()
+      break
+    } catch (e: any) {
+      if (attempt === 4 || !e.message?.includes('UNIQUE')) throw e
+    }
+  }
   const eventId = res.meta.last_row_id as number
   if (custom_questions && Array.isArray(custom_questions)) {
     for (let i = 0; i < custom_questions.length; i++) {
@@ -675,6 +694,7 @@ app.get('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
 
 app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
   const db = c.env.DB
   const event = await db.prepare('SELECT * FROM events WHERE id = ?').bind(id).first()
   if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
@@ -695,6 +715,7 @@ app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
 
 app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
   const db = c.env.DB
   await db.prepare('DELETE FROM custom_answers WHERE event_id = ?').bind(id).run()
   await db.prepare('DELETE FROM survey_answers WHERE event_id = ?').bind(id).run()
@@ -706,6 +727,7 @@ app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) =
 
 app.get('/api/admin/events/:id/export', authMiddleware, adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
   const db = c.env.DB
   const event = await db.prepare('SELECT * FROM events WHERE id = ?').bind(id).first() as any
   if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
@@ -942,7 +964,7 @@ async function handleLogin(e) {
     if (!res.ok) { showError(data.error); return false; }
     localStorage.setItem('token', data.token);
     localStorage.setItem('user', JSON.stringify(data.user));
-    const redirectTo = new URLSearchParams(window.location.search).get('redirect');
+    const redirectTo = (function(){ const r = new URLSearchParams(window.location.search).get('redirect'); return r && r.startsWith('/') && !r.startsWith('//') ? r : null; })();
     window.location.href = redirectTo || (data.user.role === 'admin' ? '/admin' : '/mypage');
   } catch(err) { showError('通信エラーが発生しました'); }
   return false;
@@ -960,7 +982,7 @@ async function handleRegister(e) {
     if (!res.ok) { showError(data.error); return false; }
     localStorage.setItem('token', data.token);
     localStorage.setItem('user', JSON.stringify(data.user));
-    const redirectTo = new URLSearchParams(window.location.search).get('redirect');
+    const redirectTo = (function(){ const r = new URLSearchParams(window.location.search).get('redirect'); return r && r.startsWith('/') && !r.startsWith('//') ? r : null; })();
     window.location.href = redirectTo || '/mypage';
   } catch(err) { showError('通信エラーが発生しました'); }
   return false;
@@ -971,7 +993,7 @@ const token = localStorage.getItem('token');
 if (token) {
   fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } })
     .then(r => { if (!r.ok) { localStorage.clear(); return {}; } return r.json(); })
-    .then(d => { if (d.user) { const redirectTo = new URLSearchParams(window.location.search).get('redirect'); window.location.href = redirectTo || (d.user.role === 'admin' ? '/admin' : '/mypage'); } })
+    .then(d => { if (d.user) { const redirectTo = (function(){ const r = new URLSearchParams(window.location.search).get('redirect'); return r && r.startsWith('/') && !r.startsWith('//') ? r : null; })(); window.location.href = redirectTo || (d.user.role === 'admin' ? '/admin' : '/mypage'); } })
     .catch(() => { localStorage.clear(); });
 }
 </script>
@@ -1884,7 +1906,7 @@ async function saveSelections() {
     for (const vp of viewpoints) {
       const sel = selectedByVp[vp];
       if (sel && sel.step) {
-        // Get latest memo from DOM (in case)
+        // Get latest memo from DOM
         const cell = document.querySelector('.col-step[data-vp="' + vp + '"][data-step="' + sel.step + '"]');
         let memo = sel.memo || '';
         if (cell) {
@@ -1953,6 +1975,10 @@ function switchSchoolType(type) {
   if (type === 'elementary' && tElem) tElem.style.display = '';
   if (type === 'junior' && tJunior) tJunior.style.display = '';
   if (type === 'admin' && tAdmin) tAdmin.style.display = '';
+  // Update active viewpoints so saveSelections saves the correct set
+  if (type === 'elementary') viewpoints = viewpointsElem;
+  else if (type === 'junior') viewpoints = viewpointsJunior;
+  else if (type === 'admin') viewpoints = viewpointsAdmin;
   // Reload selections for the current type
   loadSelections();
 }
@@ -2333,7 +2359,7 @@ function updateSchoolType(sel) {
   var school_type = sel.value;
   fetch('/api/admin/members/' + id + '/school_type', {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
     body: JSON.stringify({ school_type: school_type })
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.success) {
@@ -2443,15 +2469,19 @@ function updateStats(members) {
   var total = members.length;
   var all = 0, partial = 0, none = 0;
   var vps = _vpTabConfig[_activeTab].viewpoints;
-  members.forEach(function(m) {
-    var filled = 0;
-    for (var vi = 0; vi < vps.length; vi++) {
-      if (m.selections && m.selections[vps[vi].key]) filled++;
-    }
-    if (filled === vps.length) all++;
-    else if (filled > 0) partial++;
-    else none++;
-  });
+  if (vps.length === 0) {
+    none = total;
+  } else {
+    members.forEach(function(m) {
+      var filled = 0;
+      for (var vi = 0; vi < vps.length; vi++) {
+        if (m.selections && m.selections[vps[vi].key]) filled++;
+      }
+      if (filled === vps.length) all++;
+      else if (filled > 0) partial++;
+      else none++;
+    });
+  }
   document.getElementById('totalCount').textContent = total;
   document.getElementById('completeCount').textContent = all;
   document.getElementById('partialCount').textContent = partial;
@@ -2621,7 +2651,7 @@ loadMembers();
 
 // --- QR Attend Page (scanned by member) ---
 app.get('/attend/:code', (c) => {
-  const code = c.req.param('code')
+  const code = c.req.param('code').replace(/[^A-Za-z0-9]/g, '')
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <title>出席・アンケート - 社会科同好会</title>
 <style>
@@ -2765,6 +2795,7 @@ const growthViewpoints = {
   ],
 };
 
+function escHtml(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 function renderEvent(data) {
   const ev = data.event;
   const qs = data.questions || [];
@@ -2774,15 +2805,15 @@ function renderEvent(data) {
   const c = document.getElementById('content');
   c.style.display='block';
   let html = '<div class="success-box"><i class="fas fa-check-circle"></i><p>出席を記録しました！</p></div>';
-  html += '<div class="card"><h2>'+ev.title+'</h2><div class="date"><i class="fas fa-calendar"></i> '+ev.event_date+'</div>';
-  if (ev.description) html += '<div class="desc">'+ev.description+'</div>';
+  html += '<div class="card"><h2>'+escHtml(ev.title)+'</h2><div class="date"><i class="fas fa-calendar"></i> '+escHtml(ev.event_date)+'</div>';
+  if (ev.description) html += '<div class="desc">'+escHtml(ev.description)+'</div>';
   if (hasSurvey) {
     html += '<div class="already"><i class="fas fa-clipboard-check"></i> アンケートは回答済みです。ありがとうございました！</div></div>';
     html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
   } else {
     html += '<hr style="border:none;border-top:2px dashed #eee;margin:16px 0"><h3 style="font-family:Zen Maru Gothic;color:#5d4037;font-size:16px;margin:0 0 16px"><i class="fas fa-clipboard-list"></i> アンケート</h3>';
     for (const q of qs) {
-      html += '<div class="form-group"><label>'+q.question_text+'</label>';
+      html += '<div class="form-group"><label>'+escHtml(q.question_text)+'</label>';
       if (q.question_type === 'text') {
         html += '<textarea id="cq_'+q.id+'" placeholder="回答を入力" rows="2" oninput="this.style.height=\'auto\';this.style.height=this.scrollHeight+\'px\'" style="width:100%;resize:none;overflow:hidden;min-height:48px"></textarea>';
       } else if (q.question_type === 'radio') {
@@ -2826,7 +2857,7 @@ function renderEvent(data) {
   }
 }
 
-function setStar(v) { satisfaction=v; document.querySelectorAll('#stars .star').forEach((s,i)=>s.classList.toggle('active',i<v)); }
+function setStar(v) { satisfaction=v; document.querySelectorAll('.stars .star').forEach((s,i)=>s.classList.toggle('active',i<v)); }
 function selectRadio(el, qid) {
   el.parentElement.querySelectorAll('.radio-option').forEach(o=>o.classList.remove('selected'));
   el.classList.add('selected'); customData[qid]=el.textContent;
@@ -2851,7 +2882,7 @@ async function submitSurvey() {
   });
   const res = await fetch('/api/events/'+CODE+'/survey', {
     method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
-    body: JSON.stringify({ satisfaction: null, comment: '', custom_answers })
+    body: JSON.stringify({ satisfaction: satisfaction, comment: '', custom_answers })
   });
   if (res.ok) {
     document.getElementById('content').innerHTML = '<div class="success-box"><i class="fas fa-heart"></i><p>回答ありがとうございました！</p></div><a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
@@ -2980,7 +3011,7 @@ function applyPreset(type) {
   qCount = 0;
   if (type === 'checkout') {
     const vpOpts = '授業をつくる|授業をする・磨く|子どもを見る・評価する|仲間とつながる|研究・発信する';
-    addQuestion('今日唣激を受けた「成長の視点」はどれですか？（複数選択OK）', 'checkbox', vpOpts);
+    addQuestion('今日刺激を受けた「成長の視点」はどれですか？（複数選択OK）', 'checkbox', vpOpts);
     addQuestion('それを選んだ理由は？（一言でOK）', 'text', '');
     addQuestion('明日以降、試してみたいことは？', 'text', '');
     addQuestion('ご意見・ご感想（任意）', 'text', '');
