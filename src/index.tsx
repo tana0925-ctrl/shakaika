@@ -904,7 +904,7 @@ app.get('/login', (c) => {
           <option value="">選択してください</option>
           <option value="elementary">小学校教諭</option>
           <option value="junior_high">中学校教諭</option>
-          <option value="admin_staff">管理職</option>
+          <option value="admin_staff">主幹・管理職</option>
         </select>
       </div>
       <div class="form-group">
@@ -921,7 +921,7 @@ app.get('/login', (c) => {
       <div class="form-group">
         <label><i class="fas fa-users"></i> 担当学年（複数選択OK）</label>
         <div id="regGradeChecks" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">
-          ${['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','管理職','その他'].map(g =>
+          ${['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','主幹・管理職','その他'].map(g =>
             `<label style="display:inline-flex;align-items:center;gap:3px;font-size:13px;background:#f5f5f5;padding:4px 10px;border-radius:14px;cursor:pointer;"><input type="checkbox" value="${g}" style="margin:0;">${g}</label>`
           ).join('')}
         </div>
@@ -2000,7 +2000,7 @@ async function init() {
 
   const btnSchoolSave = document.getElementById('btnSchoolSave');
     // Load profile data into form
-    const gradeOptions = ['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','管理職','その他'];
+    const gradeOptions = ['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','主幹・管理職','その他'];
     const gradeContainer = document.getElementById('profile-grade-checks');
     if (gradeContainer) {
       const savedGrades = (user.grade || '').split(',').filter(Boolean);
@@ -2240,7 +2240,7 @@ app.get('/admin', (c) => {
   <div class="admin-tabs">
     <button class="admin-tab active" data-tab="elem" onclick="switchAdminTab('elem')">小学校</button>
     <button class="admin-tab" data-tab="junior" onclick="switchAdminTab('junior')">中学校</button>
-    <button class="admin-tab" data-tab="admin" onclick="switchAdminTab('admin')">管理職</button>
+    <button class="admin-tab" data-tab="admin" onclick="switchAdminTab('admin')">主幹・管理職</button>
     <button class="admin-tab" data-tab="unset" onclick="switchAdminTab('unset')">未設定</button>
   </div>
   <div class="table-wrap">
@@ -2299,7 +2299,7 @@ var _vpTabConfig = {
     ]
   },
   admin: {
-    label: '管理職',
+    label: '主幹・管理職',
     viewpoints: [
       { key: 'a_school_support', label: '会の活動を支える' },
       { key: 'a_school_mgmt', label: '会員同士をつなぐ' },
@@ -2441,7 +2441,7 @@ function renderMembers(members) {
       '<td>' + (m.grade || '-') + '</td>' +
       '<td>' + (m.position || '-') + '</td>' +
       vpCells +
-      (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>管理職</option></select></td>' : '') +
+      (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>主幹・管理職</option></select></td>' : '') +
       '<td style="white-space:nowrap">' +
         '<button class="btn-sm btn-warning" data-action="role" data-id="' + m.id + '" data-role="' + m.role + '" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '"><i class="fas ' + (m.role === 'admin' ? 'fa-user-minus' : 'fa-user-plus') + '"></i></button> ' +
         '<button class="btn-sm btn-danger" data-action="delete" data-id="' + m.id + '" title="削除"><i class="fas fa-trash"></i></button>' +
