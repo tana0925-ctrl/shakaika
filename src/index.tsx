@@ -904,7 +904,7 @@ app.get('/login', (c) => {
           <option value="">選択してください</option>
           <option value="elementary">小学校教諭</option>
           <option value="junior_high">中学校教諭</option>
-          <option value="admin_staff">指導者</option>
+          <option value="admin_staff">主幹・管理職</option>
         </select>
       </div>
       <div class="form-group">
@@ -921,7 +921,7 @@ app.get('/login', (c) => {
       <div class="form-group">
         <label><i class="fas fa-users"></i> 担当学年（複数選択OK）</label>
         <div id="regGradeChecks" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">
-          ${['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','指導者','その他'].map(g =>
+          ${['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','主幹・管理職','その他'].map(g =>
             `<label style="display:inline-flex;align-items:center;gap:3px;font-size:13px;background:#f5f5f5;padding:4px 10px;border-radius:14px;cursor:pointer;"><input type="checkbox" value="${g}" style="margin:0;">${g}</label>`
           ).join('')}
         </div>
@@ -1416,7 +1416,7 @@ app.get('/mypage', (c) => {
           <td class="col-category cat-class" rowspan="2">同好会<br>支援</td>
           <td class="col-viewpoint"><div>会の活動を支える</div><div style="font-size:9px;color:#888;margin-top:2px">例会・研究会支援</div></td>
           <td class="col-step" data-vp="a_school_support" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会に顔を出す</span><p>まずは例会やイベントに参加して、場の雰囲気づくりに協力するところから始めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
-          <td class="col-step" data-vp="a_school_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会の学びを深める</span><p>授業検討会などで、管理職としての経験を活かした助言や問いかけで学びを深めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_school_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会の学びを深める</span><p>授業検討会などで、主幹・管理職としての経験を活かした助言や問いかけで学びを深めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
           <td class="col-step" data-vp="a_school_support" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">研究会の内容充実に関わる</span><p>授業検討会やフィールドワークの企画に関わり、会の学びの質を高めることに貢献したい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
           <td class="col-step" data-vp="a_school_support" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の学びの文化を守る</span><p>同好会が大切にしてきた「授業で語り合う」文化を次の世代にも伝え、学びの質を守りたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
         </tr>
@@ -1445,17 +1445,17 @@ app.get('/mypage', (c) => {
         <tr>
           <td class="col-category cat-research" rowspan="2">組織<br>・発信</td>
           <td class="col-viewpoint"><div>同好会の運営に貢献する</div><div style="font-size:9px;color:#888;margin-top:2px">組織運営</div></td>
-          <td class="col-step" data-vp="a_org_mgmt" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会に参加して助言する</span><p>例会や研究会に参加し、管理職の視点から率直な感想や助言を伝えてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会に参加して助言する</span><p>例会や研究会に参加し、主幹・管理職の視点から率直な感想や助言を伝えてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
           <td class="col-step" data-vp="a_org_mgmt" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の方向性を一緒に考える</span><p>役員会などで会の今後の方向性やテーマについて、自分の意見を積極的に出してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
-          <td class="col-step" data-vp="a_org_mgmt" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">大会・イベントの運営を支える</span><p>研究大会やフィールドワークの運営面で、管理職としての経験や人脈を活かして調整役を担ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">大会・イベントの運営を支える</span><p>研究大会やフィールドワークの運営面で、主幹・管理職としての経験や人脈を活かして調整役を担ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
           <td class="col-step" data-vp="a_org_mgmt" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の未来を描く</span><p>5年後・10年後の会の姿を構想し、持続可能な組織づくりの道筋をつくりたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
         </tr>
         <tr>
           <td class="col-viewpoint"><div>外とつなぐ・知見を還元する</div><div style="font-size:9px;color:#888;margin-top:2px">対外連携・還元</div></td>
-          <td class="col-step" data-vp="a_outreach" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">他の研究会の情報を持ち帰る</span><p>管理職の集まりや他教科の研究会で得た情報を、同好会に持ち帰って共有してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
-          <td class="col-step" data-vp="a_outreach" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">外部講師や連携先を紹介する</span><p>大学の先生や他地区の優れた先生など、管理職のネットワークを活かして会に紹介してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_outreach" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">他の研究会の情報を持ち帰る</span><p>主幹・管理職の集まりや他教科の研究会で得た情報を、同好会に持ち帰って共有してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_outreach" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">外部講師や連携先を紹介する</span><p>大学の先生や他地区の優れた先生など、主幹・管理職のネットワークを活かして会に紹介してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
           <td class="col-step" data-vp="a_outreach" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">自分の経験を語る</span><p>自分がこれまで積み重ねた社会科の授業づくりの経験や学校経営の知見を、講演や寄稿で次世代に伝えてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
-          <td class="col-step" data-vp="a_outreach" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">社会科教育の価値を広める</span><p>管理職の立場から社会科教育の重要性を周囲に発信し、名古屋の社会科の文化を守り育てたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_outreach" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">社会科教育の価値を広める</span><p>主幹・管理職の立場から社会科教育の重要性を周囲に発信し、名古屋の社会科の文化を守り育てたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
         </tr>
         <tr class="row-action">
           <td colspan="2" style="text-align:right;font-weight:bold;padding-right:20px;color:#e65100"><i class="fas fa-shoe-prints"></i> おすすめのアクション</td>
@@ -2000,7 +2000,7 @@ async function init() {
 
   const btnSchoolSave = document.getElementById('btnSchoolSave');
     // Load profile data into form
-    const gradeOptions = ['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','指導者','その他'];
+    const gradeOptions = ['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','主幹・管理職','その他'];
     const gradeContainer = document.getElementById('profile-grade-checks');
     if (gradeContainer) {
       const savedGrades = (user.grade || '').split(',').filter(Boolean);
@@ -2240,7 +2240,7 @@ app.get('/admin', (c) => {
   <div class="admin-tabs">
     <button class="admin-tab active" data-tab="elem" onclick="switchAdminTab('elem')">小学校</button>
     <button class="admin-tab" data-tab="junior" onclick="switchAdminTab('junior')">中学校</button>
-    <button class="admin-tab" data-tab="admin" onclick="switchAdminTab('admin')">指導者</button>
+    <button class="admin-tab" data-tab="admin" onclick="switchAdminTab('admin')">主幹・管理職</button>
     <button class="admin-tab" data-tab="unset" onclick="switchAdminTab('unset')">未設定</button>
   </div>
   <div class="table-wrap">
@@ -2299,7 +2299,7 @@ var _vpTabConfig = {
     ]
   },
   admin: {
-    label: '指導者',
+    label: '主幹・管理職',
     viewpoints: [
       { key: 'a_school_support', label: '会の活動を支える' },
       { key: 'a_school_mgmt', label: '会員同士をつなぐ' },
@@ -2441,7 +2441,7 @@ function renderMembers(members) {
       '<td>' + (m.grade || '-') + '</td>' +
       '<td>' + (m.position || '-') + '</td>' +
       vpCells +
-      (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>指導者</option></select></td>' : '') +
+      (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>主幹・管理職</option></select></td>' : '') +
       '<td style="white-space:nowrap">' +
         '<button class="btn-sm btn-warning" data-action="role" data-id="' + m.id + '" data-role="' + m.role + '" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '"><i class="fas ' + (m.role === 'admin' ? 'fa-user-minus' : 'fa-user-plus') + '"></i></button> ' +
         '<button class="btn-sm btn-danger" data-action="delete" data-id="' + m.id + '" title="削除"><i class="fas fa-trash"></i></button>' +
