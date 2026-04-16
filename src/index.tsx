@@ -1153,8 +1153,8 @@ app.get('/mypage', (c) => {
     .top-bar, .guide, .save-area, .memo-input, .scroll-hint, .vp-hint { display: none !important; }
     #journeyCard, #travelCard { display: none !important; }
     @page { size: A4 landscape; margin: 3mm; }
-    body { width: 297mm; margin: 0; padding: 0; background-color: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .main { transform-origin: top left; transform: scale(0.52); width: calc(100% / 0.52); }
+    html { zoom: 48%; }
+    body { width: 620mm; margin: 0; padding: 0; background-color: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     .container { max-width: none; box-shadow: none; border: none; padding: 0; margin: 0; }
     .col-step.selected { box-shadow: inset 0 0 0 2px var(--header-line); }
     .col-step.selected::after { font-size: 14px; }
