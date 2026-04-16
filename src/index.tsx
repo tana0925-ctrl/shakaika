@@ -1150,10 +1150,11 @@ app.get('/mypage', (c) => {
   }
 
   @media print {
-    .top-bar, .guide, .save-area, .memo-input, .scroll-hint { display: none !important; }
+    .top-bar, .guide, .save-area, .memo-input, .scroll-hint, .vp-hint { display: none !important; }
     #journeyCard, #travelCard { display: none !important; }
-    @page { size: A4 landscape; margin: 4mm; }
-    body { width: 297mm; margin: 0; padding: 0; background-color: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; zoom: 72%; }
+    @page { size: A4 landscape; margin: 3mm; }
+    body { width: 297mm; margin: 0; padding: 0; background-color: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .main { transform-origin: top left; transform: scale(0.52); width: calc(100% / 0.52); }
     .container { max-width: none; box-shadow: none; border: none; padding: 0; margin: 0; }
     .col-step.selected { box-shadow: inset 0 0 0 2px var(--header-line); }
     .col-step.selected::after { font-size: 14px; }
@@ -1469,7 +1470,7 @@ app.get('/mypage', (c) => {
     </table>
     </div>
 
-    <div class="notes-card" style="border-style:solid;border-color:#bbdefb;margin-top:16px">
+    <div id="reflectionCard" class="notes-card" style="border-style:solid;border-color:#bbdefb;margin-top:16px">
       <h2 style="color:#1565c0"><i class="fas fa-pen"></i> 今年度の振り返り</h2>
       <textarea id="annualReflection" placeholder="今年度の参加や学び、次につながったことなど"></textarea>
       <div class="notes-meta"><span id="annualSavedAt2"></span></div>
