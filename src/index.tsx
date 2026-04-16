@@ -1151,8 +1151,9 @@ app.get('/mypage', (c) => {
 
   @media print {
     .top-bar, .guide, .save-area, .memo-input, .scroll-hint { display: none !important; }
-    @page { size: A4 landscape; margin: 5mm; }
-    body { width: 287mm; height: 200mm; margin: 0; padding: 0; background-color: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; zoom: 90%; }
+    #journeyCard, #travelCard { display: none !important; }
+    @page { size: A4 landscape; margin: 4mm; }
+    body { width: 297mm; margin: 0; padding: 0; background-color: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; zoom: 72%; }
     .container { max-width: none; box-shadow: none; border: none; padding: 0; margin: 0; }
     .col-step.selected { box-shadow: inset 0 0 0 2px var(--header-line); }
     .col-step.selected::after { font-size: 14px; }
