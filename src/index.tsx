@@ -105,7 +105,12 @@ app.get('/api/init', async (c) => {
     if (!hasSchoolType) {
       await db.prepare("ALTER TABLE users ADD COLUMN school_type TEXT NOT NULL DEFAULT ''").run()
     }
-      } catch (e) {
+    const hasSecretQ = Array.isArray(cols) && cols.some((c: any) => c.name === 'secret_question')
+    if (!hasSecretQ) {
+      await db.prepare("ALTER TABLE users ADD COLUMN secret_question TEXT DEFAULT ''").run()
+      await db.prepare("ALTER TABLE users ADD COLUMN secret_answer_hash TEXT DEFAULT ''").run()
+    }
+  } catch (e) {
     // ignore
   }
 
@@ -254,6 +259,41 @@ app.post('/api/auth/login', async (c) => {
 
 app.get('/api/auth/me', authMiddleware, async (c) => {
   return c.json({ user: c.get('user') })
+})
+
+// パスワード忘れ：メールアドレスから秘密の質問を取得
+app.post('/api/auth/get-question', async (c) => {
+  const { email } = await c.req.json() as any
+  if (!email) return c.json({ error: 'メールアドレスを入力してください' }, 400)
+  const user = await c.env.DB.prepare('SELECT secret_question FROM users WHERE email = ?').bind(email).first() as any
+  if (!user) return c.json({ error: 'このメールアドレスは登録されていません' }, 404)
+  if (!user.secret_question) return c.json({ error: '秘密の質問が設定されていません。管理者にパスワードリセットを依頼してください。' }, 404)
+  return c.json({ question: user.secret_question })
+})
+
+// パスワード忘れ：答えを確認してパスワードをリセット
+app.post('/api/auth/reset-by-question', async (c) => {
+  const { email, answer, newPassword } = await c.req.json() as any
+  if (!email || !answer || !newPassword) return c.json({ error: '入力が不足しています' }, 400)
+  if (newPassword.length < 4) return c.json({ error: 'パスワードは4文字以上にしてください' }, 400)
+  const user = await c.env.DB.prepare('SELECT id, secret_answer_hash FROM users WHERE email = ?').bind(email).first() as any
+  if (!user) return c.json({ error: 'このメールアドレスは登録されていません' }, 404)
+  const answerHash = await hashPassword(answer)
+  if (user.secret_answer_hash !== answerHash) return c.json({ error: '答えが正しくありません' }, 400)
+  const newHash = await hashPassword(newPassword)
+  await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(newHash, user.id).run()
+  await c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id).run()
+  return c.json({ success: true })
+})
+
+// 秘密の質問を設定（ログイン済みユーザー）
+app.post('/api/me/secret-question', authMiddleware, async (c) => {
+  const u = c.get('user')
+  const { question, answer } = await c.req.json() as any
+  if (!question || !answer) return c.json({ error: '質問と答えを入力してください' }, 400)
+  const answerHash = await hashPassword(answer)
+  await c.env.DB.prepare('UPDATE users SET secret_question = ?, secret_answer_hash = ? WHERE id = ?').bind(question, answerHash, u.id).run()
+  return c.json({ success: true })
 })
 
 // Update my profile
@@ -545,6 +585,21 @@ app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) 
   }
   await c.env.DB.prepare('DELETE FROM selections WHERE user_id = ?').bind(id).run()
   await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id).run()
+  return c.json({ success: true })
+})
+
+// Admin: Reset password
+app.post('/api/admin/members/:id/reset-password', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const body = await c.req.json() as any
+  const newPassword = body.password
+  if (!newPassword || newPassword.length < 4) {
+    return c.json({ error: 'パスワードは4文字以上にしてください' }, 400)
+  }
+  const hash = await hashPassword(newPassword)
+  await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(hash, id).run()
+  await c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id).run()
   return c.json({ success: true })
 })
 
@@ -840,6 +895,117 @@ const commonHead = `
 </style>`
 
 // --- Login / Register Page ---
+// --- Forgot Password Page ---
+app.get('/forgot-password', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>パスワードを忘れた方 - 社会科同好会</title>
+<style>
+  .auth-container { max-width: 440px; margin: 60px auto; padding: 0 20px; }
+  .auth-card { background: #fff; border-radius: 16px; padding: 40px 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; }
+  .auth-card h1 { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); font-size: 20px; text-align: center; margin: 0 0 8px; }
+  .auth-card .sub { text-align: center; color: #888; font-size: 13px; margin-bottom: 24px; line-height: 1.6; }
+  .form-group { margin-bottom: 18px; }
+  .form-group label { display: block; font-weight: 500; margin-bottom: 5px; font-size: 13px; color: #555; }
+  .form-group input { width: 100%; padding: 10px 14px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 15px; font-family: inherit; transition: border-color 0.2s; outline: none; box-sizing: border-box; }
+  .form-group input:focus { border-color: var(--header-line); }
+  .btn { width: 100%; padding: 12px; border: none; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.2s; }
+  .btn-primary { background: var(--header-line); color: #fff; }
+  .btn-primary:hover { background: #bf360c; }
+  .btn-back { background: #f5f5f5; color: #888; margin-top: 10px; font-size: 14px; }
+  .error-msg { background: #ffebee; color: #c62828; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .success-msg { background: #e8f5e9; color: #2e7d32; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .logo { text-align: center; margin-bottom: 20px; }
+  .logo span { display: block; font-size: 10px; letter-spacing: 2px; color: #999; }
+  .logo strong { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; color: var(--header-line); }
+  .step-label { font-size: 11px; color: #bbb; text-align: center; margin-bottom: 16px; letter-spacing: 1px; }
+  .question-box { background: #fff8f0; border: 2px solid #ffcc80; border-radius: 10px; padding: 14px 16px; font-size: 15px; font-weight: 700; color: #e65100; margin-bottom: 18px; }
+</style>
+</head><body>
+<div class="auth-container">
+  <div class="auth-card">
+    <div class="logo"><span>NAGOYA SHAKAIKA</span><strong>社会科同好会</strong></div>
+    <h1><i class="fas fa-key"></i> パスワードの再設定</h1>
+    <div id="error" class="error-msg"></div>
+    <div id="success" class="success-msg"></div>
+    <div id="step1">
+      <p class="sub">登録したメールアドレスと秘密の質問の答えで本人確認を行います。</p>
+      <div class="step-label">STEP 1 / 3　メールアドレスを入力</div>
+      <div class="form-group">
+        <label><i class="fas fa-envelope"></i> メールアドレス</label>
+        <input type="email" id="fpEmail" placeholder="example@email.com">
+      </div>
+      <button class="btn btn-primary" onclick="checkEmail()"><i class="fas fa-arrow-right"></i> 次へ</button>
+    </div>
+    <div id="step2" style="display:none">
+      <div class="step-label">STEP 2 / 3　秘密の質問に答える</div>
+      <div class="question-box" id="questionText"></div>
+      <div class="form-group">
+        <label><i class="fas fa-comment"></i> 答え</label>
+        <input type="text" id="fpAnswer" placeholder="答えを入力">
+      </div>
+      <button class="btn btn-primary" onclick="checkAnswer()"><i class="fas fa-arrow-right"></i> 次へ</button>
+    </div>
+    <div id="step3" style="display:none">
+      <div class="step-label">STEP 3 / 3　新しいパスワードを設定</div>
+      <div class="form-group">
+        <label><i class="fas fa-lock"></i> 新しいパスワード（4文字以上）</label>
+        <input type="password" id="fpNewPassword" placeholder="新しいパスワード" minlength="4">
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-lock"></i> 確認のためもう一度</label>
+        <input type="password" id="fpNewPassword2" placeholder="もう一度入力">
+      </div>
+      <button class="btn btn-primary" onclick="doReset()"><i class="fas fa-check"></i> パスワードを変更する</button>
+    </div>
+    <button class="btn btn-back" onclick="window.location.href='/login'"><i class="fas fa-arrow-left"></i> ログイン画面に戻る</button>
+  </div>
+</div>
+<script>
+let _email = '';
+function showError(msg) { const e = document.getElementById('error'); e.textContent = msg; e.style.display = 'block'; document.getElementById('success').style.display='none'; }
+function showSuccess(msg) { const e = document.getElementById('success'); e.textContent = msg; e.style.display = 'block'; document.getElementById('error').style.display='none'; }
+function hideMessages() { document.getElementById('error').style.display='none'; document.getElementById('success').style.display='none'; }
+async function checkEmail() {
+  hideMessages();
+  const email = document.getElementById('fpEmail').value.trim();
+  if (!email) { showError('メールアドレスを入力してください'); return; }
+  try {
+    const res = await fetch('/api/auth/get-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email }) });
+    const data = await res.json();
+    if (!res.ok) { showError(data.error); return; }
+    _email = email;
+    document.getElementById('questionText').textContent = data.question;
+    document.getElementById('step1').style.display = 'none';
+    document.getElementById('step2').style.display = 'block';
+  } catch(e) { showError('通信エラーが発生しました'); }
+}
+function checkAnswer() {
+  hideMessages();
+  const answer = document.getElementById('fpAnswer').value.trim();
+  if (!answer) { showError('答えを入力してください'); return; }
+  document.getElementById('step2').style.display = 'none';
+  document.getElementById('step3').style.display = 'block';
+}
+async function doReset() {
+  hideMessages();
+  const answer = document.getElementById('fpAnswer').value.trim();
+  const pw1 = document.getElementById('fpNewPassword').value;
+  const pw2 = document.getElementById('fpNewPassword2').value;
+  if (pw1.length < 4) { showError('パスワードは4文字以上にしてください'); return; }
+  if (pw1 !== pw2) { showError('パスワードが一致しません'); return; }
+  try {
+    const res = await fetch('/api/auth/reset-by-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email: _email, answer, newPassword: pw1 }) });
+    const data = await res.json();
+    if (!res.ok) { document.getElementById('step3').style.display = 'none'; document.getElementById('step2').style.display = 'block'; showError(data.error); return; }
+    showSuccess('パスワードを変更しました！ログイン画面からログインしてください。');
+    document.getElementById('step3').style.display = 'none';
+    setTimeout(() => { window.location.href = '/login'; }, 2000);
+  } catch(e) { showError('通信エラーが発生しました'); }
+}
+</script>
+</body></html>`)
+})
+
 app.get('/login', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <title>ログイン - 社会科同好会</title>
@@ -887,6 +1053,7 @@ app.get('/login', (c) => {
         <input type="password" id="loginPassword" required placeholder="パスワードを入力">
       </div>
       <button type="submit" class="btn btn-primary"><i class="fas fa-sign-in-alt"></i> ログイン</button>
+      <p style="text-align:center;margin-top:12px;font-size:13px;"><a href="/forgot-password" style="color:#e65100;text-decoration:none;"><i class="fas fa-key"></i> パスワードを忘れた方はこちら</a></p>
     </form>
 
     <form id="registerForm" style="display:none" onsubmit="return handleRegister(event)">
@@ -1260,6 +1427,27 @@ app.get('/mypage', (c) => {
             </select>
           </div>
           <button class="btn-save" onclick="saveProfile()" id="btn-save-profile" style="font-size:14px;padding:10px 16px;width:100%">保存する</button>
+          <div style="border-top:1px solid #eee;margin-top:16px;padding-top:14px;">
+            <div style="font-size:12px;font-weight:bold;color:#5d4037;margin-bottom:8px;"><i class="fas fa-key"></i> 秘密の質問（パスワード忘れ時に使用）</div>
+            <div style="margin-bottom:6px;">
+              <label style="font-size:12px;color:#888;">質問を選ぶ</label>
+              <select id="profile-secret-question" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;margin-top:3px;">
+                <option value="">選択してください</option>
+                <option>小学校時代の親友の名前は？</option>
+                <option>好きな食べ物は？</option>
+                <option>生まれた市区町村は？</option>
+                <option>好きなスポーツ選手は？</option>
+                <option>初めて担任した学年は？</option>
+                <option>尊敬する先生の名前は？</option>
+              </select>
+            </div>
+            <div style="margin-bottom:6px;">
+              <label style="font-size:12px;color:#888;">答え</label>
+              <input type="text" id="profile-secret-answer" placeholder="答えを入力" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;margin-top:3px;box-sizing:border-box;">
+            </div>
+            <button onclick="saveSecretQuestion()" style="background:#e65100;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;width:100%;font-family:inherit;">秘密の質問を設定・更新する</button>
+            <div id="secret-q-msg" style="font-size:12px;margin-top:6px;display:none;"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -1627,6 +1815,29 @@ async function saveSchoolIfChanged(force) {
       alert(e.message); btn.textContent = '💾 プロフィールを保存'; btn.disabled = false;
     }
   }
+
+async function saveSecretQuestion() {
+  const question = document.getElementById('profile-secret-question').value;
+  const answer = document.getElementById('profile-secret-answer').value.trim();
+  const msg = document.getElementById('secret-q-msg');
+  if (!question) { msg.textContent = '質問を選んでください'; msg.style.color = '#c62828'; msg.style.display = 'block'; return; }
+  if (!answer) { msg.textContent = '答えを入力してください'; msg.style.color = '#c62828'; msg.style.display = 'block'; return; }
+  const token = localStorage.getItem('token');
+  const res = await fetch('/api/me/secret-question', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, answer })
+  });
+  if (res.ok) {
+    msg.textContent = '✅ 設定しました';
+    msg.style.color = '#2e7d32';
+    document.getElementById('profile-secret-answer').value = '';
+  } else {
+    msg.textContent = '❌ 設定に失敗しました';
+    msg.style.color = '#c62828';
+  }
+  msg.style.display = 'block';
+}
 
 function setupFYSelect() {
   const sel = document.getElementById('fySelect');
@@ -2135,6 +2346,8 @@ app.get('/admin', (c) => {
   .btn-export { background: #2e7d32; color: #fff; padding: 10px 24px; font-size: 14px; border-radius: 10px; }
   .btn-export:hover { background: #1b5e20; }
   .btn-danger { background: #c62828; color: #fff; font-size: 11px; padding: 4px 10px; }
+  .btn-key { background: #546e7a; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 4px; cursor: pointer; }
+  .btn-key:hover { background: #37474f; }
   .member-table th[data-sort]:hover { background: rgba(0,0,0,0.05); }
 .sort-icon { font-size: 10px; opacity: 0.6; }
 .badge-none { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:500; background:#f0f0f0; color:#aaa; }
@@ -2446,6 +2659,7 @@ function renderMembers(members) {
       (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>主幹・管理職</option></select></td>' : '') +
       '<td style="white-space:nowrap">' +
         '<button class="btn-sm btn-warning" data-action="role" data-id="' + m.id + '" data-role="' + m.role + '" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '"><i class="fas ' + (m.role === 'admin' ? 'fa-user-minus' : 'fa-user-plus') + '"></i></button> ' +
+        '<button class="btn-sm btn-key" data-action="reset-password" data-id="' + m.id + '" data-name="' + escapeHtml(m.name) + '" title="パスワードリセット"><i class="fas fa-key"></i></button> ' +
         '<button class="btn-sm btn-danger" data-action="delete" data-id="' + m.id + '" title="削除"><i class="fas fa-trash"></i></button>' +
       '</td></tr>';
   }).join('');
@@ -2613,6 +2827,23 @@ async function deleteMember(id, name) {
   loadMembers();
 }
 
+async function resetPassword(id, name) {
+  const newPw = prompt(name + ' さんの新しいパスワードを入力してください（4文字以上）:');
+  if (newPw === null) return;
+  if (newPw.length < 4) { alert('パスワードは4文字以上にしてください'); return; }
+  const res = await fetch('/api/admin/members/'+id+'/reset-password', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: newPw })
+  });
+  if (res.ok) {
+    alert(name + ' さんのパスワードを「' + newPw + '」にリセットしました。\n本人に伝えてください。');
+  } else {
+    const err = await res.json();
+    alert('エラー: ' + (err.error || '不明なエラー'));
+  }
+}
+
 async function exportCSV() {
   const res = await fetch('/api/admin/export', { headers: { 'Authorization': 'Bearer ' + token } });
   if (!res.ok) { alert('エクスポートに失敗しました'); return; }
@@ -2639,6 +2870,7 @@ document.addEventListener('click', function(e) {
   const id = parseInt(btn.dataset.id);
   if (action === 'detail') showDetail(id);
   else if (action === 'role') toggleRole(id, btn.dataset.role);
+  else if (action === 'reset-password') resetPassword(id, btn.dataset.name);
   else if (action === 'delete') deleteMember(id, btn.dataset.name);
 });
 
