@@ -2837,7 +2837,7 @@ async function resetPassword(id, name) {
     body: JSON.stringify({ password: newPw })
   });
   if (res.ok) {
-    alert(name + ' さんのパスワードを「' + newPw + '」にリセットしました。\n本人に伝えてください。');
+    alert(name + ' さんのパスワードを「' + newPw + '」にリセットしました。本人に新しいパスワードを伝えてください。');
   } else {
     const err = await res.json();
     alert('エラー: ' + (err.error || '不明なエラー'));
