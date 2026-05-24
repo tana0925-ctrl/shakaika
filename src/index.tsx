@@ -757,13 +757,13 @@ app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
     'SELECT * FROM survey_questions WHERE event_id = ? ORDER BY sort_order'
   ).bind(id).all()
   const { results: attendances } = await db.prepare(
-    'SELECT a.*, u.name, u.email FROM attendances a JOIN users u ON a.user_id = u.id WHERE a.event_id = ? ORDER BY a.attended_at'
+    'SELECT a.*, u.name, u.email, u.school, u.school_type FROM attendances a JOIN users u ON a.user_id = u.id WHERE a.event_id = ? ORDER BY a.attended_at'
   ).bind(id).all()
   const { results: answers } = await db.prepare(
-    'SELECT sa.*, u.name, u.email FROM survey_answers sa JOIN users u ON sa.user_id = u.id WHERE sa.event_id = ?'
+    'SELECT sa.*, u.name, u.email, u.school, u.school_type FROM survey_answers sa JOIN users u ON sa.user_id = u.id WHERE sa.event_id = ?'
   ).bind(id).all()
   const { results: customAnswers } = await db.prepare(
-    'SELECT ca.*, u.name FROM custom_answers ca JOIN users u ON ca.user_id = u.id WHERE ca.event_id = ?'
+    'SELECT ca.*, u.name, u.school_type FROM custom_answers ca JOIN users u ON ca.user_id = u.id WHERE ca.event_id = ?'
   ).bind(id).all()
   return c.json({ event, questions, attendances, answers, customAnswers })
 })
@@ -3381,10 +3381,11 @@ function renderDetail(el, d, tab) {
   if (tab === 'att') {
     if (!d.attendances.length) { html += '<div class="no-data">まだ出席者がいません</div>'; }
     else {
-      html += '<table><tr><th>#</th><th>名前</th><th>出席時刻</th></tr>';
+      html += '<table><tr><th>#</th><th>名前</th><th>校種</th><th>学校名</th><th>出席時刻</th></tr>';
       d.attendances.forEach(function(a, i) {
         var t = a.attended_at ? new Date(a.attended_at).toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-';
-        html += '<tr><td>'+(i+1)+'</td><td>'+escHtml(a.name)+'</td><td>'+t+'</td></tr>';
+        var st = a.school_type === 'elementary' ? '<span style="background:#e8f5e9;color:#2e7d32;border-radius:4px;padding:1px 6px;font-size:11px">小学校</span>' : a.school_type === 'junior_high' ? '<span style="background:#e3f2fd;color:#1565c0;border-radius:4px;padding:1px 6px;font-size:11px">中学校</span>' : '<span style="color:#999;font-size:11px">-</span>';
+        html += '<tr><td>'+(i+1)+'</td><td>'+escHtml(a.name)+'</td><td>'+st+'</td><td style="font-size:12px">'+escHtml(a.school||'-')+'</td><td>'+t+'</td></tr>';
       });
       html += '</table>';
     }
@@ -3403,17 +3404,30 @@ function renderDetail(el, d, tab) {
       // question lookup
       var qMap = {};
       d.questions.forEach(function(q) { qMap[q.id] = q.question_text; });
+      // school_type lookup from answers or customAnswers
+      var schoolTypeMap = {};
+      d.answers.forEach(function(a) { schoolTypeMap[a.user_id] = { school_type: a.school_type, school: a.school }; });
+      d.customAnswers.forEach(function(ca) { if (!schoolTypeMap[ca.user_id]) schoolTypeMap[ca.user_id] = { school_type: ca.school_type, school: '' }; });
 
       var userIds = Object.keys(ansMap);
       Object.keys(caByUser).forEach(function(uid) { if (userIds.indexOf(uid) === -1) userIds.push(uid); });
 
-      html += '<table><tr><th>名前</th>';
+      var hasSat = d.answers.some(function(a) { return a.satisfaction; });
+      html += '<table><tr><th>校種</th><th>名前</th>';
+      if (hasSat) html += '<th>満足度</th><th>感想</th>';
       if (d.questions.length) html += '<th>回答</th>';
       html += '</tr>';
       userIds.forEach(function(uid) {
         var ans = ansMap[uid];
         var name = ans ? escHtml(ans.name) : (caByUser[uid] && caByUser[uid][0] ? escHtml(caByUser[uid][0].name) : '?');
-        html += '<tr><td>'+name+'</td>';
+        var si = schoolTypeMap[uid] || {};
+        var st = si.school_type === 'elementary' ? '<span style="background:#e8f5e9;color:#2e7d32;border-radius:4px;padding:1px 6px;font-size:11px">小</span>' : si.school_type === 'junior_high' ? '<span style="background:#e3f2fd;color:#1565c0;border-radius:4px;padding:1px 6px;font-size:11px">中</span>' : '<span style="color:#999;font-size:11px">-</span>';
+        html += '<tr><td>'+st+'</td><td>'+name+'</td>';
+        if (hasSat) {
+          var sat = ans && ans.satisfaction ? '★'.repeat(ans.satisfaction)+'☆'.repeat(5-ans.satisfaction) : '-';
+          var cmt = ans && ans.comment ? escHtml(ans.comment) : '-';
+          html += '<td style="white-space:nowrap;font-size:12px">'+sat+'</td><td style="font-size:11px;max-width:200px">'+cmt+'</td>';
+        }
         if (d.questions.length) {
           var parts = [];
           (caByUser[uid]||[]).forEach(function(ca) {
