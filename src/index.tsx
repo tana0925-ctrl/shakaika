@@ -3383,7 +3383,7 @@ function renderDetail(el, d, tab) {
     else {
       html += '<table><tr><th>#</th><th>名前</th><th>校種</th><th>学校名</th><th>出席時刻</th></tr>';
       d.attendances.forEach(function(a, i) {
-        var t = a.attended_at ? new Date(a.attended_at).toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-';
+        var t = a.attended_at ? new Date(a.attended_at.replace(' ','T')+'Z').toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-';
         var st = a.school_type === 'elementary' ? '<span style="background:#e8f5e9;color:#2e7d32;border-radius:4px;padding:1px 6px;font-size:11px">小学校</span>' : a.school_type === 'junior_high' ? '<span style="background:#e3f2fd;color:#1565c0;border-radius:4px;padding:1px 6px;font-size:11px">中学校</span>' : '<span style="color:#999;font-size:11px">-</span>';
         html += '<tr><td>'+(i+1)+'</td><td>'+escHtml(a.name)+'</td><td>'+st+'</td><td style="font-size:12px">'+escHtml(a.school||'-')+'</td><td>'+t+'</td></tr>';
       });
