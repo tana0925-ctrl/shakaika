@@ -2028,11 +2028,35 @@ function selectCell(td) {
   if (wasSelected) {
     // toggle off: deselect
     delete selectedByVp[vp];
+    autoSaveViewpoint(vp, null, '');
   } else {
     // select new cell
     td.classList.add('selected');
     const memoEl = td.querySelector('.memo-input');
-    selectedByVp[vp] = { step: step, memo: memoEl ? memoEl.value : '' };
+    const memo = memoEl ? memoEl.value : '';
+    selectedByVp[vp] = { step: step, memo: memo };
+    autoSaveViewpoint(vp, step, memo);
+  }
+}
+
+async function autoSaveViewpoint(vp, step, memo) {
+  if (!token || !selectionsLoaded) return;
+  try {
+    if (step) {
+      await fetchWithTimeout('/api/selections', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ viewpoint: vp, step: step, memo: memo || '' })
+      }, 12000);
+    } else {
+      await fetchWithTimeout('/api/selections/' + vp, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token }
+      }, 12000);
+    }
+    showSaveStatus('保存しました', true);
+  } catch(e) {
+    showSaveStatus('保存に失敗しました', false);
   }
 }
 
@@ -2044,7 +2068,12 @@ function attachMemoListeners() {
     if (!vp || !step || !memo) return;
     memo.addEventListener('input', () => {
       const cur = selectedByVp[vp];
-      if (cur && cur.step === step) cur.memo = memo.value;
+      if (cur && cur.step === step) {
+        cur.memo = memo.value;
+        // メモ入力後1.5秒で自動保存
+        if (memo._saveTimer) clearTimeout(memo._saveTimer);
+        memo._saveTimer = setTimeout(() => { autoSaveViewpoint(vp, step, memo.value); }, 1500);
+      }
     });
   });
 }
