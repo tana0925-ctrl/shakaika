@@ -2625,6 +2625,9 @@ function updateSchoolType(sel) {
   }).catch(function() { alert('通信エラーが発生しました'); });
 }
 
+function handleGroupKey(e, inp) {
+  if (e.key === 'Enter' || e.key === 'Escape') inp.blur();
+}
 function editGroup(span) {
   var td = span.parentNode;
   var input = td.querySelector('.group-input');
@@ -2738,7 +2741,7 @@ function renderMembers(members) {
     var grp = m.training_group || '';
     var grpCell = '<td style="text-align:center;white-space:nowrap">' +
       '<span class="group-disp" data-id="' + m.id + '" onclick="editGroup(this)" style="cursor:pointer;padding:2px 6px;border-radius:4px;font-size:12px;' + (grp ? 'background:#e3f2fd;color:#1565c0;font-weight:bold' : 'color:#999') + '">' + (grp ? escapeHtml(grp) : '未設定') + '</span>' +
-      '<input type="text" list="groupDatalist" class="group-input" data-id="' + m.id + '" value="' + escapeHtml(grp) + '" placeholder="例: Aグループ" style="display:none;width:80px;font-size:12px;padding:2px 4px;border:1px solid #90caf9;border-radius:4px" onblur="saveGroup(this)" onkeydown="if(event.key===\'Enter\'){this.blur();}if(event.key===\'Escape\'){this.blur();}">' +
+      '<input type="text" list="groupDatalist" class="group-input" data-id="' + m.id + '" value="' + escapeHtml(grp) + '" placeholder="例: Aグループ" style="display:none;width:80px;font-size:12px;padding:2px 4px;border:1px solid #90caf9;border-radius:4px" onblur="saveGroup(this)" onkeydown="handleGroupKey(event,this)">' +
       '</td>';
     return '<tr>' +
       '<td>' + (i + 1) + '</td>' +
