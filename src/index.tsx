@@ -78,11 +78,8 @@ async function adminMiddleware(c: any, next: any) {
 // ========== DB Init ==========
 app.get('/api/init', async (c) => {
   const db = c.env.DB
-  // Block if admin already exists (prevent repeated init)
-  try {
-    const existing = await db.prepare('SELECT id FROM users WHERE role = ? LIMIT 1').bind('admin').first()
-    if (existing) return c.json({ message: '既に初期化済みです' })
-  } catch(e) { /* table may not exist yet, continue */ }
+
+  // Always run column migrations first (safe to run repeatedly)
   await db.prepare(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -94,7 +91,6 @@ app.get('/api/init', async (c) => {
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`).run()
 
-  // Add 'school' column if missing (for existing DBs)
   try {
     const { results: cols } = (await db.prepare("PRAGMA table_info(users)").all()) as any
     const hasSchool = Array.isArray(cols) && cols.some((c: any) => c.name === 'school')
@@ -117,6 +113,12 @@ app.get('/api/init', async (c) => {
   } catch (e) {
     // ignore
   }
+
+  // Block further init if admin already exists
+  try {
+    const existing = await db.prepare('SELECT id FROM users WHERE role = ? LIMIT 1').bind('admin').first()
+    if (existing) return c.json({ message: '既に初期化済みです（マイグレーション実行済み）' })
+  } catch(e) { /* continue */ }
 
   await db.prepare(`CREATE TABLE IF NOT EXISTS selections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
