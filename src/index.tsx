@@ -643,6 +643,46 @@ app.get('/api/admin/annual-notes', authMiddleware, adminMiddleware, async (c) =>
 })
 
 // ========== CSV Export ==========
+// ========== Group Summary API ==========
+app.get('/api/admin/group-summary', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  const now = new Date()
+  const fy = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1
+  const { results: members } = await db.prepare(`
+    SELECT u.id, u.name, u.school, u.school_type, u.training_group,
+      GROUP_CONCAT(s.viewpoint || ':' || s.step, '||') as sel_raw,
+      an.goal, an.reflection
+    FROM users u
+    LEFT JOIN selections s ON u.id = s.user_id
+    LEFT JOIN annual_notes an ON an.user_id = u.id AND an.fiscal_year = ?
+    WHERE u.role = 'member'
+    GROUP BY u.id ORDER BY u.training_group, u.name
+  `).bind(fy).all() as any
+  const { results: evts } = await db.prepare(`
+    SELECT a.user_id, e.title, e.event_date
+    FROM attendances a JOIN events e ON e.id = a.event_id ORDER BY e.event_date DESC
+  `).all() as any
+  const attMap: Record<number, Array<{title:string;date:string}>> = {}
+  for (const ev of evts) {
+    if (!attMap[ev.user_id]) attMap[ev.user_id] = []
+    attMap[ev.user_id].push({ title: ev.title, date: ev.event_date })
+  }
+  const groups: Record<string, any[]> = {}
+  for (const m of members) {
+    const selections: Record<string, number> = {}
+    if (m.sel_raw) {
+      for (const part of (m.sel_raw as string).split('||')) {
+        const [vp, stepStr] = part.split(':')
+        if (vp && stepStr) selections[vp] = parseInt(stepStr)
+      }
+    }
+    const g = (m.training_group && (m.training_group as string).trim()) ? (m.training_group as string).trim() : '未設定'
+    if (!groups[g]) groups[g] = []
+    groups[g].push({ id: m.id, name: m.name, school: m.school || '', school_type: m.school_type || '', goal: m.goal || '', reflection: m.reflection || '', selections, events: attMap[m.id] || [] })
+  }
+  return c.json({ groups, fiscal_year: fy })
+})
+
 app.get('/api/admin/export', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
     'SELECT id, name, school, email, role, district, experience_years, grade, position, created_at FROM users ORDER BY created_at'
@@ -2475,6 +2515,7 @@ app.get('/admin', (c) => {
   <div class="user-info">
     <a href="/mypage" class="btn-sm btn-back" style="text-decoration:none"><i class="fas fa-map"></i> マイページ</a>
     <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>
+    <a href="/admin/groups" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-users"></i> グループ別</a>
     <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i> ログアウト</button>
   </div>
 </div>
@@ -3237,6 +3278,111 @@ async function submitSurvey() {
 }
 </script>
 </body></html>`)
+})
+
+// --- Admin Groups Page ---
+app.get('/admin/groups', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>グループ別管理 - 社会科同好会</title>
+<style>
+body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
+.top-bar{background:#1a237e;color:#fff;padding:10px 24px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}
+.top-bar .logo{font-family:'Zen Maru Gothic',sans-serif;font-size:18px;font-weight:700}
+.top-bar .nav{display:flex;align-items:center;gap:10px}
+.btn-sm{padding:6px 14px;border-radius:8px;border:none;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;text-decoration:none}
+.btn-back{background:rgba(255,255,255,0.2);color:#fff}
+.container{max-width:1100px;margin:0 auto;padding:24px 16px}
+.page-title{font-size:20px;font-weight:700;color:#1a237e;margin-bottom:20px}
+.group-card{background:#fff;border-radius:14px;box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:28px;overflow:hidden}
+.group-header{color:#fff;padding:12px 20px;font-size:17px;font-weight:700;display:flex;align-items:center;gap:10px}
+.group-count{font-size:13px;opacity:0.85;font-weight:400}
+.member-row{padding:14px 20px;border-bottom:1px solid #f0f0f0}
+.member-row:last-child{border-bottom:none}
+.member-name{font-size:15px;font-weight:700;color:#222;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.school-badge{font-size:11px;padding:1px 7px;border-radius:4px;font-weight:700}
+.elem-b{background:#e8f5e9;color:#2e7d32}
+.junior-b{background:#e3f2fd;color:#1565c0}
+.school-nm{font-size:12px;color:#888;font-weight:400}
+.steps-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.step-tag{font-size:11px;padding:3px 9px;border-radius:10px;font-weight:700;border:1px solid}
+.s1{background:#e8f5e9;color:#2e7d32;border-color:#a5d6a7}
+.s2{background:#e3f2fd;color:#1565c0;border-color:#90caf9}
+.s3{background:#fff3e0;color:#e65100;border-color:#ffcc80}
+.s4{background:#fce4ec;color:#b71c1c;border-color:#f48fb1}
+.info-row{font-size:13px;color:#555;margin-bottom:5px;line-height:1.6}
+.note-box{background:#fafafa;border-left:3px solid #e0e0e0;padding:6px 10px;border-radius:0 6px 6px 0;font-size:12px;color:#555;white-space:pre-wrap;margin-top:3px;max-height:72px;overflow:hidden}
+.no-val{color:#bbb;font-style:italic}
+.unset-section{margin-top:16px;background:#fff;border-radius:14px;box-shadow:0 2px 8px rgba(0,0,0,0.06);overflow:hidden}
+.unset-hdr{background:#9e9e9e;color:#fff;padding:10px 20px;font-size:15px;font-weight:700}
+.unset-list{padding:12px 20px;display:flex;flex-wrap:wrap;gap:8px}
+.unset-item{font-size:12px;background:#f5f5f5;border-radius:6px;padding:4px 10px;color:#555}
+@media(max-width:600px){.container{padding:12px 8px}.group-header{font-size:15px}}
+</style></head><body>
+<div class="top-bar">
+  <div class="logo"><i class="fas fa-users"></i> グループ別管理</div>
+  <div class="nav">
+    <a href="/admin" class="btn-sm btn-back" style="text-decoration:none"><i class="fas fa-arrow-left"></i> 管理画面</a>
+    <a href="/admin/events" class="btn-sm btn-back" style="text-decoration:none"><i class="fas fa-calendar-alt"></i> イベント</a>
+  </div>
+</div>
+<div class="container">
+  <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
+  <div id="gList"><p style="color:#888;text-align:center;padding:40px">読み込み中...</p></div>
+</div>
+<script>
+const token = localStorage.getItem('token');
+if (!token) window.location.href = '/login';
+const VP = {lesson_plan:'授業をつくる',lesson_practice:'授業をする',student_eval:'子どもを見る',connection:'つながる',research:'深める',j_lesson_plan:'授業をつくる',j_material:'資料',j_dialogue:'対話',j_inquiry:'探究',j_student_eval:'生徒を見る',j_connection:'つながる',j_research:'深める',a_school_support:'授業支援',a_school_mgmt:'学校運営',a_member_support:'会員支援',a_leader_dev:'人材育成',a_org_mgmt:'組織運営',a_outreach:'発信'};
+const COLORS=['#1565c0','#2e7d32','#e65100','#6a1b9a','#00695c','#b71c1c','#0277bd','#558b2f'];
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+async function load(){
+  try{
+    const res=await fetch('/api/admin/group-summary',{headers:{'Authorization':'Bearer '+token}});
+    if(res.status===401||res.status===403){localStorage.clear();window.location.href='/login';return;}
+    const d=await res.json();render(d.groups,d.fiscal_year);
+  }catch(e){document.getElementById('gList').innerHTML='<p style="color:#c62828;text-align:center">読み込みに失敗しました</p>';}
+}
+function render(groups,fy){
+  const el=document.getElementById('gList');
+  const names=Object.keys(groups).sort(function(a,b){if(a==='未設定')return 1;if(b==='未設定')return -1;return a.localeCompare(b,'ja');});
+  const setNames=names.filter(function(n){return n!=='未設定';});
+  const unset=groups['未設定']||[];
+  if(!setNames.length&&!unset.length){el.innerHTML='<p style="color:#888;text-align:center;padding:40px">グループが設定されていません。管理画面でメンバーにグループを設定してください。</p>';return;}
+  var html='';
+  setNames.forEach(function(gname,gi){
+    var ms=groups[gname];var col=COLORS[gi%COLORS.length];
+    html+='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span></div>';
+    ms.forEach(function(m){html+=mRow(m,fy);});
+    html+='</div>';
+  });
+  if(unset.length){
+    html+='<div class="unset-section"><div class="unset-hdr"><i class="fas fa-question-circle"></i> グループ未設定 ('+unset.length+'名)</div><div class="unset-list">';
+    unset.forEach(function(m){var st=m.school_type==='elementary'?'小':m.school_type==='junior_high'?'中':'';html+='<div class="unset-item">'+esc(m.name)+(st?'（'+st+'）':'')+'</div>';});
+    html+='</div></div>';
+  }
+  el.innerHTML=html;
+}
+function mRow(m,fy){
+  var sels=Object.keys(m.selections);
+  var stepsHtml=sels.length?sels.map(function(vp){var s=m.selections[vp];return '<span class="step-tag s'+s+'">'+esc(VP[vp]||vp)+': STEP'+s+'</span>';}).join(''):'<span class="no-val">STEPが未選択</span>';
+  var ev=m.events.length;
+  var evHtml=ev>0?m.events.slice(0,4).map(function(e){return esc(e.title);}).join(' <span style="color:#ddd">|</span> ')+(ev>4?' <span style="color:#999">他'+(ev-4)+'件</span>':'')+' <strong style="color:#555">計'+ev+'回</strong>':'<span class="no-val">参加記録なし</span>';
+  var stC=m.school_type==='elementary'?'elem-b':m.school_type==='junior_high'?'junior-b':'';
+  var stL=m.school_type==='elementary'?'小学校':m.school_type==='junior_high'?'中学校':'';
+  var h='<div class="member-row">';
+  h+='<div class="member-name">'+esc(m.name);
+  if(stL)h+=' <span class="school-badge '+stC+'">'+stL+'</span>';
+  if(m.school)h+=' <span class="school-nm">'+esc(m.school)+'</span>';
+  h+='</div>';
+  h+='<div class="steps-row">'+stepsHtml+'</div>';
+  h+='<div class="info-row">📅 <strong>参加イベント</strong>　'+evHtml+'</div>';
+  if(m.goal)h+='<div class="info-row">🎯 <strong>'+fy+'年度の目標</strong><div class="note-box">'+esc(m.goal)+'</div></div>';
+  if(m.reflection)h+='<div class="info-row">💭 <strong>振り返り</strong><div class="note-box">'+esc(m.reflection)+'</div></div>';
+  h+='</div>';
+  return h;
+}
+load();
+</script></body></html>`)
 })
 
 // --- Admin Events Page ---
