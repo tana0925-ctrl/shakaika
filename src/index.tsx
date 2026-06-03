@@ -110,6 +110,10 @@ app.get('/api/init', async (c) => {
       await db.prepare("ALTER TABLE users ADD COLUMN secret_question TEXT DEFAULT ''").run()
       await db.prepare("ALTER TABLE users ADD COLUMN secret_answer_hash TEXT DEFAULT ''").run()
     }
+    const hasTrainingGroup = Array.isArray(cols) && cols.some((c: any) => c.name === 'training_group')
+    if (!hasTrainingGroup) {
+      await db.prepare("ALTER TABLE users ADD COLUMN training_group TEXT DEFAULT ''").run()
+    }
   } catch (e) {
     // ignore
   }
@@ -512,7 +516,7 @@ app.get('/api/me/history', authMiddleware, async (c) => {
 // ========== Admin API ==========
 app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
-    `SELECT u.id, u.name, u.school, u.email, u.role, u.district, u.experience_years, u.grade, u.position, u.school_type,
+    `SELECT u.id, u.name, u.school, u.email, u.role, u.district, u.experience_years, u.grade, u.position, u.school_type, u.training_group,
       datetime(u.created_at, '+9 hours') as created_at,
       GROUP_CONCAT(s.viewpoint || ':' || s.step || ':' || COALESCE(s.memo,''), '||') as selections_raw
      FROM users u
@@ -543,6 +547,7 @@ app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
       grade: m.grade || '',
       position: m.position || '',
       school_type: m.school_type || '',
+      training_group: (m as any).training_group || '',
       created_at: m.created_at,
       selections
     }
@@ -573,6 +578,14 @@ app.patch('/api/admin/members/:id/school_type', authMiddleware, adminMiddleware,
     return c.json({ error: '無効な校種です' }, 400)
   }
   await c.env.DB.prepare('UPDATE users SET school_type = ? WHERE id = ?').bind(school_type, id).run()
+  return c.json({ success: true })
+})
+
+app.patch('/api/admin/members/:id/training-group', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const { training_group } = await c.req.json()
+  await c.env.DB.prepare('UPDATE users SET training_group = ? WHERE id = ?').bind(training_group || '', id).run()
   return c.json({ success: true })
 })
 
@@ -2612,6 +2625,44 @@ function updateSchoolType(sel) {
   }).catch(function() { alert('通信エラーが発生しました'); });
 }
 
+function editGroup(span) {
+  var td = span.parentNode;
+  var input = td.querySelector('.group-input');
+  span.style.display = 'none';
+  input.style.display = '';
+  input.focus();
+  input.select();
+}
+
+async function saveGroup(input) {
+  var id = input.getAttribute('data-id');
+  var value = input.value.trim();
+  var td = input.parentNode;
+  var span = td.querySelector('.group-disp');
+  input.style.display = 'none';
+  span.style.display = '';
+  span.textContent = value || '未設定';
+  span.style.background = value ? '#e3f2fd' : '';
+  span.style.color = value ? '#1565c0' : '#999';
+  span.style.fontWeight = value ? 'bold' : '';
+  try {
+    var res = await fetch('/api/admin/members/' + id + '/training-group', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+      body: JSON.stringify({ training_group: value })
+    });
+    if (res.ok) {
+      var member = _allMembers.find(function(m) { return String(m.id) === String(id); });
+      if (member) member.training_group = value;
+      var existingGroups = [];
+      _allMembers.forEach(function(m) { if (m.training_group && existingGroups.indexOf(m.training_group) === -1) existingGroups.push(m.training_group); });
+      existingGroups.sort();
+      var dl = document.getElementById('groupDatalist');
+      if (dl) dl.innerHTML = existingGroups.map(function(g) { return '<option value="' + g.replace(/"/g,'&quot;') + '">'; }).join('');
+    }
+  } catch(e) { alert('保存に失敗しました'); }
+}
+
 function updateSortHeaders() {
   document.querySelectorAll('.sort-icon').forEach(function(el) {
     var col = el.getAttribute('data-col');
@@ -2637,6 +2688,7 @@ function renderMembers(members) {
   hdr += '<th style="width:50px;cursor:pointer;user-select:none" data-sort="experience_years">経験 <span class="sort-icon" data-col="experience_years"></span></th>';
   hdr += '<th style="width:60px;cursor:pointer;user-select:none" data-sort="grade">学年 <span class="sort-icon" data-col="grade"></span></th>';
   hdr += '<th style="width:80px;cursor:pointer;user-select:none" data-sort="position">所属 <span class="sort-icon" data-col="position"></span></th>';
+  hdr += '<th style="width:90px;cursor:pointer;user-select:none" data-sort="training_group">グループ <span class="sort-icon" data-col="training_group"></span></th>';
   for (var vi = 0; vi < vps.length; vi++) {
     hdr += '<th style="cursor:pointer;user-select:none" data-sort="vp_' + vps[vi].key + '">' + vps[vi].label + ' <span class="sort-icon" data-col="vp_' + vps[vi].key + '"></span></th>';
   }
@@ -2666,6 +2718,13 @@ function renderMembers(members) {
   }
   updateSortHeaders();
 
+  // Build datalist for group suggestions
+  var existingGroups = [];
+  _allMembers.forEach(function(mem) { if (mem.training_group && existingGroups.indexOf(mem.training_group) === -1) existingGroups.push(mem.training_group); });
+  existingGroups.sort();
+  var dl = document.getElementById('groupDatalist');
+  if (dl) dl.innerHTML = existingGroups.map(function(g) { return '<option value="' + g.replace(/"/g,'&quot;') + '">'; }).join('');
+
   // Build rows
   body.innerHTML = members.map(function(m, i) {
     var vpCells = '';
@@ -2676,6 +2735,11 @@ function renderMembers(members) {
       var stepClass = sel ? 'step' + sel.step : 'none';
       var memo = sel && sel.memo ? sel.memo : ''; var vpLabel = vps[vi].label || vpName; vpCells += '<td style="text-align:center"><span class="badge-' + stepClass + '"' + (memo ? ' style="cursor:pointer" data-memo="' + memo.replace(/"/g, '&quot;') + '" data-name="' + (m.name||'').replace(/"/g, '&quot;') + '" data-vp="' + vpLabel + '" onclick="showAdminMemo(this)"' : '') + '>' + stepLabel + '</span></td>';
     }
+    var grp = m.training_group || '';
+    var grpCell = '<td style="text-align:center;white-space:nowrap">' +
+      '<span class="group-disp" data-id="' + m.id + '" onclick="editGroup(this)" style="cursor:pointer;padding:2px 6px;border-radius:4px;font-size:12px;' + (grp ? 'background:#e3f2fd;color:#1565c0;font-weight:bold' : 'color:#999') + '">' + (grp ? escapeHtml(grp) : '未設定') + '</span>' +
+      '<input type="text" list="groupDatalist" class="group-input" data-id="' + m.id + '" value="' + escapeHtml(grp) + '" placeholder="例: Aグループ" style="display:none;width:80px;font-size:12px;padding:2px 4px;border:1px solid #90caf9;border-radius:4px" onblur="saveGroup(this)" onkeydown="if(event.key===\'Enter\'){this.blur();}if(event.key===\'Escape\'){this.blur();}">' +
+      '</td>';
     return '<tr>' +
       '<td>' + (i + 1) + '</td>' +
          '<td><strong>' + (m.name || '') + '</strong></td>' +
@@ -2684,6 +2748,7 @@ function renderMembers(members) {
       '<td>' + (m.experience_years != null ? m.experience_years + '年目' : '-') + '</td>' +
       '<td>' + (m.grade || '-') + '</td>' +
       '<td>' + (m.position || '-') + '</td>' +
+      grpCell +
       vpCells +
       (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>主幹・管理職</option></select></td>' : '') +
       '<td style="white-space:nowrap">' +
@@ -2906,6 +2971,7 @@ document.addEventListener('click', function(e) {
 loadMembers();
 </script>
 
+<datalist id="groupDatalist"></datalist>
 <div id="adminMemoModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'"><div style="background:#fff;border-radius:12px;padding:28px 32px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.18);position:relative"><button onclick="document.getElementById('adminMemoModal').style.display='none'" style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:22px;cursor:pointer;color:#999">&times;</button><div style="font-size:13px;color:#999;margin-bottom:4px" id="adminMemoVp"></div><div style="font-size:15px;font-weight:700;color:#333;margin-bottom:16px" id="adminMemoName"></div><div style="font-size:15px;color:#444;line-height:1.7;white-space:pre-wrap;background:#f8f8f8;padding:16px;border-radius:8px" id="adminMemoText"></div></div></div>
 </body></html>`)
 })
