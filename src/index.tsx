@@ -659,13 +659,26 @@ app.get('/api/admin/group-summary', authMiddleware, adminMiddleware, async (c) =
     GROUP BY u.id ORDER BY u.training_group, u.name
   `).bind(fy).all() as any
   const { results: evts } = await db.prepare(`
-    SELECT a.user_id, e.title, e.event_date
-    FROM attendances a JOIN events e ON e.id = a.event_id ORDER BY e.event_date DESC
+    SELECT a.user_id, e.id as event_id, e.title, e.event_date, sa.satisfaction, sa.comment
+    FROM attendances a JOIN events e ON e.id = a.event_id
+    LEFT JOIN survey_answers sa ON sa.event_id = e.id AND sa.user_id = a.user_id
+    ORDER BY e.event_date DESC
   `).all() as any
-  const attMap: Record<number, Array<{title:string;date:string}>> = {}
+  const { results: customAnswers } = await db.prepare(`
+    SELECT ca.user_id, ca.event_id, ca.answer_text, q.question_text, q.question_type
+    FROM custom_answers ca JOIN survey_questions q ON q.id = ca.question_id
+    WHERE ca.answer_text != '' ORDER BY ca.event_id, q.sort_order
+  `).all() as any
+  const caMap: Record<number, Record<number, Array<{q:string;a:string;type:string}>>> = {}
+  for (const ca of customAnswers) {
+    if (!caMap[ca.user_id]) caMap[ca.user_id] = {}
+    if (!caMap[ca.user_id][ca.event_id]) caMap[ca.user_id][ca.event_id] = []
+    caMap[ca.user_id][ca.event_id].push({ q: ca.question_text, a: ca.answer_text, type: ca.question_type })
+  }
+  const attMap: Record<number, Array<any>> = {}
   for (const ev of evts) {
     if (!attMap[ev.user_id]) attMap[ev.user_id] = []
-    attMap[ev.user_id].push({ title: ev.title, date: ev.event_date })
+    attMap[ev.user_id].push({ title: ev.title, date: ev.event_date, satisfaction: ev.satisfaction||null, comment: ev.comment||'', answers: (caMap[ev.user_id]&&caMap[ev.user_id][ev.event_id])||[] })
   }
   const groups: Record<string, any[]> = {}
   for (const m of members) {
@@ -3366,8 +3379,22 @@ function mRow(m,fy){
   var sels=Object.keys(m.selections);
   var stepsHtml=sels.length?sels.map(function(vp){var s=m.selections[vp];return '<span class="step-tag s'+s+'">'+esc(VP[vp]||vp)+': STEP'+s+'</span>';}).join(''):'<span class="no-val">STEPが未選択</span>';
   var ev=m.events.length;
-  var evHtml=ev>0?m.events.slice(0,4).map(function(e){return esc(e.title);}).join(' <span style="color:#ddd">|</span> ')+(ev>4?' <span style="color:#999">他'+(ev-4)+'件</span>':'')+' <strong style="color:#555">計'+ev+'回</strong>':'<span class="no-val">参加記録なし</span>';
-  var stC=m.school_type==='elementary'?'elem-b':m.school_type==='junior_high'?'junior-b':'';
+  var evHtml='';
+  if(ev>0){
+    evHtml='<div style="margin-top:4px">';
+    m.events.forEach(function(e){
+      var hasD=e.satisfaction||e.comment||(e.answers&&e.answers.length);
+      evHtml+='<div style="border-left:3px solid #e0e0e0;padding:6px 10px;margin-bottom:6px;border-radius:0 6px 6px 0;background:#fafafa">';
+      evHtml+='<div style="font-weight:700;color:#333;font-size:12px;margin-bottom:3px">📌 '+esc(e.title)+'<span style="font-weight:400;color:#999;font-size:11px"> ('+esc(e.date||'')+')</span></div>';
+      if(e.satisfaction){var s='★'.repeat(e.satisfaction)+'☆'.repeat(5-e.satisfaction);evHtml+='<div style="font-size:11px;color:#e65100">満足度: '+s+'</div>';}
+      if(e.comment)evHtml+='<div style="font-size:11px;color:#555;margin-top:2px"><span style="color:#888">感想:</span> '+esc(e.comment)+'</div>';
+      if(e.answers&&e.answers.length){e.answers.forEach(function(qa){if(!qa.a||!qa.a.trim())return;evHtml+='<div style="font-size:11px;margin-top:3px"><span style="color:#1565c0;font-weight:700">'+esc(qa.q)+'</span><br><span style="padding-left:8px">'+esc(qa.a)+'</span></div>';});}
+      if(!hasD)evHtml+='<div style="font-size:11px;color:#bbb;font-style:italic">回答なし</div>';
+      evHtml+='</div>';
+    });
+    evHtml+='<div style="color:#888;font-size:11px;margin-top:2px">計'+ev+'回参加</div></div>';
+  } else { evHtml='<span class="no-val">参加記録なし</span>'; }
+    var stC=m.school_type==='elementary'?'elem-b':m.school_type==='junior_high'?'junior-b':'';
   var stL=m.school_type==='elementary'?'小学校':m.school_type==='junior_high'?'中学校':'';
   var h='<div class="member-row">';
   h+='<div class="member-name">'+esc(m.name);
