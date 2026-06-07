@@ -13,6 +13,18 @@ const app = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 app.use('/api/*', cors())
 
+async function ensureGuestTable(db: any) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS guest_attendances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    school TEXT DEFAULT '',
+    district TEXT DEFAULT '',
+    experience_years INTEGER,
+    attended_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`).run()
+}
+
 // ========== Utility ==========
 async function hashPassword(password: string): Promise<string> {
   const encoder = new TextEncoder()
@@ -110,6 +122,7 @@ app.get('/api/init', async (c) => {
     if (!hasTrainingGroup) {
       await db.prepare("ALTER TABLE users ADD COLUMN training_group TEXT DEFAULT ''").run()
     }
+    await ensureGuestTable(db)
   } catch (e) {
     // ignore
   }
@@ -809,8 +822,9 @@ app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
 
 app.get('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
   const db = c.env.DB
+  await ensureGuestTable(db)
   const { results: events } = await db.prepare(
-    'SELECT e.*, (SELECT COUNT(*) FROM attendances a WHERE a.event_id = e.id) as attendance_count, (SELECT COUNT(*) FROM survey_answers sa WHERE sa.event_id = e.id) as survey_count FROM events e ORDER BY e.event_date DESC'
+    'SELECT e.*, (SELECT COUNT(*) FROM attendances a WHERE a.event_id = e.id) + (SELECT COUNT(*) FROM guest_attendances g WHERE g.event_id = e.id) as attendance_count, (SELECT COUNT(*) FROM survey_answers sa WHERE sa.event_id = e.id) as survey_count FROM events e ORDER BY e.event_date DESC'
   ).all()
   return c.json({ events })
 })
@@ -833,7 +847,11 @@ app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
   const { results: customAnswers } = await db.prepare(
     'SELECT ca.*, u.name, u.school_type FROM custom_answers ca JOIN users u ON ca.user_id = u.id WHERE ca.event_id = ?'
   ).bind(id).all()
-  return c.json({ event, questions, attendances, answers, customAnswers })
+  await ensureGuestTable(db)
+  const { results: guests } = await db.prepare(
+    'SELECT * FROM guest_attendances WHERE event_id = ? ORDER BY attended_at'
+  ).bind(id).all()
+  return c.json({ event, questions, attendances, answers, customAnswers, guests })
 })
 
 app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
@@ -844,6 +862,8 @@ app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) =
   await db.prepare('DELETE FROM survey_answers WHERE event_id = ?').bind(id).run()
   await db.prepare('DELETE FROM survey_questions WHERE event_id = ?').bind(id).run()
   await db.prepare('DELETE FROM attendances WHERE event_id = ?').bind(id).run()
+  await ensureGuestTable(db)
+  await db.prepare('DELETE FROM guest_attendances WHERE event_id = ?').bind(id).run()
   await db.prepare('DELETE FROM events WHERE id = ?').bind(id).run()
   return c.json({ success: true })
 })
@@ -855,7 +875,9 @@ app.get('/api/admin/events/:id/export', authMiddleware, adminMiddleware, async (
   const event = await db.prepare('SELECT * FROM events WHERE id = ?').bind(id).first() as any
   if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
   const { results: questions } = await db.prepare('SELECT * FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(id).all() as any
-  const { results: attendances } = await db.prepare('SELECT a.*, u.name, u.email FROM attendances a JOIN users u ON a.user_id = u.id WHERE a.event_id = ?').bind(id).all() as any
+  const { results: attendances } = await db.prepare('SELECT a.*, u.name, u.email, u.school, u.district, u.experience_years FROM attendances a JOIN users u ON a.user_id = u.id WHERE a.event_id = ?').bind(id).all() as any
+  await ensureGuestTable(db)
+  const { results: guestRows } = await db.prepare('SELECT * FROM guest_attendances WHERE event_id = ? ORDER BY attended_at').bind(id).all() as any
   const { results: answers } = await db.prepare('SELECT sa.*, u.name, u.email FROM survey_answers sa JOIN users u ON sa.user_id = u.id WHERE sa.event_id = ?').bind(id).all() as any
   const { results: customAnswers } = await db.prepare('SELECT * FROM custom_answers WHERE event_id = ?').bind(id).all() as any
   const caMap = new Map<number, Record<number, string>>()
@@ -866,20 +888,59 @@ app.get('/api/admin/events/:id/export', authMiddleware, adminMiddleware, async (
   const ansMap = new Map<number, any>()
   for (const a of answers) ansMap.set(a.user_id, a)
   const BOM = '\uFEFF'
-  const headers = ['名前', 'メール', '出席時刻', '満足度', '感想']
+  const headers = ['名前', '学校名', '区', '経験年数', 'メール', '出席時刻', '満足度', '感想']
   for (const q of questions) headers.push(q.question_text)
   let csv = BOM + headers.map((h: string) => `"${h}"`).join(',') + '\n'
   for (const att of attendances) {
     const ans = ansMap.get(att.user_id)
     const ca = caMap.get(att.user_id) || {}
-    const row = [att.name, att.email, att.attended_at, ans ? ans.satisfaction : '', ans ? (ans.comment || '') : '']
+    const row = [att.name, att.school || '', att.district || '', (att.experience_years !== null && att.experience_years !== undefined && att.experience_years !== '') ? String(att.experience_years) + '年目' : '', att.email, att.attended_at, ans ? ans.satisfaction : '', ans ? (ans.comment || '') : '']
     for (const q of questions) row.push(ca[q.id as number] || '')
+    csv += row.map((v: any) => `"${String(v).replace(/"/g, '""')}"`).join(',') + '\n'
+  }
+  for (const g of guestRows) {
+    const row = [String(g.name) + '（ゲスト）', g.school || '', g.district || '', (g.experience_years !== null && g.experience_years !== undefined) ? String(g.experience_years) + '年目' : '', '', g.attended_at, '', '']
+    for (const q of questions) row.push('')
     csv += row.map((v: any) => `"${String(v).replace(/"/g, '""')}"`).join(',') + '\n'
   }
   return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${event.title}_export.csv"` } })
 })
 
 // ========== Attendance & Survey (Member) ==========
+
+// 公開：イベント情報（ゲスト出席用）
+app.get('/api/events/:code/info', async (c) => {
+  const code = c.req.param('code')
+  const event = await c.env.DB.prepare('SELECT title, description, event_date FROM events WHERE event_code = ? AND is_active = 1').bind(code).first()
+  if (!event) return c.json({ error: 'イベントが見つからないか、受付が終了しています' }, 404)
+  return c.json({ event })
+})
+
+// 公開：ゲスト出席（未登録の方）
+app.post('/api/events/:code/guest-attend', async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT id FROM events WHERE event_code = ? AND is_active = 1').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つからないか、受付が終了しています' }, 404)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const name = typeof body.name === 'string' ? body.name.trim() : ''
+  if (!name) return c.json({ error: 'お名前を入力してください' }, 400)
+  if (name.length > 50) return c.json({ error: 'お名前が長すぎます' }, 400)
+  const school = typeof body.school === 'string' ? body.school.trim().slice(0, 100) : ''
+  const district = typeof body.district === 'string' ? body.district.trim().slice(0, 50) : ''
+  let exp: number | null = null
+  if (body.experience_years !== undefined && body.experience_years !== null && body.experience_years !== '') {
+    const n = parseInt(String(body.experience_years), 10)
+    if (!isNaN(n) && n >= 0 && n <= 60) exp = n
+  }
+  await ensureGuestTable(db)
+  const dup = await db.prepare('SELECT id FROM guest_attendances WHERE event_id = ? AND name = ? AND school = ?').bind(event.id, name, school).first()
+  if (dup) return c.json({ success: true, attended: false, message: '既に出席を記録済みです' })
+  await db.prepare("INSERT INTO guest_attendances (event_id, name, school, district, experience_years, attended_at) VALUES (?,?,?,?,?,datetime('now'))").bind(event.id, name, school, district, exp).run()
+  return c.json({ success: true, attended: true })
+})
+
 app.get('/api/events/:code', authMiddleware, async (c) => {
   const code = c.req.param('code')
   const db = c.env.DB
@@ -3089,6 +3150,19 @@ app.get('/attend/:code', (c) => {
     <i class="fas fa-user-circle fa-3x" style="color:#ccc;margin-bottom:12px"></i>
     <p>出席を記録するにはログインが必要です</p>
     <a href="/login?redirect=/attend/${code}" class="btn btn-primary" style="display:inline-block;width:auto;padding:12px 32px;text-decoration:none;margin-top:12px">ログインする</a>
+    <div style="margin-top:24px;border-top:1px dashed #ddd;padding-top:20px">
+      <p style="font-size:13px;color:#888;margin-bottom:10px">会員登録がまだの方は、こちらから出席を記録できます</p>
+      <button type="button" class="btn btn-secondary" id="guestModeBtn" style="width:auto;padding:10px 28px"><i class="fas fa-pen"></i> ゲストとして出席する</button>
+    </div>
+    <div id="guestForm" style="display:none;text-align:left;margin-top:18px">
+      <div id="guestEventInfo" style="text-align:center;color:#555;font-size:13px;margin-bottom:14px"></div>
+      <div class="form-group"><label>お名前 <span style="color:#c62828">*</span></label><input type="text" id="gName" placeholder="例：社会　太郎"></div>
+      <div class="form-group"><label>学校名</label><input type="text" id="gSchool" placeholder="例：○○小学校"></div>
+      <div class="form-group"><label>区</label><input type="text" id="gDistrict" placeholder="例：千種区"></div>
+      <div class="form-group"><label>経験年数</label><input type="text" id="gExp" inputmode="numeric" placeholder="例：5"></div>
+      <button type="button" class="btn btn-primary" id="guestSubmitBtn"><i class="fas fa-check"></i> 出席を記録する</button>
+      <div id="guestStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>
+    </div>
   </div>
   <div id="content" style="display:none"></div>
 </div>
@@ -3100,6 +3174,65 @@ if (!token || !user) {
   document.getElementById('loading').style.display='none';
   document.getElementById('loginPrompt').style.display='block';
 } else { loadEvent(); }
+
+function escG(t) {
+  return String(t == null ? '' : t).replace(/[&<>"']/g, function(ch) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+  });
+}
+
+var guestModeBtn = document.getElementById('guestModeBtn');
+if (guestModeBtn) {
+  guestModeBtn.addEventListener('click', async function() {
+    guestModeBtn.style.display = 'none';
+    document.getElementById('guestForm').style.display = 'block';
+    try {
+      var r = await fetch('/api/events/' + CODE + '/info');
+      if (r.ok) {
+        var d = await r.json();
+        document.getElementById('guestEventInfo').innerHTML = '<b>' + escG(d.event.title) + '</b>（' + escG(d.event.event_date) + '）';
+      } else {
+        var ed = {};
+        try { ed = await r.json(); } catch(e) {}
+        document.getElementById('guestEventInfo').innerHTML = '<span style="color:#c62828">' + escG(ed.error || 'イベント情報を取得できませんでした') + '</span>';
+      }
+    } catch(e) {}
+  });
+}
+
+var guestSubmitBtn = document.getElementById('guestSubmitBtn');
+if (guestSubmitBtn) {
+  guestSubmitBtn.addEventListener('click', async function() {
+    var st = document.getElementById('guestStatus');
+    var name = (document.getElementById('gName').value || '').trim();
+    if (!name) { st.style.color = '#c62828'; st.textContent = 'お名前を入力してください'; return; }
+    guestSubmitBtn.disabled = true;
+    st.style.color = '#888'; st.textContent = '送信中...';
+    try {
+      var res = await fetch('/api/events/' + CODE + '/guest-attend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name,
+          school: (document.getElementById('gSchool').value || '').trim(),
+          district: (document.getElementById('gDistrict').value || '').trim(),
+          experience_years: (document.getElementById('gExp').value || '').trim()
+        })
+      });
+      var d2 = {};
+      try { d2 = await res.json(); } catch(e) {}
+      if (res.ok && d2.success) {
+        document.getElementById('loginPrompt').innerHTML = '<div class="success-box"><i class="fas fa-check-circle"></i><p>' + escG(name) + ' さんの出席を記録しました。<br>ご参加ありがとうございます！</p></div>' + (d2.attended === false ? '<p style="color:#888;font-size:12px">（' + escG(d2.message || '既に記録済みでした') + '）</p>' : '');
+      } else {
+        guestSubmitBtn.disabled = false;
+        st.style.color = '#c62828'; st.textContent = d2.error || 'エラーが発生しました。もう一度お試しください。';
+      }
+    } catch(e) {
+      guestSubmitBtn.disabled = false;
+      st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました。もう一度お試しください。';
+    }
+  });
+}
 
 async function fetchWithTimeout(url, options, ms) {
   const controller = new AbortController();
@@ -3719,18 +3852,23 @@ async function showEventDetail(eventId, tab) {
 
 function renderDetail(el, d, tab) {
   var html = '<div class="detail-tabs">';
-  html += '<div class="detail-tab'+(tab==='att'?' active':'')+'" data-dtab="att" data-eid="'+d.event.id+'"><i class="fas fa-users"></i> 出席 ('+d.attendances.length+')</div>';
+  var gList = d.guests || [];
+  html += '<div class="detail-tab'+(tab==='att'?' active':'')+'" data-dtab="att" data-eid="'+d.event.id+'"><i class="fas fa-users"></i> 出席 ('+(d.attendances.length+gList.length)+')</div>';
   html += '<div class="detail-tab'+(tab==='sur'?' active':'')+'" data-dtab="sur" data-eid="'+d.event.id+'"><i class="fas fa-clipboard"></i> 回答 ('+d.answers.length+')</div>';
   html += '</div>';
 
   if (tab === 'att') {
-    if (!d.attendances.length) { html += '<div class="no-data">まだ出席者がいません</div>'; }
+    if (!d.attendances.length && !gList.length) { html += '<div class="no-data">まだ出席者がいません</div>'; }
     else {
       html += '<table><tr><th>#</th><th>名前</th><th>校種</th><th>学校名</th><th>出席時刻</th></tr>';
       d.attendances.forEach(function(a, i) {
         var t = a.attended_at ? new Date(a.attended_at.replace(' ','T')+'Z').toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-';
         var st = a.school_type === 'elementary' ? '<span style="background:#e8f5e9;color:#2e7d32;border-radius:4px;padding:1px 6px;font-size:11px">小学校</span>' : a.school_type === 'junior_high' ? '<span style="background:#e3f2fd;color:#1565c0;border-radius:4px;padding:1px 6px;font-size:11px">中学校</span>' : '<span style="color:#999;font-size:11px">-</span>';
         html += '<tr><td>'+(i+1)+'</td><td>'+escHtml(a.name)+'</td><td>'+st+'</td><td style="font-size:12px">'+escHtml(a.school||'-')+'</td><td>'+t+'</td></tr>';
+      });
+      gList.forEach(function(g, j) {
+        var t2 = g.attended_at ? new Date(g.attended_at.replace(' ','T')+'Z').toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-';
+        html += '<tr><td>'+(d.attendances.length+j+1)+'</td><td>'+escHtml(g.name)+' <span style="background:#fff3e0;color:#e65100;border-radius:4px;padding:1px 6px;font-size:11px">ゲスト</span></td><td><span style="color:#999;font-size:11px">-</span></td><td style="font-size:12px">'+escHtml(g.school||'-')+'</td><td>'+t2+'</td></tr>';
       });
       html += '</table>';
     }
