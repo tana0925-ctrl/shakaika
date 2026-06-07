@@ -3332,6 +3332,12 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .ev-count{font-weight:400;color:#7986cb}
 .ev-detail{display:none;margin-top:6px}
 .ev-detail.show{display:block}
+.group-tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px}
+.group-tab{padding:9px 20px;border:none;border-radius:10px;color:#fff;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;opacity:0.5;transition:opacity .15s,box-shadow .15s;display:flex;align-items:center;gap:7px}
+.group-tab:hover{opacity:0.8}
+.group-tab.active{opacity:1;box-shadow:0 3px 10px rgba(0,0,0,0.18)}
+.group-panel{display:none}
+.group-panel.active{display:block}
 .bulk-toggle{background:#fff;border:1px solid #c5cae9;color:#1a237e;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:16px}
 .bulk-toggle:hover{background:#eef2ff}
 .unset-section{margin-top:16px;background:#fff;border-radius:14px;box-shadow:0 2px 8px rgba(0,0,0,0.06);overflow:hidden}
@@ -3371,19 +3377,27 @@ function render(groups,fy){
   const setNames=names.filter(function(n){return n!=='未設定';});
   const unset=groups['未設定']||[];
   if(!setNames.length&&!unset.length){el.innerHTML='<p style="color:#888;text-align:center;padding:40px">グループが設定されていません。管理画面でメンバーにグループを設定してください。</p>';return;}
-  var html='';
+  var tabs=[];var panels='';
   setNames.forEach(function(gname,gi){
-    var ms=groups[gname];var col=COLORS[gi%COLORS.length];
-    html+='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span></div>';
-    ms.forEach(function(m){html+=mRow(m,fy);});
-    html+='</div>';
+    var ms=groups[gname];var col=COLORS[gi%COLORS.length];var pid='gp_'+gi;
+    tabs.push({id:pid,label:'<i class="fas fa-layer-group"></i> '+esc(gname)+' ('+ms.length+')',col:col});
+    var inner='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span></div>';
+    ms.forEach(function(m){inner+=mRow(m,fy);});
+    inner+='</div>';
+    panels+='<div class="group-panel" id="'+pid+'">'+inner+'</div>';
   });
   if(unset.length){
-    html+='<div class="unset-section"><div class="unset-hdr"><i class="fas fa-question-circle"></i> グループ未設定 ('+unset.length+'名)</div><div class="unset-list">';
-    unset.forEach(function(m){var st=m.school_type==='elementary'?'小':m.school_type==='junior_high'?'中':'';html+='<div class="unset-item">'+esc(m.name)+(st?'（'+st+'）':'')+'</div>';});
-    html+='</div></div>';
+    var pid='gp_unset';
+    tabs.push({id:pid,label:'<i class="fas fa-question-circle"></i> 未設定 ('+unset.length+')',col:'#9e9e9e'});
+    var u='<div class="unset-section"><div class="unset-hdr"><i class="fas fa-question-circle"></i> グループ未設定 ('+unset.length+'名)</div><div class="unset-list">';
+    unset.forEach(function(m){var st=m.school_type==='elementary'?'小':m.school_type==='junior_high'?'中':'';u+='<div class="unset-item">'+esc(m.name)+(st?'（'+st+'）':'')+'</div>';});
+    u+='</div></div>';
+    panels+='<div class="group-panel" id="'+pid+'">'+u+'</div>';
   }
-  el.innerHTML=html;
+  var tabBar='<div class="group-tabs">'+tabs.map(function(t,i){return '<button class="group-tab'+(i===0?' active':'')+'" data-target="'+t.id+'" style="background:'+t.col+'">'+t.label+'</button>';}).join('')+'</div>';
+  el.innerHTML=tabBar+panels;
+  var firstPanel=el.querySelector('.group-panel');if(firstPanel)firstPanel.classList.add('active');
+  el.querySelectorAll('.group-tab').forEach(function(tb){tb.addEventListener('click',function(){el.querySelectorAll('.group-tab').forEach(function(x){x.classList.remove('active');});el.querySelectorAll('.group-panel').forEach(function(p){p.classList.remove('active');});tb.classList.add('active');var p=document.getElementById(tb.getAttribute('data-target'));if(p)p.classList.add('active');});});
   var toggles=el.querySelectorAll('.ev-toggle');
   toggles.forEach(function(btn){btn.addEventListener('click',function(){var t=document.getElementById(btn.getAttribute('data-target'));if(!t)return;var open=t.classList.toggle('show');btn.classList.toggle('open',open);});});
   var bulk=document.getElementById('bulkToggle');
