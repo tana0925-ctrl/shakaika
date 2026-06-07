@@ -3308,6 +3308,8 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .page-title{font-size:20px;font-weight:700;color:#1a237e;margin-bottom:20px}
 .group-card{background:#fff;border-radius:14px;box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:28px;overflow:hidden}
 .group-header{color:#fff;padding:12px 20px;font-size:17px;font-weight:700;display:flex;align-items:center;gap:10px}
+.grp-print{margin-left:auto;background:rgba(255,255,255,0.22);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px}
+.grp-print:hover{background:rgba(255,255,255,0.35)}
 .group-count{font-size:13px;opacity:0.85;font-weight:400}
 .member-row{padding:14px 20px;border-bottom:1px solid #f0f0f0}
 .member-row:last-child{border-bottom:none}
@@ -3353,11 +3355,10 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .unset-list{padding:12px 20px;display:flex;flex-wrap:wrap;gap:8px}
 .unset-item{font-size:12px;background:#f5f5f5;border-radius:6px;padding:4px 10px;color:#555}
 @media print{
-  .top-bar,.group-tabs,#bulkToggle,#printBtn{display:none!important}
-  .group-panel{display:block!important}
-  .group-card{page-break-after:always;box-shadow:none;border:1px solid #ccc}
-  .group-card:last-child{page-break-after:auto}
-  #gp_unset{page-break-before:always}
+  .top-bar,.group-tabs,#bulkToggle,#printBtn,.no-print{display:none!important}
+  .group-panel{display:none!important}
+  .group-panel.active{display:block!important}
+  .group-card{box-shadow:none;border:1px solid #ccc}
   .ev-detail{display:block!important}
   .ev-toggle{background:none!important;border:none!important;padding:0!important;color:#000!important}
   .ev-caret{display:none!important}
@@ -3379,7 +3380,7 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 <div class="container">
   <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
   <button type="button" id="bulkToggle" class="bulk-toggle" style="display:none"><i class="fas fa-expand"></i> すべて開く</button>
-  <button type="button" id="printBtn" class="bulk-toggle" style="display:none;margin-left:8px"><i class="fas fa-print"></i> 印刷</button>
+  <button type="button" id="printBtn" class="bulk-toggle" style="display:none;margin-left:8px"><i class="fas fa-print"></i> このグループを印刷</button>
   <div id="gList"><p style="color:#888;text-align:center;padding:40px">読み込み中...</p></div>
 </div>
 <script>
@@ -3408,7 +3409,7 @@ function render(groups,fy){
   setNames.forEach(function(gname,gi){
     var ms=groups[gname];var col=COLORS[gi%COLORS.length];var pid='gp_'+gi;
     tabs.push({id:pid,label:'<i class="fas fa-layer-group"></i> '+esc(gname)+' ('+ms.length+')',col:col});
-    var inner='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span></div>';
+    var inner='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span><button class="grp-print no-print" onclick="window.print()" title="このグループを印刷"><i class="fas fa-print"></i> 印刷</button></div>';
     ms.forEach(function(m){inner+=mRow(m,fy);});
     inner+='</div>';
     panels+='<div class="group-panel" id="'+pid+'">'+inner+'</div>';
