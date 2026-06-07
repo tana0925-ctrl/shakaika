@@ -3352,6 +3352,21 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .unset-hdr{background:#9e9e9e;color:#fff;padding:10px 20px;font-size:15px;font-weight:700}
 .unset-list{padding:12px 20px;display:flex;flex-wrap:wrap;gap:8px}
 .unset-item{font-size:12px;background:#f5f5f5;border-radius:6px;padding:4px 10px;color:#555}
+@media print{
+  .top-bar,.group-tabs,#bulkToggle,#printBtn{display:none!important}
+  .group-panel{display:block!important}
+  .group-card{page-break-after:always;box-shadow:none;border:1px solid #ccc}
+  .group-card:last-child{page-break-after:auto}
+  #gp_unset{page-break-before:always}
+  .ev-detail{display:block!important}
+  .ev-toggle{background:none!important;border:none!important;padding:0!important;color:#000!important}
+  .ev-caret{display:none!important}
+  .note-box{max-height:none!important;overflow:visible!important}
+  .member-row{page-break-inside:avoid}
+  .container{max-width:none;padding:0}
+  body{background:#fff}
+  .page-title{margin-top:8px}
+}
 @media(max-width:600px){.container{padding:12px 8px}.group-header{font-size:15px}}
 </style></head><body>
 <div class="top-bar">
@@ -3364,6 +3379,7 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 <div class="container">
   <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
   <button type="button" id="bulkToggle" class="bulk-toggle" style="display:none"><i class="fas fa-expand"></i> すべて開く</button>
+  <button type="button" id="printBtn" class="bulk-toggle" style="display:none;margin-left:8px"><i class="fas fa-print"></i> 印刷</button>
   <div id="gList"><p style="color:#888;text-align:center;padding:40px">読み込み中...</p></div>
 </div>
 <script>
@@ -3421,6 +3437,8 @@ function render(groups,fy){
     };
     bulk.innerHTML='<i class="fas fa-expand"></i> すべて開く';
   }
+  var printBtn=document.getElementById('printBtn');
+  if(printBtn){printBtn.style.display=toggles.length?'inline-block':'none';printBtn.onclick=function(){window.print();};}
 }
 function mRow(m,fy){
   var sels=Object.keys(m.selections);
