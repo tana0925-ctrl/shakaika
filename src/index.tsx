@@ -3325,6 +3325,15 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .info-row{font-size:13px;color:#555;margin-bottom:5px;line-height:1.6}
 .note-box{background:#fafafa;border-left:3px solid #e0e0e0;padding:6px 10px;border-radius:0 6px 6px 0;font-size:12px;color:#555;white-space:pre-wrap;margin-top:3px;max-height:72px;overflow:hidden}
 .no-val{color:#bbb;font-style:italic}
+.ev-toggle{background:#eef2ff;border:1px solid #c5cae9;color:#1a237e;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:6px}
+.ev-toggle:hover{background:#e3e7ff}
+.ev-caret{transition:transform .15s;font-size:10px}
+.ev-toggle.open .ev-caret{transform:rotate(180deg)}
+.ev-count{font-weight:400;color:#7986cb}
+.ev-detail{display:none;margin-top:6px}
+.ev-detail.show{display:block}
+.bulk-toggle{background:#fff;border:1px solid #c5cae9;color:#1a237e;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:16px}
+.bulk-toggle:hover{background:#eef2ff}
 .unset-section{margin-top:16px;background:#fff;border-radius:14px;box-shadow:0 2px 8px rgba(0,0,0,0.06);overflow:hidden}
 .unset-hdr{background:#9e9e9e;color:#fff;padding:10px 20px;font-size:15px;font-weight:700}
 .unset-list{padding:12px 20px;display:flex;flex-wrap:wrap;gap:8px}
@@ -3340,6 +3349,7 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 </div>
 <div class="container">
   <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
+  <button type="button" id="bulkToggle" class="bulk-toggle" style="display:none"><i class="fas fa-expand"></i> すべて開く</button>
   <div id="gList"><p style="color:#888;text-align:center;padding:40px">読み込み中...</p></div>
 </div>
 <script>
@@ -3374,6 +3384,18 @@ function render(groups,fy){
     html+='</div></div>';
   }
   el.innerHTML=html;
+  var toggles=el.querySelectorAll('.ev-toggle');
+  toggles.forEach(function(btn){btn.addEventListener('click',function(){var t=document.getElementById(btn.getAttribute('data-target'));if(!t)return;var open=t.classList.toggle('show');btn.classList.toggle('open',open);});});
+  var bulk=document.getElementById('bulkToggle');
+  if(bulk){
+    if(toggles.length){bulk.style.display='inline-block';}else{bulk.style.display='none';}
+    bulk.onclick=function(){
+      var anyClosed=Array.prototype.some.call(toggles,function(b){var t=document.getElementById(b.getAttribute('data-target'));return t&&!t.classList.contains('show');});
+      toggles.forEach(function(b){var t=document.getElementById(b.getAttribute('data-target'));if(!t)return;t.classList.toggle('show',anyClosed);b.classList.toggle('open',anyClosed);});
+      bulk.innerHTML=anyClosed?'<i class="fas fa-compress"></i> すべて閉じる':'<i class="fas fa-expand"></i> すべて開く';
+    };
+    bulk.innerHTML='<i class="fas fa-expand"></i> すべて開く';
+  }
 }
 function mRow(m,fy){
   var sels=Object.keys(m.selections);
@@ -3402,7 +3424,13 @@ function mRow(m,fy){
   if(m.school)h+=' <span class="school-nm">'+esc(m.school)+'</span>';
   h+='</div>';
   h+='<div class="steps-row">'+stepsHtml+'</div>';
-  h+='<div class="info-row">📅 <strong>参加イベント</strong>　'+evHtml+'</div>';
+  if(ev>0){
+    var eid='evd_'+m.id;
+    h+='<div class="info-row"><button type="button" class="ev-toggle" data-target="'+eid+'">📅 <strong>参加イベント</strong> <span class="ev-count">('+ev+'件)</span> <span class="ev-caret">▼</span></button>';
+    h+='<div class="ev-detail" id="'+eid+'">'+evHtml+'</div></div>';
+  } else {
+    h+='<div class="info-row">📅 <strong>参加イベント</strong>　'+evHtml+'</div>';
+  }
   if(m.goal)h+='<div class="info-row">🎯 <strong>'+fy+'年度の目標</strong><div class="note-box">'+esc(m.goal)+'</div></div>';
   if(m.reflection)h+='<div class="info-row">💭 <strong>振り返り</strong><div class="note-box">'+esc(m.reflection)+'</div></div>';
   h+='</div>';
