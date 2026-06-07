@@ -21,7 +21,18 @@ async function ensureGuestTable(db: any) {
     school TEXT DEFAULT '',
     district TEXT DEFAULT '',
     experience_years INTEGER,
+    token TEXT DEFAULT '',
     attended_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`).run()
+  try { await db.prepare("ALTER TABLE guest_attendances ADD COLUMN token TEXT DEFAULT ''").run() } catch (e) { /* already added */ }
+  await db.prepare(`CREATE TABLE IF NOT EXISTS guest_answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guest_id INTEGER NOT NULL,
+    event_id INTEGER NOT NULL,
+    question_id INTEGER NOT NULL,
+    answer_text TEXT DEFAULT '',
+    answered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(guest_id, question_id)
   )`).run()
 }
 
@@ -878,6 +889,12 @@ app.get('/api/admin/events/:id/export', authMiddleware, adminMiddleware, async (
   const { results: attendances } = await db.prepare('SELECT a.*, u.name, u.email, u.school, u.district, u.experience_years FROM attendances a JOIN users u ON a.user_id = u.id WHERE a.event_id = ?').bind(id).all() as any
   await ensureGuestTable(db)
   const { results: guestRows } = await db.prepare('SELECT * FROM guest_attendances WHERE event_id = ? ORDER BY attended_at').bind(id).all() as any
+  const { results: guestAnsRows } = await db.prepare('SELECT guest_id, question_id, answer_text FROM guest_answers WHERE event_id = ?').bind(id).all() as any
+  const gaMap = new Map<number, Record<number, string>>()
+  for (const ga of (guestAnsRows || [])) {
+    if (!gaMap.has(ga.guest_id)) gaMap.set(ga.guest_id, {})
+    gaMap.get(ga.guest_id)![ga.question_id] = ga.answer_text
+  }
   const { results: answers } = await db.prepare('SELECT sa.*, u.name, u.email FROM survey_answers sa JOIN users u ON sa.user_id = u.id WHERE sa.event_id = ?').bind(id).all() as any
   const { results: customAnswers } = await db.prepare('SELECT * FROM custom_answers WHERE event_id = ?').bind(id).all() as any
   const caMap = new Map<number, Record<number, string>>()
@@ -899,8 +916,9 @@ app.get('/api/admin/events/:id/export', authMiddleware, adminMiddleware, async (
     csv += row.map((v: any) => `"${String(v).replace(/"/g, '""')}"`).join(',') + '\n'
   }
   for (const g of guestRows) {
+    const ga = gaMap.get(g.id) || {}
     const row = [String(g.name) + '（ゲスト）', g.school || '', g.district || '', (g.experience_years !== null && g.experience_years !== undefined) ? String(g.experience_years) + '年目' : '', '', g.attended_at, '', '']
-    for (const q of questions) row.push('')
+    for (const q of questions) row.push(ga[q.id as number] || '')
     csv += row.map((v: any) => `"${String(v).replace(/"/g, '""')}"`).join(',') + '\n'
   }
   return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${event.title}_export.csv"` } })
@@ -935,10 +953,83 @@ app.post('/api/events/:code/guest-attend', async (c) => {
     if (!isNaN(n) && n >= 0 && n <= 60) exp = n
   }
   await ensureGuestTable(db)
-  const dup = await db.prepare('SELECT id FROM guest_attendances WHERE event_id = ? AND name = ? AND school = ?').bind(event.id, name, school).first()
-  if (dup) return c.json({ success: true, attended: false, message: '既に出席を記録済みです' })
-  await db.prepare("INSERT INTO guest_attendances (event_id, name, school, district, experience_years, attended_at) VALUES (?,?,?,?,?,datetime('now'))").bind(event.id, name, school, district, exp).run()
-  return c.json({ success: true, attended: true })
+  const qn = await db.prepare('SELECT COUNT(*) as n FROM survey_questions WHERE event_id = ?').bind(event.id).first() as any
+  const hasQuestions = !!(qn && qn.n > 0)
+  const dup = await db.prepare('SELECT id, token FROM guest_attendances WHERE event_id = ? AND name = ? AND school = ?').bind(event.id, name, school).first() as any
+  if (dup) {
+    let gtok = dup.token || ''
+    if (!gtok) {
+      gtok = crypto.randomUUID()
+      await db.prepare('UPDATE guest_attendances SET token = ? WHERE id = ?').bind(gtok, dup.id).run()
+    }
+    return c.json({ success: true, attended: false, message: '既に出席を記録済みです', guest_id: dup.id, guest_token: gtok, has_questions: hasQuestions })
+  }
+  const gtok = crypto.randomUUID()
+  const ins = await db.prepare("INSERT INTO guest_attendances (event_id, name, school, district, experience_years, token, attended_at) VALUES (?,?,?,?,?,?,datetime('now'))").bind(event.id, name, school, district, exp, gtok).run()
+  return c.json({ success: true, attended: true, guest_id: ins.meta.last_row_id, guest_token: gtok, has_questions: hasQuestions })
+})
+
+// 公開：ゲスト出席状況・アンケート取得（再訪用）
+app.post('/api/events/:code/guest-status', async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const gid = parseInt(String(body.guest_id || ''), 10)
+  const gtok = typeof body.guest_token === 'string' ? body.guest_token : ''
+  await ensureGuestTable(db)
+  const guest = await db.prepare('SELECT * FROM guest_attendances WHERE id = ? AND event_id = ?').bind(gid || 0, event.id).first() as any
+  if (!guest || !gtok || guest.token !== gtok) return c.json({ error: '出席記録が見つかりません' }, 404)
+  const { results: questions } = await db.prepare('SELECT id, question_text, question_type, options, sort_order FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
+  const { results: answers } = await db.prepare('SELECT question_id, answer_text FROM guest_answers WHERE guest_id = ? AND event_id = ?').bind(guest.id, event.id).all()
+  return c.json({ event: { title: event.title, event_date: event.event_date }, guest: { id: guest.id, name: guest.name }, questions, answers })
+})
+
+// 公開：ゲスト出席記録の照合（別端末用）
+app.post('/api/events/:code/guest-find', async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT id FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const name = typeof body.name === 'string' ? body.name.trim() : ''
+  const school = typeof body.school === 'string' ? body.school.trim() : ''
+  if (!name) return c.json({ error: 'お名前を入力してください' }, 400)
+  await ensureGuestTable(db)
+  const guest = await db.prepare('SELECT id, token, name FROM guest_attendances WHERE event_id = ? AND name = ? AND school = ?').bind(event.id, name, school).first() as any
+  if (!guest) return c.json({ error: '出席記録が見つかりません。受付時と同じお名前・学校名を入力してください' }, 404)
+  let gtok = guest.token || ''
+  if (!gtok) {
+    gtok = crypto.randomUUID()
+    await db.prepare('UPDATE guest_attendances SET token = ? WHERE id = ?').bind(gtok, guest.id).run()
+  }
+  return c.json({ guest_id: guest.id, guest_token: gtok, name: guest.name })
+})
+
+// 公開：ゲストのアンケート回答
+app.post('/api/events/:code/guest-survey', async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT id FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const gid = parseInt(String(body.guest_id || ''), 10)
+  const gtok = typeof body.guest_token === 'string' ? body.guest_token : ''
+  await ensureGuestTable(db)
+  const guest = await db.prepare('SELECT id, token FROM guest_attendances WHERE id = ? AND event_id = ?').bind(gid || 0, event.id).first() as any
+  if (!guest || !gtok || guest.token !== gtok) return c.json({ error: '出席記録が見つかりません' }, 404)
+  const answers = Array.isArray(body.answers) ? body.answers : []
+  for (const a of answers) {
+    const qid = parseInt(String((a && a.question_id) || ''), 10)
+    if (!qid) continue
+    const text = (a && typeof a.answer_text === 'string') ? a.answer_text.slice(0, 2000) : ''
+    await db.prepare("INSERT INTO guest_answers (guest_id, event_id, question_id, answer_text, answered_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(guest_id, question_id) DO UPDATE SET answer_text=excluded.answer_text, answered_at=datetime('now')").bind(guest.id, event.id, qid, text).run()
+  }
+  return c.json({ success: true })
 })
 
 app.get('/api/events/:code', authMiddleware, async (c) => {
@@ -3312,6 +3403,15 @@ app.get('/attend/:code', (c) => {
       <button type="button" class="btn btn-primary" id="guestSubmitBtn"><i class="fas fa-check"></i> 出席を記録する</button>
       <div id="guestStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>
     </div>
+    <div style="margin-top:18px">
+      <a href="#" id="guestFindLink" style="font-size:12px;color:#888;text-decoration:underline">受付済みのゲストの方：振り返り（アンケート）に回答する</a>
+    </div>
+    <div id="guestFindForm" style="display:none;text-align:left;margin-top:14px">
+      <div class="form-group"><label>お名前（受付時と同じ） <span style="color:#c62828">*</span></label><input type="text" id="fName"></div>
+      <div class="form-group"><label>学校名（受付時と同じ）</label><input type="text" id="fSchool"></div>
+      <button type="button" class="btn btn-secondary" id="guestFindBtn" style="width:auto;padding:10px 24px;margin-top:0"><i class="fas fa-search"></i> 出席記録をさがす</button>
+      <div id="guestFindStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>
+    </div>
   </div>
   <div id="content" style="display:none"></div>
 </div>
@@ -3319,9 +3419,11 @@ app.get('/attend/:code', (c) => {
 const CODE = '${code}';
 const token = localStorage.getItem('token');
 let user = JSON.parse(localStorage.getItem('user') || 'null');
+var GKEY = 'sg_' + CODE;
 if (!token || !user) {
   document.getElementById('loading').style.display='none';
   document.getElementById('loginPrompt').style.display='block';
+  guestCheckReturn();
 } else { loadEvent(); }
 
 function escG(t) {
@@ -3371,7 +3473,11 @@ if (guestSubmitBtn) {
       var d2 = {};
       try { d2 = await res.json(); } catch(e) {}
       if (res.ok && d2.success) {
-        document.getElementById('loginPrompt').innerHTML = '<div class="success-box"><i class="fas fa-check-circle"></i><p>' + escG(name) + ' さんの出席を記録しました。<br>ご参加ありがとうございます！</p></div>' + (d2.attended === false ? '<p style="color:#888;font-size:12px">（' + escG(d2.message || '既に記録済みでした') + '）</p>' : '');
+        if (d2.guest_id && d2.guest_token) {
+          try { localStorage.setItem(GKEY, JSON.stringify({ gid: d2.guest_id, gtoken: d2.guest_token, name: name })); } catch(e) {}
+        }
+        var note = d2.has_questions ? '<div style="background:#fff3e0;border:2px solid #ffb74d;border-radius:12px;padding:12px 14px;font-size:13px;color:#5d4037;margin-top:14px;line-height:1.7;text-align:left"><i class="fas fa-clipboard-list"></i> 会の最後に<b>もう一度同じQRコード</b>を読むと、振り返り（アンケート）に回答できます。</div>' : '';
+        document.getElementById('loginPrompt').innerHTML = '<div class="success-box"><i class="fas fa-check-circle"></i><p>' + escG(name) + ' さんの出席を記録しました。<br>ご参加ありがとうございます！</p></div>' + (d2.attended === false ? '<p style="color:#888;font-size:12px">（' + escG(d2.message || '既に記録済みでした') + '）</p>' : '') + note;
       } else {
         guestSubmitBtn.disabled = false;
         st.style.color = '#c62828'; st.textContent = d2.error || 'エラーが発生しました。もう一度お試しください。';
@@ -3380,6 +3486,172 @@ if (guestSubmitBtn) {
       guestSubmitBtn.disabled = false;
       st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました。もう一度お試しください。';
     }
+  });
+}
+
+// ===== ゲスト振り返り（同じQR再読み込み） =====
+function gSaved() { try { return JSON.parse(localStorage.getItem(GKEY) || 'null'); } catch(e) { return null; } }
+
+async function guestCheckReturn() {
+  var saved = gSaved();
+  if (!saved || !saved.gid || !saved.gtoken) return;
+  try {
+    var r = await fetch('/api/events/' + CODE + '/guest-status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: saved.gid, guest_token: saved.gtoken }) });
+    if (!r.ok) { if (r.status === 404) { try { localStorage.removeItem(GKEY); } catch(e) {} } return; }
+    renderGuestSurvey(await r.json());
+  } catch(e) {}
+}
+
+var gAnswerData = {};
+
+function renderGuestSurvey(d) {
+  var lp = document.getElementById('loginPrompt');
+  if (!lp) return;
+  var qs = d.questions || [];
+  var answered = (d.answers || []).length > 0;
+  var head = '<div style="text-align:center;margin-bottom:6px"><i class="fas fa-user-check fa-2x" style="color:#66bb6a"></i></div>'
+    + '<p style="text-align:center;font-weight:700">おかえりなさい、' + escG(d.guest.name) + ' さん</p>'
+    + '<p style="text-align:center;color:#888;font-size:13px;margin-bottom:16px">' + escG(d.event.title) + '（' + escG(d.event.event_date) + '）の出席は記録済みです</p>';
+  if (qs.length === 0) {
+    lp.innerHTML = '<div style="text-align:left">' + head + '<div class="already"><i class="fas fa-check"></i> この会のアンケートはありません</div></div>';
+    return;
+  }
+  if (answered) {
+    lp.innerHTML = '<div style="text-align:left">' + head
+      + '<div class="already"><i class="fas fa-clipboard-check"></i> アンケートは回答済みです。ありがとうございました！</div>'
+      + '<div style="text-align:center;margin-top:10px"><a href="#" id="gReAnswer" style="font-size:12px;color:#888;text-decoration:underline">回答し直す</a></div></div>';
+    var ra = document.getElementById('gReAnswer');
+    if (ra) ra.addEventListener('click', function(ev) { ev.preventDefault(); renderGuestSurveyForm(d); });
+    return;
+  }
+  renderGuestSurveyForm(d);
+}
+
+function renderGuestSurveyForm(d) {
+  var lp = document.getElementById('loginPrompt');
+  if (!lp) return;
+  var qs = d.questions || [];
+  gAnswerData = {};
+  var prev = {};
+  (d.answers || []).forEach(function(a) { prev[a.question_id] = a.answer_text; });
+  var html = '<div style="text-align:left">'
+    + '<p style="text-align:center;font-weight:700;margin-bottom:4px">おかえりなさい、' + escG(d.guest.name) + ' さん</p>'
+    + '<p style="text-align:center;color:#888;font-size:13px;margin-bottom:14px">' + escG(d.event.title) + ' の振り返り（アンケート）</p>';
+  for (var i = 0; i < qs.length; i++) {
+    var q = qs[i];
+    html += '<div class="form-group"><label>' + escG(q.question_text) + '</label>';
+    if (q.question_type === 'text') {
+      html += '<textarea id="gq_' + q.id + '" rows="2" placeholder="回答を入力">' + escG(prev[q.id] || '') + '</textarea>';
+    } else if (q.question_type === 'radio') {
+      var opts = q.options ? String(q.options).split('|') : [];
+      html += '<div class="radio-group" id="gq_' + q.id + '">';
+      for (var j = 0; j < opts.length; j++) html += '<div class="radio-option g-opt" data-qid="' + q.id + '" data-multi="0">' + escG(opts[j]) + '</div>';
+      html += '</div>';
+    } else if (q.question_type === 'checkbox') {
+      var isG = String(q.question_text).indexOf('成長の視点') >= 0;
+      var copts = q.options ? String(q.options).split('|') : [];
+      if (isG && copts.length === 0) copts = ['授業をつくる','授業をする','子どもを見る','つながる','深める'];
+      html += '<div class="checkbox-group" id="gq_' + q.id + '">';
+      for (var k = 0; k < copts.length; k++) html += '<div class="checkbox-option g-opt" data-qid="' + q.id + '" data-multi="1">' + escG(copts[k]) + '</div>';
+      html += '</div>';
+    } else if (q.question_type === 'rating') {
+      html += '<div class="rating-stars" id="gq_' + q.id + '">';
+      for (var s = 1; s <= 5; s++) html += '<span class="rating-star g-star" data-qid="' + q.id + '" data-val="' + s + '">★</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  html += '<button type="button" class="btn btn-primary" id="gSurveyBtn"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
+  html += '<div id="gSurveyStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>';
+  html += '</div>';
+  lp.innerHTML = html;
+  lp.querySelectorAll('.g-opt').forEach(function(el) {
+    el.addEventListener('click', function() {
+      var qid = el.getAttribute('data-qid');
+      if (el.getAttribute('data-multi') === '1') {
+        el.classList.toggle('selected');
+      } else {
+        el.parentElement.querySelectorAll('.g-opt').forEach(function(o) { o.classList.remove('selected'); });
+        el.classList.add('selected');
+      }
+      var sel = Array.prototype.map.call(el.parentElement.querySelectorAll('.g-opt.selected'), function(o) { return o.textContent; });
+      gAnswerData[qid] = sel.join('、');
+    });
+  });
+  lp.querySelectorAll('.g-star').forEach(function(el) {
+    el.addEventListener('click', function() {
+      var qid = el.getAttribute('data-qid');
+      var v = parseInt(el.getAttribute('data-val') || '0', 10);
+      gAnswerData[qid] = String(v);
+      lp.querySelectorAll('#gq_' + qid + ' .g-star').forEach(function(st, idx) { st.classList.toggle('active', idx < v); });
+    });
+  });
+  var gb = document.getElementById('gSurveyBtn');
+  if (gb) gb.addEventListener('click', function() { submitGuestSurvey(d); });
+}
+
+async function submitGuestSurvey(d) {
+  var saved = gSaved();
+  if (!saved) return;
+  var st = document.getElementById('gSurveyStatus');
+  var answers = [];
+  (d.questions || []).forEach(function(q) {
+    var el = document.getElementById('gq_' + q.id);
+    if (el && el.tagName === 'TEXTAREA') gAnswerData[q.id] = el.value;
+    if (gAnswerData[q.id]) answers.push({ question_id: q.id, answer_text: gAnswerData[q.id] });
+  });
+  var gb = document.getElementById('gSurveyBtn');
+  if (gb) gb.disabled = true;
+  if (st) { st.style.color = '#888'; st.textContent = '送信中...'; }
+  try {
+    var res = await fetch('/api/events/' + CODE + '/guest-survey', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: saved.gid, guest_token: saved.gtoken, answers: answers }) });
+    var d2 = {};
+    try { d2 = await res.json(); } catch(e) {}
+    if (res.ok && d2.success) {
+      document.getElementById('loginPrompt').innerHTML = '<div class="success-box"><i class="fas fa-heart"></i><p>回答ありがとうございました！</p></div>';
+      return;
+    }
+    if (st) { st.style.color = '#c62828'; st.textContent = d2.error || '送信に失敗しました'; }
+  } catch(e) {
+    if (st) { st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました'; }
+  }
+  if (gb) gb.disabled = false;
+}
+
+// 別端末用：名前で出席記録をさがす
+var gfLink = document.getElementById('guestFindLink');
+if (gfLink) {
+  gfLink.addEventListener('click', function(ev) {
+    ev.preventDefault();
+    document.getElementById('guestFindForm').style.display = 'block';
+    gfLink.style.display = 'none';
+  });
+}
+var gfBtn = document.getElementById('guestFindBtn');
+if (gfBtn) {
+  gfBtn.addEventListener('click', async function() {
+    var st = document.getElementById('guestFindStatus');
+    var name = (document.getElementById('fName').value || '').trim();
+    var school = (document.getElementById('fSchool').value || '').trim();
+    if (!name) { st.style.color = '#c62828'; st.textContent = 'お名前を入力してください'; return; }
+    gfBtn.disabled = true;
+    st.style.color = '#888'; st.textContent = '確認中...';
+    try {
+      var res = await fetch('/api/events/' + CODE + '/guest-find', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name: name, school: school }) });
+      var d2 = {};
+      try { d2 = await res.json(); } catch(e) {}
+      if (res.ok && d2.guest_id) {
+        try { localStorage.setItem(GKEY, JSON.stringify({ gid: d2.guest_id, gtoken: d2.guest_token, name: d2.name })); } catch(e) {}
+        var r = await fetch('/api/events/' + CODE + '/guest-status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: d2.guest_id, guest_token: d2.guest_token }) });
+        if (r.ok) { renderGuestSurvey(await r.json()); return; }
+        st.style.color = '#c62828'; st.textContent = '読み込みに失敗しました';
+      } else {
+        st.style.color = '#c62828'; st.textContent = d2.error || '見つかりませんでした';
+      }
+    } catch(e) {
+      st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました';
+    }
+    gfBtn.disabled = false;
   });
 }
 
