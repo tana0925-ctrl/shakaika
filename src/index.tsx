@@ -980,9 +980,12 @@ app.post('/api/events/:code/attend', authMiddleware, async (c) => {
 app.post('/api/events/:code/survey', authMiddleware, async (c) => {
   const code = c.req.param('code')
   const db = c.env.DB
-  const event = await db.prepare('SELECT * FROM events WHERE event_code = ? AND is_active = 1').bind(code).first() as any
+  // 出席済みの会員は、受付終了後（is_active=0）でもマイページから回答できる
+  const event = await db.prepare('SELECT * FROM events WHERE event_code = ?').bind(code).first() as any
   if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
   const user = c.get('user')
+  const att = await db.prepare('SELECT id FROM attendances WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
+  if (!att) return c.json({ error: 'このイベントの出席記録がありません' }, 403)
   const { satisfaction, comment, custom_answers } = await c.req.json()
   await db.prepare(`INSERT INTO survey_answers (event_id, user_id, satisfaction, comment, answered_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(event_id, user_id) DO UPDATE SET satisfaction=excluded.satisfaction, comment=excluded.comment, answered_at=datetime('now')`).bind(event.id, user.id, satisfaction || null, comment || '').run()
   if (custom_answers && Array.isArray(custom_answers)) {
@@ -1384,6 +1387,14 @@ app.get('/mypage', (c) => {
   .tag-pending { background: #fff3e0; color: #e65100; }
   .toggle-btn { background: #eee; border: none; border-radius: 8px; padding: 6px 10px; cursor: pointer; font-family: inherit; font-weight: 700; font-size: 12px; }
   .toggle-btn:hover { background: #e0e0e0; }
+  .answer-btn { background: var(--header-line); color: #fff; border: none; border-radius: 8px; padding: 6px 12px; cursor: pointer; font-family: inherit; font-weight: 700; font-size: 12px; }
+  .answer-btn:hover { opacity: 0.85; }
+  .mp-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+  .mp-opt { padding: 6px 12px; border: 2px solid #e0d6c8; border-radius: 8px; cursor: pointer; font-size: 12px; background: #fff; }
+  .mp-opt.selected { border-color: var(--header-line); background: #fff3e0; color: var(--header-line); font-weight: 700; }
+  .mp-stars { display: flex; gap: 4px; }
+  .mp-star { font-size: 24px; cursor: pointer; color: #ddd; }
+  .mp-star.active { color: #ffb300; }
   .event-detail { display: none; margin-top: 10px; background: #fafafa; border: 1px solid #eee; border-radius: 10px; padding: 10px 12px; }
   .event-detail.show { display: block; }
   .qa { margin-top: 10px; }
@@ -2077,9 +2088,11 @@ function renderHistory(events) {
     return;
   }
 
+  historyEventsById = {};
   let html = '';
   for (const ev0 of events) {
     const ev = ev0 || {};
+    historyEventsById[ev.event_id] = ev;
     const answered = !!(ev.survey && ev.survey.answered_at);
     const tag = answered
       ? '<span class="tag tag-answered">回答済み</span>'
@@ -2109,7 +2122,10 @@ function renderHistory(events) {
       +         tag
       +       '</div>'
       +     '</div>'
-      +     '<button class="toggle-btn" type="button" data-detail="' + esc(detailId) + '"><i class="fas fa-eye"></i> 振り返りを見る</button>'
+      +     '<div style="display:flex;gap:6px;flex-wrap:wrap">'
+      +       '<button class="toggle-btn" type="button" data-detail="' + esc(detailId) + '"><i class="fas fa-eye"></i> 振り返りを見る</button>'
+      +       ((!answered && Array.isArray(ev.questions) && ev.questions.length > 0) ? '<button class="answer-btn" type="button" data-event="' + ev.event_id + '"><i class="fas fa-pen"></i> 回答する</button>' : '')
+      +     '</div>'
       +   '</div>'
       +   '<div class="event-detail" id="' + esc(detailId) + '">'
       +     (comment ? '<div style="color:#555;white-space:pre-wrap">' + comment + '</div>' : '')
@@ -2127,6 +2143,139 @@ function renderHistory(events) {
       if (id) toggleDetail(id);
     });
   });
+
+  // Attach answer handlers
+  root.querySelectorAll('.answer-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.getAttribute('data-event') || '0', 10);
+      if (id) openAnswerForm(id);
+    });
+  });
+}
+
+// ===== 後からアンケート回答（マイページ） =====
+let historyEventsById = {};
+let mpSurveyData = {};
+const mpGrowthViewpoints = {
+  'elementary': [
+    {l:'授業をつくる',d:'教材研究・授業構成'},
+    {l:'授業をする',d:'実践・対話'},
+    {l:'子どもを見る',d:'観察・評価'},
+    {l:'つながる',d:'同僚性・仲間づくり'},
+    {l:'深める',d:'研究・発信'}
+  ],
+  'junior_high': [
+    {l:'授業をつくる',d:'教材研究・授業構成'},
+    {l:'資料',d:'読み解く・提示する'},
+    {l:'対話',d:'意見を交わす・議論する'},
+    {l:'探究',d:'問いを立てる・追究する'},
+    {l:'生徒を見る',d:'観察・評価'},
+    {l:'つながる',d:'仲間・同僚性'},
+    {l:'深める',d:'研究・発信'}
+  ],
+  'admin_staff': [
+    {l:'校内支援',d:'校内の社会科の授業を支える'},
+    {l:'学校経営',d:'社会科をカリキュラムに活かす'},
+    {l:'会員支援',d:'実践に寄り添い、言葉にする手助け'},
+    {l:'後進育成',d:'次世代リーダーを育てる'},
+    {l:'運営貢献',d:'同好会の運営や大会調整'},
+    {l:'対外連携',d:'外部講師の紹介・知見の還元'}
+  ]
+};
+
+function openAnswerForm(eventId) {
+  const ev = historyEventsById[eventId];
+  if (!ev) return;
+  mpSurveyData = {};
+  const det = document.getElementById('detail_' + eventId);
+  if (!det) return;
+  const qs = ev.questions || [];
+  const st = (user && user.school_type) || '';
+  let html = '<div style="font-weight:700;color:#5d4037;margin-bottom:10px"><i class="fas fa-clipboard-list"></i> アンケートに回答</div>';
+  for (const q of qs) {
+    const qid = q.question_id;
+    html += '<div style="margin-bottom:14px"><div style="font-weight:700;font-size:13px;color:#555;margin-bottom:6px">' + esc(q.question_text || '') + '</div>';
+    if (q.question_type === 'text') {
+      html += '<textarea id="mq_' + qid + '" rows="2" placeholder="回答を入力" style="width:100%;padding:8px;border:2px solid #e0d6c8;border-radius:8px;font-family:inherit;font-size:13px;resize:vertical"></textarea>';
+    } else if (q.question_type === 'radio') {
+      const opts = q.options ? String(q.options).split('|') : [];
+      html += '<div class="mp-opts" id="mq_' + qid + '">';
+      for (const o of opts) html += '<span class="mp-opt" data-qid="' + qid + '" data-multi="0">' + esc(o) + '</span>';
+      html += '</div>';
+    } else if (q.question_type === 'checkbox') {
+      const isGrowth = (q.question_text || '').includes('成長の視点') && mpGrowthViewpoints[st];
+      const opts = isGrowth ? mpGrowthViewpoints[st].map((v) => v.l) : (q.options ? String(q.options).split('|') : []);
+      html += '<div class="mp-opts" id="mq_' + qid + '">';
+      for (const o of opts) html += '<span class="mp-opt" data-qid="' + qid + '" data-multi="1">' + esc(o) + '</span>';
+      html += '</div>';
+      if (isGrowth) {
+        html += '<div style="background:#faf6f0;border-radius:8px;padding:8px 12px;margin-top:6px;font-size:12px;color:#666">';
+        for (const v of mpGrowthViewpoints[st]) html += '<div><b>' + esc(v.l) + '</b>…' + esc(v.d) + '</div>';
+        html += '</div>';
+      }
+    } else if (q.question_type === 'rating') {
+      html += '<div class="mp-stars" id="mq_' + qid + '">';
+      for (let i = 1; i <= 5; i++) html += '<span class="mp-star" data-qid="' + qid + '" data-val="' + i + '">★</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  html += '<button type="button" class="answer-btn" id="mpSubmit_' + eventId + '" style="padding:10px 24px;font-size:13px"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
+  html += '<div id="mpStatus_' + eventId + '" style="font-size:12px;margin-top:8px;color:#c62828"></div>';
+  det.innerHTML = html;
+  det.classList.add('show');
+  det.querySelectorAll('.mp-opt').forEach((el) => {
+    el.addEventListener('click', () => {
+      const qid = el.getAttribute('data-qid');
+      if (el.getAttribute('data-multi') === '1') {
+        el.classList.toggle('selected');
+      } else {
+        el.parentElement.querySelectorAll('.mp-opt').forEach((o) => o.classList.remove('selected'));
+        el.classList.add('selected');
+      }
+      const sel = Array.from(el.parentElement.querySelectorAll('.mp-opt.selected')).map((o) => o.textContent);
+      mpSurveyData[qid] = sel.join('、');
+    });
+  });
+  det.querySelectorAll('.mp-star').forEach((el) => {
+    el.addEventListener('click', () => {
+      const qid = el.getAttribute('data-qid');
+      const v = parseInt(el.getAttribute('data-val') || '0', 10);
+      mpSurveyData[qid] = String(v);
+      det.querySelectorAll('#mq_' + qid + ' .mp-star').forEach((s, i) => s.classList.toggle('active', i < v));
+    });
+  });
+  const sb = document.getElementById('mpSubmit_' + eventId);
+  if (sb) sb.addEventListener('click', () => submitMypageSurvey(eventId));
+}
+
+async function submitMypageSurvey(eventId) {
+  const ev = historyEventsById[eventId];
+  if (!ev) return;
+  const stEl = document.getElementById('mpStatus_' + eventId);
+  const custom_answers = [];
+  for (const q of (ev.questions || [])) {
+    const qid = q.question_id;
+    const el = document.getElementById('mq_' + qid);
+    if (el && el.tagName === 'TEXTAREA') mpSurveyData[qid] = el.value;
+    if (mpSurveyData[qid]) custom_answers.push({ question_id: qid, answer_text: mpSurveyData[qid] });
+  }
+  const sb = document.getElementById('mpSubmit_' + eventId);
+  if (sb) sb.disabled = true;
+  try {
+    const res = await fetchWithTimeout('/api/events/' + encodeURIComponent(ev.event_code) + '/survey', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ satisfaction: null, comment: '', custom_answers: custom_answers })
+    }, 12000);
+    if (res.ok) { await loadHistory(); return; }
+    let d = {};
+    try { d = await res.json(); } catch (e) {}
+    if (stEl) stEl.textContent = (d && d.error) || ('送信に失敗しました（' + res.status + '）');
+  } catch (e) {
+    if (stEl) stEl.textContent = '送信に失敗しました（通信が不安定です）';
+  }
+  if (sb) sb.disabled = false;
 }
 
 async function loadHistory() {
@@ -3345,43 +3494,10 @@ function renderEvent(data) {
     html += '<div class="already"><i class="fas fa-clipboard-check"></i> アンケートは回答済みです。ありがとうございました！</div></div>';
     html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
   } else {
-    html += '<hr style="border:none;border-top:2px dashed #eee;margin:16px 0"><h3 style="font-family:Zen Maru Gothic;color:#5d4037;font-size:16px;margin:0 0 16px"><i class="fas fa-clipboard-list"></i> アンケート</h3>';
-    for (const q of qs) {
-      html += '<div class="form-group"><label>'+escHtml(q.question_text)+'</label>';
-      if (q.question_type === 'text') {
-        html += '<textarea id="cq_'+q.id+'" placeholder="回答を入力" rows="2" oninput="this.style.height=&quot;auto&quot;;this.style.height=this.scrollHeight+&quot;px&quot;" style="width:100%;resize:none;overflow:hidden;min-height:48px"></textarea>';
-      } else if (q.question_type === 'radio') {
-        const opts = q.options ? q.options.split('|') : [];
-        html += '<div class="radio-group" id="cq_'+q.id+'">';
-        for (const o of opts) html += '<div class="radio-option" onclick="selectRadio(this,'+q.id+')">'+o+'</div>';
-        html += '</div>';
-      } else if (q.question_type === 'checkbox') {
-        const isGrowth = q.question_text.includes('成長の視点') && growthViewpoints[userSchoolType];
-        if (isGrowth) {
-          const vps = growthViewpoints[userSchoolType];
-          html += '<div class="checkbox-group" id="cq_'+q.id+'">';
-          for (const v of vps) html += '<div class="checkbox-option" onclick="toggleCheckbox(this,'+q.id+')">'+v.l+'</div>';
-          html += '</div>';
-          html += '<div class="vp-detail-toggle" onclick="var el=this.nextElementSibling;if(el.style.display===&quot;none&quot;){el.style.display=&quot;block&quot;;this.textContent=&quot;\u25BC 閉じる&quot;}else{el.style.display=&quot;none&quot;;this.textContent=&quot;\u25B6 視点の説明を見る&quot;}">▶ 視点の説明を見る</div>';
-          html += '<div class="vp-detail-box" style="display:none">';
-          for (const v of vps) html += '<div class="vp-detail-item"><b>'+v.l+'</b>…'+v.d+'</div>';
-          html += '</div>';
-        } else {
-          const opts = q.options ? q.options.split('|') : [];
-          html += '<div class="checkbox-group" id="cq_'+q.id+'">';
-          for (const o of opts) html += '<div class="checkbox-option" onclick="toggleCheckbox(this,'+q.id+')">'+o+'</div>';
-          html += '</div>';
-        }
-      } else if (q.question_type === 'rating') {
-        html += '<div class="rating-stars" id="cq_'+q.id+'">';
-        for (let i=1;i<=5;i++) html += '<span class="rating-star" data-qid="'+q.id+'" data-val="'+i+'" onclick="setRating('+q.id+','+i+')">★</span>';
-        html += '</div>';
-      }
-      html += '</div>';
-    }
-    html += '<button class="btn btn-primary" onclick="submitSurvey()"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
+    html += '<hr style="border:none;border-top:2px dashed #eee;margin:16px 0">';
+    html += '<div style="background:#fff3e0;border:2px solid #ffb74d;border-radius:12px;padding:14px 16px;font-size:14px;color:#5d4037;line-height:1.7"><i class="fas fa-clipboard-list"></i> アンケート（振り返り）は<b>マイページ</b>の「参加した会・アンケート」から回答できます。</div>';
     html += '</div>';
-    html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none;margin-top:10px"><i class="fas fa-home"></i> マイページへ</a>';
+    html += '<a href="/mypage" class="btn btn-primary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-pen"></i> マイページで回答する</a>';
   }
   c.innerHTML = html;
   // Restore previous answers
