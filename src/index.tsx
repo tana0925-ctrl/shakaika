@@ -4065,6 +4065,21 @@ app.get('/admin/events', (c) => {
   .preset-label { font-size: 11px; color: #999; margin-bottom: 6px; }
   .preset-btn { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; padding: 5px 12px; border-radius: 20px; cursor: pointer; font-size: 12px; font-family: inherit; margin-right: 6px; margin-bottom: 4px; }
   .preset-btn:hover { background: #c8e6c9; }
+  .ev-filter-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  .ev-filter-sel { padding: 8px 12px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 13px; font-family: inherit; background: #fff; cursor: pointer; }
+  .ev-filter-sel:focus { outline: none; border-color: #1a237e; }
+  .ev-search-wrap { position: relative; flex: 1; min-width: 200px; display: flex; align-items: center; }
+  .ev-search-wrap > i { position: absolute; left: 12px; color: #aaa; font-size: 13px; pointer-events: none; }
+  .ev-search-input { width: 100%; padding: 8px 32px 8px 32px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 13px; font-family: inherit; }
+  .ev-search-input:focus { outline: none; border-color: #1a237e; }
+  .ev-search-clear { position: absolute; right: 10px; color: #999; font-size: 18px; cursor: pointer; line-height: 1; }
+  .ev-search-clear:hover { color: #555; }
+  .ev-group-head { margin: 18px 0 4px; font-size: 13px; font-weight: 700; color: #555; }
+  .ev-ended-toggle { display: inline-flex; align-items: center; gap: 8px; margin-top: 18px; padding: 8px 14px; background: #f5f5f5; border: 1px solid #e0e0e0; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 700; color: #666; font-family: inherit; }
+  .ev-ended-toggle:hover { background: #eee; }
+  .ev-ended-list { margin-top: 6px; }
+  .ev-item-ended .title { color: #999 !important; }
+  .ev-empty { color: #888; text-align: center; padding: 16px 0; }
   @media print {
     .top-bar, .main { display: none !important; }
     .qr-modal { position: static !important; display: block !important; background: none !important; }
@@ -4102,6 +4117,14 @@ app.get('/admin/events', (c) => {
   </div>
   <div class="card">
     <h3><i class="fas fa-list"></i> イベント一覧</h3>
+    <div class="ev-filter-bar">
+      <select id="evFilterYear" class="ev-filter-sel"></select>
+      <div class="ev-search-wrap">
+        <i class="fas fa-search"></i>
+        <input type="text" id="evSearch" class="ev-search-input" placeholder="イベント名・グループで検索">
+        <span id="evSearchClear" class="ev-search-clear" style="display:none">&times;</span>
+      </div>
+    </div>
     <div id="eventList"><p style="color:#888;text-align:center">読み込み中...</p></div>
   </div>
 </div>
@@ -4169,17 +4192,114 @@ async function submitCreateEvent() {
 
 let eventsData = [];
 
+var evFilterState = { year: 'current', q: '', showEnded: false };
+
+function fiscalYearOf(dateStr) {
+  // 'YYYY-MM-DD' → 年度(4月始まり)
+  var parts = String(dateStr || '').split('-');
+  var y = parseInt(parts[0], 10);
+  var m = parseInt(parts[1], 10);
+  if (!y || !m) return null;
+  return (m >= 4) ? y : (y - 1);
+}
+function currentFiscalYear() {
+  var now = new Date();
+  var y = now.getFullYear();
+  var m = now.getMonth() + 1;
+  return (m >= 4) ? y : (y - 1);
+}
+function todayStr() {
+  var n = new Date();
+  return n.getFullYear() + '-' + String(n.getMonth()+1).padStart(2,'0') + '-' + String(n.getDate()).padStart(2,'0');
+}
+
+function eventItemHtml(ev, ended) {
+  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
+}
+
+function buildYearOptions() {
+  var sel = document.getElementById('evFilterYear');
+  if (!sel) return;
+  var years = {};
+  eventsData.forEach(function(ev) { var fy = fiscalYearOf(ev.event_date); if (fy !== null) years[fy] = true; });
+  var cur = currentFiscalYear();
+  var list = Object.keys(years).map(Number).sort(function(a,b){return b-a;});
+  var html = '<option value="current">' + cur + '年度（今年度）</option>';
+  list.forEach(function(y) { if (y !== cur) html += '<option value="'+y+'">'+y+'年度</option>'; });
+  html += '<option value="all">すべての年度</option>';
+  sel.innerHTML = html;
+  sel.value = evFilterState.year;
+}
+
+function renderEventList() {
+  var list = document.getElementById('eventList');
+  if (!list) return;
+  if (!eventsData.length) { list.innerHTML = '<p class="ev-empty">まだイベントがありません</p>'; return; }
+  var today = todayStr();
+  var cur = currentFiscalYear();
+  var q = (evFilterState.q || '').trim().toLowerCase();
+  var filtered = eventsData.filter(function(ev) {
+    if (evFilterState.year === 'all') { /* no year filter */ }
+    else {
+      var target = (evFilterState.year === 'current') ? cur : parseInt(evFilterState.year, 10);
+      if (fiscalYearOf(ev.event_date) !== target) return false;
+    }
+    if (q && String(ev.title).toLowerCase().indexOf(q) === -1) return false;
+    return true;
+  });
+  if (!filtered.length) {
+    list.innerHTML = '<p class="ev-empty">該当するイベントがありません</p>';
+    return;
+  }
+  var upcoming = [], ended = [];
+  filtered.forEach(function(ev) { if (ev.event_date >= today) upcoming.push(ev); else ended.push(ev); });
+  // 開催予定は日付昇順（近い順）、終了は新しい順
+  upcoming.sort(function(a,b){ return a.event_date < b.event_date ? -1 : (a.event_date > b.event_date ? 1 : 0); });
+  ended.sort(function(a,b){ return a.event_date > b.event_date ? -1 : (a.event_date < b.event_date ? 1 : 0); });
+
+  var html = '';
+  if (upcoming.length) {
+    html += '<div class="ev-group-head"><i class="fas fa-bullhorn" style="color:#1a237e"></i> 開催予定・本日（'+upcoming.length+'件）</div>';
+    html += upcoming.map(function(ev){ return eventItemHtml(ev, false); }).join('');
+  } else {
+    html += '<p class="ev-empty">開催予定の会はありません</p>';
+  }
+  if (ended.length) {
+    html += '<div class="ev-ended-toggle" id="evEndedToggle"><i class="fas fa-chevron-'+(evFilterState.showEnded?'down':'right')+'"></i> 終了した会（'+ended.length+'件）</div>';
+    html += '<div class="ev-ended-list" id="evEndedList" style="display:'+(evFilterState.showEnded?'block':'none')+'">';
+    html += ended.map(function(ev){ return eventItemHtml(ev, true); }).join('');
+    html += '</div>';
+  }
+  list.innerHTML = html;
+
+  var tg = document.getElementById('evEndedToggle');
+  if (tg) tg.addEventListener('click', function() {
+    evFilterState.showEnded = !evFilterState.showEnded;
+    renderEventList();
+  });
+}
+
 async function loadEvents() {
   const res = await fetch('/api/admin/events', { headers:{'Authorization':'Bearer '+token} });
   if (res.status === 401 || res.status === 403) { localStorage.clear(); window.location.href='/login'; return; }
   const data = await res.json();
   eventsData = data.events || [];
-  const list = document.getElementById('eventList');
-  if (!eventsData.length) { list.innerHTML='<p style="color:#888;text-align:center">まだイベントがありません</p>'; return; }
-  list.innerHTML = eventsData.map(function(ev) {
-    return '<div class="event-item-wrap" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+ev.title+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+ev.title.replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
-  }).join('');
+  buildYearOptions();
+  renderEventList();
 }
+
+(function setupEventFilters() {
+  function bind() {
+    var sel = document.getElementById('evFilterYear');
+    var inp = document.getElementById('evSearch');
+    var clr = document.getElementById('evSearchClear');
+    if (sel) sel.addEventListener('change', function() { evFilterState.year = sel.value; evFilterState.showEnded = false; renderEventList(); });
+    if (inp) inp.addEventListener('input', function() { evFilterState.q = inp.value; if (clr) clr.style.display = inp.value ? 'block' : 'none'; renderEventList(); });
+    if (clr) clr.addEventListener('click', function() { if (inp) inp.value = ''; evFilterState.q = ''; clr.style.display = 'none'; renderEventList(); });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind);
+  else bind();
+})();
 
 function showQR(eventId) {
   const ev = eventsData.find(function(e){ return e.id === eventId; });
