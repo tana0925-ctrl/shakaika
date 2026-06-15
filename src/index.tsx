@@ -865,6 +865,21 @@ app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
   return c.json({ event, questions, attendances, answers, customAnswers, guests })
 })
 
+app.put('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const title = typeof body.title === 'string' ? body.title.trim() : ''
+  if (!title) return c.json({ error: 'イベント名を入力してください' }, 400)
+  if (title.length > 100) return c.json({ error: 'イベント名が長すぎます' }, 400)
+  const db = c.env.DB
+  const ev = await db.prepare('SELECT id FROM events WHERE id = ?').bind(id).first()
+  if (!ev) return c.json({ error: 'イベントが見つかりません' }, 404)
+  await db.prepare('UPDATE events SET title = ? WHERE id = ?').bind(title, id).run()
+  return c.json({ success: true, title })
+})
+
 app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id'))
   if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
@@ -4026,6 +4041,14 @@ app.get('/admin/events', (c) => {
   .btn-danger { background: #c62828; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
   .btn-export2 { background: #2e7d32; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
   .btn-qr { background: #ff6f00; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
+  .btn-edit { background: #455a64; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
+  .btn-edit:hover { background: #37474f; }
+  .ev-rename-box { width: 100%; margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .ev-rename-box input { flex: 1; min-width: 200px; padding: 8px 12px; border: 2px solid #1a237e; border-radius: 8px; font-size: 14px; font-family: inherit; }
+  .ev-rename-box input:focus { outline: none; }
+  .ev-rename-save { background: #1a237e; color: #fff; font-size: 12px; font-weight: 700; padding: 7px 16px; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; }
+  .ev-rename-cancel { background: #eee; color: #555; font-size: 12px; font-weight: 700; padding: 7px 16px; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; }
+  .ev-rename-status { font-size: 12px; color: #c62828; width: 100%; }
   .event-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #eee; flex-wrap: wrap; gap: 8px; }
   .event-item:last-child { border-bottom: none; }
   .event-info .title { font-weight: 700; font-size: 15px; }
@@ -4214,7 +4237,7 @@ function todayStr() {
 }
 
 function eventItemHtml(ev, ended) {
-  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
+  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-edit" data-action="rename-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-pen"></i></button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
 }
 
 function buildYearOptions() {
@@ -4339,6 +4362,52 @@ async function deleteEvent(id, title) {
   loadEvents();
 }
 
+function renameEvent(id, currentTitle) {
+  var wrap = document.getElementById('evWrap_'+id);
+  if (!wrap) return;
+  if (wrap.querySelector('.ev-rename-box')) return; // 既に編集中
+  var box = document.createElement('div');
+  box.className = 'ev-rename-box';
+  box.innerHTML = '<input type="text" class="ev-rename-input" maxlength="100">'
+    + '<button class="ev-rename-save"><i class="fas fa-check"></i> 保存</button>'
+    + '<button class="ev-rename-cancel">キャンセル</button>'
+    + '<div class="ev-rename-status"></div>';
+  var item = wrap.querySelector('.event-item');
+  item.parentNode.insertBefore(box, item.nextSibling);
+  var input = box.querySelector('.ev-rename-input');
+  input.value = currentTitle;
+  input.focus();
+  input.select();
+  var statusEl = box.querySelector('.ev-rename-status');
+  function close() { box.remove(); }
+  box.querySelector('.ev-rename-cancel').addEventListener('click', close);
+  async function save() {
+    var newTitle = (input.value || '').trim();
+    if (!newTitle) { statusEl.textContent = 'イベント名を入力してください'; return; }
+    if (newTitle === currentTitle) { close(); return; }
+    var saveBtn = box.querySelector('.ev-rename-save');
+    saveBtn.disabled = true;
+    statusEl.style.color = '#888'; statusEl.textContent = '保存中...';
+    try {
+      var res = await fetch('/api/admin/events/'+id, {
+        method: 'PUT',
+        headers: { 'Authorization': 'Bearer '+token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle })
+      });
+      var d = {};
+      try { d = await res.json(); } catch(e) {}
+      if (res.ok && d.success) { loadEvents(); return; }
+      statusEl.style.color = '#c62828'; statusEl.textContent = d.error || '保存に失敗しました';
+      saveBtn.disabled = false;
+    } catch(e) {
+      statusEl.style.color = '#c62828'; statusEl.textContent = '通信エラーが発生しました';
+      saveBtn.disabled = false;
+    }
+  }
+  box.querySelector('.ev-rename-save').addEventListener('click', save);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); save(); } else if (e.key === 'Escape') { close(); } });
+}
+
 async function showEventDetail(eventId, tab) {
   const detail = document.getElementById('evDetail_'+eventId);
   if (!detail) return;
@@ -4458,6 +4527,7 @@ document.addEventListener('click', function(e) {
   if (action === 'qr') showQR(id);
   else if (action === 'export') exportEvent(id);
   else if (action === 'delete-ev') deleteEvent(id, btn.dataset.title);
+  else if (action === 'rename-ev') renameEvent(id, btn.dataset.title);
   else if (action === 'detail') showEventDetail(id, btn.dataset.tab);
 });
 
