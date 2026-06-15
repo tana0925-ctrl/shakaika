@@ -2811,8 +2811,10 @@ app.get('/admin', (c) => {
   .step-none { background: #e0e0e0; color: #999; }
 
   .role-badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 10px; font-weight: 700; }
-  .role-admin { background: #e3f2fd; color: #1565c0; }
+  .role-admin { background: #e65100; color: #fff; }
   .role-member { background: #f5f5f5; color: #888; }
+  tr.is-admin-row { background: #fff8e1; }
+  tr.is-admin-row:hover { background: #fff3cd; }
 
   .member-name { font-weight: 700; text-align: left !important; }
 
@@ -3115,9 +3117,10 @@ function renderMembers(members) {
       '<span class="group-disp" data-id="' + m.id + '" onclick="editGroup(this)" style="cursor:pointer;padding:2px 6px;border-radius:4px;font-size:12px;' + (grp ? 'background:#e3f2fd;color:#1565c0;font-weight:bold' : 'color:#999') + '">' + (grp ? escapeHtml(grp) : '未設定') + '</span>' +
       '<input type="text" list="groupDatalist" class="group-input" data-id="' + m.id + '" value="' + escapeHtml(grp) + '" placeholder="例: Aグループ" style="display:none;width:80px;font-size:12px;padding:2px 4px;border:1px solid #90caf9;border-radius:4px" onblur="saveGroup(this)" onkeydown="handleGroupKey(event,this)">' +
       '</td>';
-    return '<tr>' +
+    var adminBadge = (m.role === 'admin') ? ' <span class="role-badge role-admin"><i class="fas fa-shield-halved"></i> 管理者</span>' : '';
+    return '<tr' + (m.role === 'admin' ? ' class="is-admin-row"' : '') + '>' +
       '<td>' + (i + 1) + '</td>' +
-         '<td><strong>' + (m.name || '') + '</strong></td>' +
+         '<td><strong>' + (m.name || '') + '</strong>' + adminBadge + '</td>' +
       '<td>' + (m.school || '-') + '</td>' +
       '<td>' + (m.district || '-') + '</td>' +
       '<td>' + (m.experience_years != null ? m.experience_years + '年目' : '-') + '</td>' +
