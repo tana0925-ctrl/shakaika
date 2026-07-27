@@ -462,6 +462,21 @@ app.get('/api/me/points', authMiddleware, async (c) => {
   return c.json({ fiscal_year: fiscalYear, total_points: row?.total || 0 })
 })
 
+// survey_questions.required 列の遅延マイグレーション（既存DBを壊さない）
+let _reqColOk = false
+async function ensureRequiredColumn(db: any) {
+  if (_reqColOk) return
+  try {
+    const { results: cols } = await db.prepare('PRAGMA table_info(survey_questions)').all() as any
+    if (Array.isArray(cols) && cols.length > 0) {
+      if (!cols.some((col: any) => col.name === 'required')) {
+        await db.prepare('ALTER TABLE survey_questions ADD COLUMN required INTEGER DEFAULT 0').run()
+      }
+      _reqColOk = true
+    }
+  } catch (e) { /* ignore */ }
+}
+
 app.get('/api/me/history', authMiddleware, async (c) => {
   const user = c.get('user')
   const qfy = c.req.query('fy')
@@ -489,6 +504,7 @@ app.get('/api/me/history', authMiddleware, async (c) => {
     ORDER BY e.event_date DESC`
   ).bind(user.id, start, end).all() as any
 
+  await ensureRequiredColumn(db)
   const { results: qaRows } = await db.prepare(
     `SELECT
       e.id as event_id,
@@ -497,6 +513,7 @@ app.get('/api/me/history', authMiddleware, async (c) => {
       q.question_type,
       q.options,
       q.sort_order,
+      ${_reqColOk ? 'q.required,' : ''}
       ca.answer_text
     FROM attendances a
     JOIN events e ON e.id = a.event_id
@@ -531,6 +548,7 @@ app.get('/api/me/history', authMiddleware, async (c) => {
       question_text: q.question_text,
       question_type: q.question_type,
       options: q.options || '',
+      required: q.required ? 1 : 0,
       answer_text: q.answer_text || ''
     })
   }
@@ -821,11 +839,19 @@ app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
   }
   const eventId = res.meta.last_row_id as number
   if (custom_questions && Array.isArray(custom_questions)) {
+    await ensureRequiredColumn(db)
     for (let i = 0; i < custom_questions.length; i++) {
       const q = custom_questions[i]
-      await db.prepare(
-        'INSERT INTO survey_questions (event_id, question_text, question_type, options, sort_order) VALUES (?,?,?,?,?)'
-      ).bind(eventId, q.question_text, q.question_type || 'text', q.options || '', i).run()
+      try {
+        await db.prepare(
+          'INSERT INTO survey_questions (event_id, question_text, question_type, options, sort_order, required) VALUES (?,?,?,?,?,?)'
+        ).bind(eventId, q.question_text, q.question_type || 'text', q.options || '', i, q.required ? 1 : 0).run()
+      } catch (e) {
+        // required列が無い等の場合は従来形式で保存（互換フォールバック）
+        await db.prepare(
+          'INSERT INTO survey_questions (event_id, question_text, question_type, options, sort_order) VALUES (?,?,?,?,?)'
+        ).bind(eventId, q.question_text, q.question_type || 'text', q.options || '', i).run()
+      }
     }
   }
   return c.json({ id: eventId, event_code: code })
@@ -997,7 +1023,8 @@ app.post('/api/events/:code/guest-status', async (c) => {
   await ensureGuestTable(db)
   const guest = await db.prepare('SELECT * FROM guest_attendances WHERE id = ? AND event_id = ?').bind(gid || 0, event.id).first() as any
   if (!guest || !gtok || guest.token !== gtok) return c.json({ error: '出席記録が見つかりません' }, 404)
-  const { results: questions } = await db.prepare('SELECT id, question_text, question_type, options, sort_order FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
+  await ensureRequiredColumn(db)
+  const { results: questions } = await db.prepare('SELECT id, question_text, question_type, options, sort_order' + (_reqColOk ? ', required' : '') + ' FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
   const { results: answers } = await db.prepare('SELECT question_id, answer_text FROM guest_answers WHERE guest_id = ? AND event_id = ?').bind(guest.id, event.id).all()
   return c.json({ event: { title: event.title, event_date: event.event_date }, guest: { id: guest.id, name: guest.name }, questions, answers })
 })
@@ -2300,7 +2327,7 @@ function openAnswerForm(eventId) {
   let html = '<div style="font-weight:700;color:#5d4037;margin-bottom:10px"><i class="fas fa-clipboard-list"></i> アンケートに回答</div>';
   for (const q of qs) {
     const qid = q.question_id;
-    html += '<div style="margin-bottom:14px"><div style="font-weight:700;font-size:13px;color:#555;margin-bottom:6px">' + esc(q.question_text || '') + '</div>';
+    html += '<div style="margin-bottom:14px"><div style="font-weight:700;font-size:13px;color:#555;margin-bottom:6px">' + esc(q.question_text || '') + (q.required ? ' <span style="color:#c62828;font-size:11px;font-weight:700">＊必須</span>' : '') + '</div>';
     if (q.question_type === 'text') {
       html += '<textarea id="mq_' + qid + '" rows="2" placeholder="回答を入力" style="width:100%;padding:8px;border:2px solid #e0d6c8;border-radius:8px;font-family:inherit;font-size:13px;resize:vertical"></textarea>';
     } else if (q.question_type === 'radio') {
@@ -2366,6 +2393,8 @@ async function submitMypageSurvey(eventId) {
     if (el && el.tagName === 'TEXTAREA') mpSurveyData[qid] = el.value;
     if (mpSurveyData[qid]) custom_answers.push({ question_id: qid, answer_text: mpSurveyData[qid] });
   }
+  const missingQ = (ev.questions || []).find(q => q.required && !String(mpSurveyData[q.question_id] || '').trim());
+  if (missingQ) { if (stEl) stEl.textContent = '必須の質問「' + (missingQ.question_text || '') + '」に回答してください'; return; }
   const sb = document.getElementById('mpSubmit_' + eventId);
   if (sb) sb.disabled = true;
   try {
@@ -3557,7 +3586,7 @@ function renderGuestSurveyForm(d) {
     + '<p style="text-align:center;color:#888;font-size:13px;margin-bottom:14px">' + escG(d.event.title) + ' の振り返り（アンケート）</p>';
   for (var i = 0; i < qs.length; i++) {
     var q = qs[i];
-    html += '<div class="form-group"><label>' + escG(q.question_text) + '</label>';
+    html += '<div class="form-group"><label>' + escG(q.question_text) + (q.required ? ' <span style="color:#c62828;font-size:11px;font-weight:700">＊必須</span>' : '') + '</label>';
     if (q.question_type === 'text') {
       html += '<textarea id="gq_' + q.id + '" rows="2" placeholder="回答を入力">' + escG(prev[q.id] || '') + '</textarea>';
     } else if (q.question_type === 'radio') {
@@ -3618,6 +3647,8 @@ async function submitGuestSurvey(d) {
     if (el && el.tagName === 'TEXTAREA') gAnswerData[q.id] = el.value;
     if (gAnswerData[q.id]) answers.push({ question_id: q.id, answer_text: gAnswerData[q.id] });
   });
+  var missingQ = (d.questions || []).find(function(q) { return q.required && !String(gAnswerData[q.id] || '').trim(); });
+  if (missingQ) { if (st) { st.style.color = '#c62828'; st.textContent = '必須の質問「' + missingQ.question_text + '」に回答してください'; } return; }
   var gb = document.getElementById('gSurveyBtn');
   if (gb) gb.disabled = true;
   if (st) { st.style.color = '#888'; st.textContent = '送信中...'; }
@@ -4082,11 +4113,40 @@ app.get('/admin/events', (c) => {
   .qr-content .code-text { margin-top: 12px; font-size: 20px; font-weight: 700; color: var(--header-line); letter-spacing: 4px; font-family: monospace; }
   .qr-content .url-text { margin-top: 8px; font-size: 11px; color: #999; word-break: break-all; }
   .custom-q-area { margin-top: 16px; padding-top: 16px; border-top: 2px dashed #eee; }
-  .custom-q-item { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
-  .custom-q-item input, .custom-q-item select { padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; font-family: inherit; }
-  .custom-q-item .q-text { flex: 1; min-width: 150px; }
-  .remove-q { background: none; border: none; color: #c62828; cursor: pointer; font-size: 16px; }
-  .btn-add-q { background: #f5f5f5; color: #555; border: 2px dashed #ccc; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-family: inherit; width: 100%; margin-top: 8px; }
+  .q-card { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); padding: 14px 14px 10px; margin-bottom: 12px; }
+  .q-card-head { display: flex; align-items: flex-start; gap: 8px; }
+  .q-num { flex: none; font-size: 12px; font-weight: 700; color: #888; padding-top: 10px; }
+  .q-title-input { flex: 1; width: 100%; min-width: 0; border: none; border-bottom: 2px solid #e0e0e0; padding: 8px 4px; font-size: 14px; font-weight: 600; font-family: inherit; background: #fafafa; border-radius: 4px 4px 0 0; }
+  .q-title-input:focus { outline: none; border-bottom-color: #1a237e; background: #f5f7ff; }
+  .q-type-tag { flex: none; font-size: 11px; color: #666; background: #f0f0f0; border-radius: 12px; padding: 4px 10px; margin-top: 6px; white-space: nowrap; }
+  .q-opts-list { margin-top: 10px; }
+  .q-opt-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .q-opt-row > i { color: #999; font-size: 14px; width: 16px; text-align: center; flex: none; }
+  .q-opt-input { flex: 1; min-width: 0; border: 1px solid transparent; border-radius: 6px; padding: 8px; font-size: 13px; font-family: inherit; background: #f7f7f7; }
+  .q-opt-input:focus { outline: none; border-color: #1a237e; background: #fff; }
+  .q-opt-del { background: none; border: none; color: #bbb; cursor: pointer; font-size: 14px; padding: 6px 8px; flex: none; }
+  .q-opt-del:hover { color: #c62828; }
+  .q-add-opt-row { display: flex; gap: 14px; margin-top: 2px; padding-left: 24px; flex-wrap: wrap; }
+  .q-add-opt { background: none; border: none; color: #1565c0; cursor: pointer; font-size: 12px; font-weight: 600; font-family: inherit; padding: 6px 0; }
+  .q-text-preview { margin-top: 10px; color: #aaa; font-size: 13px; border-bottom: 1px dashed #ccc; padding: 6px 2px 8px; }
+  .q-rating-preview { margin-top: 10px; color: #f9a825; font-size: 20px; letter-spacing: 4px; }
+  .q-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #f0f0f0; flex-wrap: wrap; }
+  .q-actions { display: flex; gap: 2px; }
+  .q-act-btn { background: none; border: none; color: #777; cursor: pointer; font-size: 14px; padding: 8px 10px; border-radius: 6px; }
+  .q-act-btn:hover { background: #f0f0f0; color: #333; }
+  .q-act-btn:disabled { color: #ddd; cursor: default; background: none; }
+  .q-toggles { display: flex; gap: 14px; flex-wrap: wrap; }
+  .q-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #555; cursor: pointer; user-select: none; }
+  .q-toggle input { display: none; }
+  .q-tgl { width: 34px; height: 18px; background: #ccc; border-radius: 10px; position: relative; transition: background 0.15s; flex: none; display: inline-block; }
+  .q-tgl::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; background: #fff; border-radius: 50%; transition: left 0.15s; }
+  .q-toggle input:checked + .q-tgl { background: #1a237e; }
+  .q-toggle input:checked + .q-tgl::after { left: 18px; }
+  .btn-add-q { background: #f5f5f5; color: #555; border: 2px dashed #ccc; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; font-family: inherit; width: 100%; margin-top: 8px; }
+  .type-picker { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 8px; background: #fafafa; border: 1px solid #e0e0e0; border-radius: 12px; padding: 10px; }
+  .type-tile { display: flex; align-items: center; gap: 10px; background: #fff; border: 1px solid #e0e0e0; border-radius: 10px; padding: 12px; cursor: pointer; font-size: 13px; font-weight: 600; color: #444; font-family: inherit; }
+  .type-tile:hover { border-color: #1a237e; background: #f5f7ff; }
+  .type-tile i { font-size: 16px; color: #1565c0; width: 20px; text-align: center; flex: none; }
   .preset-area { margin-bottom: 10px; }
   .preset-label { font-size: 11px; color: #999; margin-bottom: 6px; }
   .preset-btn { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; padding: 5px 12px; border-radius: 20px; cursor: pointer; font-size: 12px; font-family: inherit; margin-right: 6px; margin-bottom: 4px; }
@@ -4136,8 +4196,14 @@ app.get('/admin/events', (c) => {
         <button class="preset-btn" onclick="applyPreset('checkout')"><i class="fas fa-clipboard-check"></i> チェックアウト基本3問</button>
         <button class="preset-btn" onclick="applyPreset('feedback')"><i class="fas fa-comment"></i> ご意見ご感想のみ</button>
       </div>
-      <div id="customQuestions"></div>
-      <button class="btn-add-q" onclick="addQuestion()"><i class="fas fa-plus"></i> 質問を追加</button>
+      <div id="customQuestions" style="margin-top:10px"></div>
+      <button class="btn-add-q" id="btnAddQ" onclick="toggleTypePicker()"><i class="fas fa-plus"></i> 新規追加</button>
+      <div class="type-picker" id="typePicker" style="display:none">
+        <button type="button" class="type-tile" onclick="pickType('radio')"><i class="far fa-dot-circle"></i> 選択式（1つ）</button>
+        <button type="button" class="type-tile" onclick="pickType('checkbox')"><i class="far fa-check-square"></i> 複数選択</button>
+        <button type="button" class="type-tile" onclick="pickType('text')"><i class="fas fa-font"></i> テキスト</button>
+        <button type="button" class="type-tile" onclick="pickType('rating')"><i class="far fa-star"></i> 評価（5段階）</button>
+      </div>
     </div>
     <div style="margin-top:16px"><button class="btn-create" onclick="submitCreateEvent()"><i class="fas fa-paper-plane"></i> 作成する</button></div>
   </div>
@@ -4162,37 +4228,88 @@ const token = localStorage.getItem('token');
 const user = JSON.parse(localStorage.getItem('user')||'null');
 if (!token||!user||user.role!=='admin') { window.location.href='/login'; throw new Error('redirect'); }
 
-let qCount = 0;
-function addQuestion(questionText, questionType, questionOpts) {
-  qCount++;
-  const div = document.getElementById('customQuestions');
-  const item = document.createElement('div');
-  item.className = 'custom-q-item';
-  item.id = 'q_'+qCount;
-  item.innerHTML = '<input class="q-text" type="text" placeholder="質問文"><select class="q-type"><option value="text">テキスト入力</option><option value="radio">選択式（1つ）</option><option value="checkbox">複数選択</option><option value="rating">5段階評価</option></select><input class="q-opts" type="text" placeholder="選択肢（|区切り）" style="display:none;min-width:120px"><button class="remove-q" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>';
-  const typeEl = item.querySelector('.q-type');
-  const optsEl = item.querySelector('.q-opts');
-  typeEl.addEventListener('change', function() {
-    optsEl.style.display = (this.value==='radio'||this.value==='checkbox') ? 'block' : 'none';
-  });
-  if (questionText) item.querySelector('.q-text').value = questionText;
-  if (questionType) { typeEl.value = questionType; optsEl.style.display = (questionType==='radio'||questionType==='checkbox') ? 'block' : 'none'; }
-  if (questionOpts) optsEl.value = questionOpts;
-  div.appendChild(item);
+// ===== Forms風 カード型質問ビルダー =====
+let qList = [];
+const qTypeNames = { text: 'テキスト', radio: '選択式（1つ）', checkbox: '複数選択', rating: '評価（5段階）' };
+const qTypeIcons = { text: 'fas fa-font', radio: 'far fa-dot-circle', checkbox: 'far fa-check-square', rating: 'far fa-star' };
+
+function escAttr(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function toggleTypePicker() {
+  const p = document.getElementById('typePicker');
+  p.style.display = (p.style.display === 'none') ? 'grid' : 'none';
 }
 
-function applyPreset(type) {
-  document.getElementById('customQuestions').innerHTML = '';
-  qCount = 0;
-  if (type === 'checkout') {
-    const vpOpts = '授業をつくる|授業をする・磨く|子どもを見る・評価する|仲間とつながる|研究・発信する';
-    addQuestion('今日刺激を受けた「成長の視点」はどれですか？（複数選択OK）', 'checkbox', vpOpts);
-    addQuestion('それを選んだ理由は？（一言でOK）', 'text', '');
-    addQuestion('明日以降、試してみたいことは？', 'text', '');
-    addQuestion('ご意見・ご感想（任意）', 'text', '');
-  } else if (type === 'feedback') {
-    addQuestion('ご意見・ご感想（任意）', 'text', '');
+function pickType(type) {
+  document.getElementById('typePicker').style.display = 'none';
+  qList.push({ text: '', type: type, opts: (type === 'radio' || type === 'checkbox') ? ['', ''] : [], required: false });
+  renderQuestions(qList.length - 1);
+}
+
+function renderQuestions(focusIdx, focusOpt) {
+  const div = document.getElementById('customQuestions');
+  let html = '';
+  qList.forEach((q, i) => {
+    const isChoice = (q.type === 'radio' || q.type === 'checkbox');
+    html += '<div class="q-card">';
+    html += '<div class="q-card-head"><span class="q-num">' + (i + 1) + '.</span>';
+    html += '<input class="q-title-input" id="qTitle_' + i + '" type="text" placeholder="質問文を入力" value="' + escAttr(q.text) + '" oninput="qList[' + i + '].text=this.value">';
+    html += '<span class="q-type-tag"><i class="' + qTypeIcons[q.type] + '"></i> ' + qTypeNames[q.type] + '</span></div>';
+    if (isChoice) {
+      html += '<div class="q-opts-list">';
+      q.opts.forEach((o, j) => {
+        html += '<div class="q-opt-row"><i class="' + (q.type === 'radio' ? 'far fa-circle' : 'far fa-square') + '"></i>';
+        html += '<input class="q-opt-input" id="qOpt_' + i + '_' + j + '" type="text" placeholder="オプション' + (j + 1) + '" value="' + escAttr(o) + '" oninput="qList[' + i + '].opts[' + j + ']=this.value.split(String.fromCharCode(124)).join(String.fromCharCode(65372))">';
+        html += '<button type="button" class="q-opt-del" onclick="removeOpt(' + i + ',' + j + ')" title="削除"><i class="fas fa-times"></i></button></div>';
+      });
+      html += '</div>';
+      html += '<div class="q-add-opt-row"><button type="button" class="q-add-opt" onclick="addOpt(' + i + ')"><i class="fas fa-plus"></i> オプションを追加</button>';
+      html += '<button type="button" class="q-add-opt" onclick="addOtherOpt(' + i + ')">「その他」の追加</button></div>';
+    } else if (q.type === 'rating') {
+      html += '<div class="q-rating-preview">☆☆☆☆☆</div>';
+    } else {
+      html += '<div class="q-text-preview">回答者が自由にテキストを入力できます</div>';
+    }
+    html += '<div class="q-card-foot"><div class="q-actions">';
+    html += '<button type="button" class="q-act-btn" onclick="moveQ(' + i + ',-1)" title="上へ移動"' + (i === 0 ? ' disabled' : '') + '><i class="fas fa-arrow-up"></i></button>';
+    html += '<button type="button" class="q-act-btn" onclick="moveQ(' + i + ',1)" title="下へ移動"' + (i === qList.length - 1 ? ' disabled' : '') + '><i class="fas fa-arrow-down"></i></button>';
+    html += '<button type="button" class="q-act-btn" onclick="dupQ(' + i + ')" title="複製"><i class="far fa-copy"></i></button>';
+    html += '<button type="button" class="q-act-btn" onclick="delQ(' + i + ')" title="削除" style="color:#c62828"><i class="far fa-trash-alt"></i></button>';
+    html += '</div><div class="q-toggles">';
+    if (isChoice) {
+      html += '<label class="q-toggle"><input type="checkbox"' + (q.type === 'checkbox' ? ' checked' : '') + ' onchange="setQMulti(' + i + ',this.checked)"><span class="q-tgl"></span>複数回答</label>';
+    }
+    html += '<label class="q-toggle"><input type="checkbox"' + (q.required ? ' checked' : '') + ' onchange="qList[' + i + '].required=this.checked"><span class="q-tgl"></span>必須</label>';
+    html += '</div></div></div>';
+  });
+  div.innerHTML = html;
+  if (typeof focusIdx === 'number') {
+    const el = (typeof focusOpt === 'number') ? document.getElementById('qOpt_' + focusIdx + '_' + focusOpt) : document.getElementById('qTitle_' + focusIdx);
+    if (el) el.focus();
   }
+}
+
+function setQMulti(i, multi) { qList[i].type = multi ? 'checkbox' : 'radio'; renderQuestions(); }
+function addOpt(i) { qList[i].opts.push(''); renderQuestions(i, qList[i].opts.length - 1); }
+function addOtherOpt(i) { if (qList[i].opts.indexOf('その他') < 0) qList[i].opts.push('その他'); renderQuestions(); }
+function removeOpt(i, j) { qList[i].opts.splice(j, 1); renderQuestions(); }
+function moveQ(i, d) { const t = i + d; if (t < 0 || t >= qList.length) return; const tmp = qList[i]; qList[i] = qList[t]; qList[t] = tmp; renderQuestions(); }
+function dupQ(i) { const q = qList[i]; qList.splice(i + 1, 0, { text: q.text, type: q.type, opts: q.opts.slice(), required: q.required }); renderQuestions(); }
+function delQ(i) { qList.splice(i, 1); renderQuestions(); }
+
+function applyPreset(type) {
+  if (qList.length > 0 && !confirm('現在の質問を置き換えてプリセットを挿入します。よろしいですか？')) return;
+  if (type === 'checkout') {
+    qList = [
+      { text: '今日刺激を受けた「成長の視点」はどれですか？（複数選択OK）', type: 'checkbox', opts: ['授業をつくる','授業をする・磨く','子どもを見る・評価する','仲間とつながる','研究・発信する'], required: false },
+      { text: 'それを選んだ理由は？（一言でOK）', type: 'text', opts: [], required: false },
+      { text: '明日以降、試してみたいことは？', type: 'text', opts: [], required: false },
+      { text: 'ご意見・ご感想（任意）', type: 'text', opts: [], required: false }
+    ];
+  } else if (type === 'feedback') {
+    qList = [ { text: 'ご意見・ご感想（任意）', type: 'text', opts: [], required: false } ];
+  }
+  renderQuestions();
 }
 
 
@@ -4202,17 +4319,20 @@ async function submitCreateEvent() {
   const description = document.getElementById('evDesc').value;
   if (!title||!event_date) { alert('タイトルと日付を入力してください'); return; }
   const custom_questions = [];
-  document.querySelectorAll('.custom-q-item').forEach(item => {
-    const text = item.querySelector('.q-text').value;
-    const type = item.querySelector('.q-type').value;
-    const opts = item.querySelector('.q-opts').value;
-    if (text) custom_questions.push({ question_text: text, question_type: type, options: opts });
-  });
+  for (const q of qList) {
+    const text = (q.text || '').trim();
+    if (!text) continue;
+    const opts = (q.opts || []).map(o => String(o).trim()).filter(o => o);
+    if ((q.type === 'radio' || q.type === 'checkbox') && opts.length === 0) {
+      alert('「' + text + '」に選択肢（オプション）を追加してください'); return;
+    }
+    custom_questions.push({ question_text: text, question_type: q.type, options: opts.join('|'), required: !!q.required });
+  }
   const res = await fetch('/api/admin/events', {
     method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
     body: JSON.stringify({ title, event_date, description, custom_questions })
   });
-  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; document.getElementById('customQuestions').innerHTML=''; loadEvents(); }
+  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; qList=[]; renderQuestions(); document.getElementById('typePicker').style.display='none'; loadEvents(); }
   else { const d = await res.json(); alert(d.error); }
 }
 
