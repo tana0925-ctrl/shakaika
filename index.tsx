@@ -329,6 +329,8 @@ CONNECTION:
 この形式・項目名・MEMBER_IDを変更しないでください。
 MEMBER_IDには、下の記録に書かれている値をそのまま使ってください。`
 
+const AI_PAGE_SIZE = 12
+
 function aiBatchCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   let s = ''
@@ -1051,17 +1053,32 @@ app.post('/api/admin/ai-support/export', authMiddleware, adminMiddleware, async 
   let body: any = {}
   try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
 
-  // user_id（1名）でも user_ids（複数）でも受ける
-  let ids: number[] = []
-  if (Array.isArray(body.user_ids)) {
-    for (const v of body.user_ids) { const n = parseInt(String(v), 10); if (n && ids.indexOf(n) === -1) ids.push(n) }
-  }
-  const single = parseInt(String(body.user_id || ''), 10)
-  if (!ids.length && single) ids = [single]
-  if (!ids.length) return c.json({ error: '会員が指定されていません' }, 400)
-  if (ids.length > 60) return c.json({ error: '一度に書き出せるのは60名までです。分けてコピーしてください' }, 400)
-
   const fy = getCurrentFiscalYear()
+
+  // user_id（1名）／ user_ids（複数）／ scope='pending'（伴走メモ未作成の会員から順に）
+  let ids: number[] = []
+  let pendingRemaining = -1
+  if (body.scope === 'pending') {
+    const lim = Math.min(Math.max(parseInt(String(body.limit || AI_PAGE_SIZE), 10) || AI_PAGE_SIZE, 1), 30)
+    const { results: pend } = await db.prepare(
+      `SELECT u.id FROM users u
+       LEFT JOIN support_notes sn ON sn.user_id = u.id AND sn.fiscal_year = ?
+       WHERE u.role = 'member' AND sn.id IS NULL
+       ORDER BY (u.training_group IS NULL OR TRIM(u.training_group) = ''), u.training_group, u.name`
+    ).bind(fy).all() as any
+    const all = (pend || []).map((r: any) => r.id)
+    pendingRemaining = all.length
+    ids = all.slice(0, lim)
+    if (!ids.length) return c.json({ error: '未作成の会員はいません。全員ぶんの伴走メモができています', remaining: 0 }, 400)
+  } else {
+    if (Array.isArray(body.user_ids)) {
+      for (const v of body.user_ids) { const n = parseInt(String(v), 10); if (n && ids.indexOf(n) === -1) ids.push(n) }
+    }
+    const single = parseInt(String(body.user_id || ''), 10)
+    if (!ids.length && single) ids = [single]
+    if (!ids.length) return c.json({ error: '会員が指定されていません' }, 400)
+    if (ids.length > 60) return c.json({ error: '一度に書き出せるのは60名までです。分けてコピーしてください' }, 400)
+  }
   const nameTokens = await aiLoadNameTokens(db)
 
   const blocks: string[] = []
@@ -1097,7 +1114,8 @@ app.post('/api/admin/ai-support/export', authMiddleware, adminMiddleware, async 
   if (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(prompt)) leaked.push('メールアドレス')
   if (leaked.length) return c.json({ error: '個人情報が残っている可能性があるため中止しました（' + leaked.slice(0, 3).join('・') + '）' }, 500)
 
-  const rawLabel = typeof body.label === 'string' ? body.label.trim().slice(0, 60) : ''
+  const rawLabel = typeof body.label === 'string' ? body.label.trim().slice(0, 60)
+    : (body.scope === 'pending' ? '未作成の会員' : '')
   const label = isMulti ? ((rawLabel || 'まとめて') + ' ' + blocks.length + '名') : names[0]
 
   const code = aiBatchCode()
@@ -1109,8 +1127,25 @@ app.post('/api/admin/ai-support/export', authMiddleware, adminMiddleware, async 
   return c.json({
     batch_code: code, prompt, label,
     count: blocks.length, chars: prompt.length,
-    masked: maskList, risks, thin_names: thinNames, thin: thinNames.length > 0
+    masked: maskList, risks, thin_names: thinNames, thin: thinNames.length > 0,
+    remaining: pendingRemaining >= 0 ? pendingRemaining : undefined,
+    remaining_after: pendingRemaining >= 0 ? Math.max(pendingRemaining - blocks.length, 0) : undefined
   })
+})
+
+// 伴走メモの作成状況（全員分の進み具合）
+app.get('/api/admin/ai-support/pending', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  await ensureSupportTables(db)
+  const fy = getCurrentFiscalYear()
+  const row = await db.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM users WHERE role='member') AS total,
+       (SELECT COUNT(*) FROM users u JOIN support_notes sn ON sn.user_id=u.id AND sn.fiscal_year=? WHERE u.role='member') AS done`
+  ).bind(fy).first() as any
+  const total = (row && row.total) || 0
+  const done = (row && row.done) || 0
+  return c.json({ total, done, remaining: Math.max(total - done, 0), page_size: AI_PAGE_SIZE })
 })
 
 // 貼り付け画面で選ぶための、最近のコピー履歴
@@ -4510,6 +4545,7 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
   <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
   <button type="button" id="bulkToggle" class="bulk-toggle" style="display:none"><i class="fas fa-expand"></i> すべて開く</button>
   <button type="button" id="printBtn" class="bulk-toggle" style="display:none;margin-left:8px"><i class="fas fa-print"></i> このグループを印刷</button>
+  <button type="button" id="aiAllBtn" class="ai-paste-btn no-print" style="background:#4a148c">\u2728 全員をまとめてコピー</button>
   <button type="button" id="aiPasteBtn" class="ai-paste-btn no-print"><i class="fas fa-wand-magic-sparkles"></i> AI分析結果を貼り付け</button>
   <div id="gList"><p style="color:#888;text-align:center;padding:40px">読み込み中...</p></div>
 </div>
@@ -4531,6 +4567,7 @@ async function load(){
     const d=await res.json();
     await loadNotes();
     render(d.groups,d.fiscal_year);
+    loadProgress();
   }catch(e){document.getElementById('gList').innerHTML='<p style="color:#c62828;text-align:center">読み込みに失敗しました</p>';}
 }
 function render(groups,fy){
@@ -4752,6 +4789,15 @@ async function aiCopyRequest(payload,btn,expected){
     var head=(n>1)
       ? esc(d.label)+'　／　'+n+'名分をまとめて書き出しました（約'+Math.round(d.chars/1000)+'千字）'
       : esc(d.label)+' さん　／　このまま外部AIに渡す内容です';
+    if(typeof d.remaining==='number'){
+      var doneAfter=(AI_PROGRESS.total||0)-(d.remaining_after||0);
+      head='未作成の会員 '+n+'名（約'+Math.round(d.chars/1000)+'千字）　／　これを保存すると '+doneAfter+' / '+(AI_PROGRESS.total||0)+' 名';
+      if(d.remaining_after>0){
+        warn='<div class="ai-ok">この分を貼り戻して保存したら、もう一度「全員をまとめてコピー」を押すと<b>次の'+Math.min(d.remaining_after,AI_PROGRESS.page_size||12)+'名</b>が出ます（残り'+d.remaining_after+'名）。</div>'+warn;
+      }else{
+        warn='<div class="ai-ok">これが<b>最後の分</b>です。保存すれば全員ぶんの伴走メモがそろいます。</div>'+warn;
+      }
+    }
     var html='<h3>✨ AI伴走用にコピー</h3>'
       +'<div class="sub">'+head+'（氏名・学校名は含まれません）</div>'
       +warn
@@ -4845,6 +4891,7 @@ async function aiSave(){
     if(!res.ok){st.style.color='#c62828';st.textContent=d.error||'保存に失敗しました';btn.disabled=false;return;}
     var ids=AI_PARSED.map(function(e){return e.user_id;});
     await loadNotes();
+    await loadProgress();
     ids.forEach(function(uid){
       var w=document.getElementById('noteWrap_'+uid);
       if(w)w.innerHTML=noteBoxHtml(uid);
@@ -4858,6 +4905,28 @@ async function loadNotes(){
     if(!res.ok)return;
     var d=await res.json();NOTES=d.notes||{};
   }catch(e){}
+}
+
+// 全員分の進み具合
+var AI_PROGRESS={total:0,done:0,remaining:0,page_size:12};
+async function loadProgress(){
+  try{
+    var res=await fetch('/api/admin/ai-support/pending',{headers:{'Authorization':'Bearer '+token}});
+    if(!res.ok)return;
+    AI_PROGRESS=await res.json();
+  }catch(e){}
+  var b=document.getElementById('aiAllBtn');
+  if(!b)return;
+  if(AI_PROGRESS.remaining>0){
+    b.disabled=false;
+    b.innerHTML='\u2728 全員をまとめてコピー（残り'+AI_PROGRESS.remaining+'名）';
+  }else{
+    b.disabled=true;
+    b.innerHTML='\u2728 全員ぶん作成済み（'+AI_PROGRESS.done+'名）';
+  }
+}
+async function aiCopyPending(btn){
+  await aiCopyRequest({scope:'pending',limit:AI_PROGRESS.page_size||12},btn,0);
 }
 document.addEventListener('change',function(e){
   if(e.target&&e.target.classList&&e.target.classList.contains('ai-pick'))aiUpdateSelCounts();
@@ -4876,6 +4945,7 @@ document.addEventListener('click',function(e){
   if(md&&e.target===md)aiClose();
 });
 document.getElementById('aiPasteBtn').addEventListener('click',aiOpenPaste);
+document.getElementById('aiAllBtn').addEventListener('click',function(){aiCopyPending(this);});
 load();
 </script></body></html>`)
 })
