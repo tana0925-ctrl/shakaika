@@ -51,6 +51,294 @@ function generateToken(): string {
   return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
+// ========== AI伴走支援（管理者専用） ==========
+let _aiTablesOk = false
+async function ensureSupportTables(db: any) {
+  if (_aiTablesOk) return
+  await db.prepare(`CREATE TABLE IF NOT EXISTS support_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    fiscal_year INTEGER NOT NULL,
+    important TEXT DEFAULT '',
+    interest TEXT DEFAULT '',
+    change_note TEXT DEFAULT '',
+    next_step TEXT DEFAULT '',
+    support TEXT DEFAULT '',
+    question TEXT DEFAULT '',
+    voice TEXT DEFAULT '',
+    connection TEXT DEFAULT '',
+    source TEXT DEFAULT 'ai',
+    updated_by INTEGER,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, fiscal_year)
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS ai_export_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_code TEXT UNIQUE NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'member',
+    label TEXT DEFAULT '',
+    mapping TEXT NOT NULL DEFAULT '{}',
+    created_by INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_support_notes_user ON support_notes(user_id, fiscal_year)').run()
+  _aiTablesOk = true
+}
+
+const AI_VP_LABELS: Record<string, string> = {"lesson_plan": "授業をつくる", "lesson_practice": "授業をする", "student_eval": "子どもを見る", "connection": "つながる", "research": "深める", "j_lesson_plan": "授業をつくる", "j_material": "資料", "j_dialogue": "対話", "j_inquiry": "探究", "j_student_eval": "生徒を見る", "j_connection": "つながる", "j_research": "深める", "a_school_support": "会の活動を支える", "a_school_mgmt": "会員同士をつなぐ", "a_member_support": "会員の成長を支える", "a_leader_dev": "次世代リーダー", "a_org_mgmt": "運営に貢献", "a_outreach": "外とつなぐ"}
+
+const AI_STEP_KEYWORDS: Record<string, string[]> = {"lesson_plan": ["基本型をまねる", "足でかせいでアレンジ", "子どもの「なぜ？」をうむ", "単元を自分でつくる"], "lesson_practice": ["楽しい授業をする", "子どもが動く活動へ", "見方・考え方を働かせる", "対話で成り立つ授業を"], "student_eval": ["まずザックリ観察する", "「わかった」を言葉にさせる", "点数にならない良さを見つける", "子どもの姿で授業を問い直す"], "connection": ["場に参加する", "横のつながりを作る", "縦のつながりを作る", "仲間を支える側に回る"], "research": ["参加してみる", "インプット・刺激を受ける", "実践をアウトプット", "理論を磨き合う"], "j_lesson_plan": ["基本型をまねる", "生徒の「なぜ？」をうむ", "足でかせいでアレンジ", "単元を自分でつくる"], "j_material": ["基本資料を読み解く", "複数資料を比較・関連付ける", "多様な資料を足で集める", "生徒が主体的に資料を読む"], "j_dialogue": ["つぶやきを拾って広げる", "自分の考えを言葉にする場を作る", "根拠を持って意見を出し合う", "合意形成に向かう対話を支援する"], "j_inquiry": ["調べる・まとめる時間を確保する", "自分事として調べる学習を仕掛ける", "「大きな問い」で探究サイクルを作る", "高度な探究をデザインする"], "j_student_eval": ["まずザックリ観察する", "「わかった」を言葉にさせる", "点数にならない良さを見つける", "生徒の姿で授業を問い直す"], "j_connection": ["場に参加する", "横のつながりを作る", "縦のつながりを作る", "仲間を支える側に回る"], "j_research": ["参加を楽しむ", "インプット・刺激を受ける", "実践をアウトプット", "理論を磨き合う"], "a_school_support": ["例会に顔を出す", "例会の学びを深める", "研究会の内容充実に関わる", "会の学びの文化を守る"], "a_school_mgmt": ["声をかける", "世代をつなぐ", "学び合いの場をつくる", "会の一体感を育てる"], "a_member_support": ["やってみたことを聞いて感想を伝える", "実践を言葉にする手助けをする", "論文・記録の方向性を一緒に考える", "書き上げるまで伴走し、書く文化を広げる"], "a_leader_dev": ["若手の話を聞く", "役割を任せてみる", "一緒に企画・運営する", "任せて見守る"], "a_org_mgmt": ["例会に参加して助言する", "会の方向性を一緒に考える", "大会・イベントの運営を支える", "会の未来を描く"], "a_outreach": ["他の研究会の情報を持ち帰る", "外部講師や連携先を紹介する", "自分の経験を語る", "社会科教育の価値を広める"]}
+
+// --- 匿名化・マスキング ---
+function aiEscapeRe(s: string): string { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+
+// 「先生」「さん」の前に来ても人名ではない語
+const AI_ROLE_WORDS = ['校長', '教頭', '担任', '主幹', '指導', '専科', '前任', '後任', '他校', '本校', '大学', '講師', '先輩', '後輩', '教員', '同僚', '相手']
+const AI_NONNAME_BEFORE_SAN = ['生徒', '児童', '子ども', '子供', 'みな', '皆', '大学', '先輩', '後輩', '教員', '先生', '保護者', 'お子']
+
+async function aiLoadNameTokens(db: any): Promise<string[]> {
+  const { results } = await db.prepare('SELECT name FROM users').all() as any
+  const tokens: string[] = []
+  for (const r of (results || [])) {
+    const raw = String(r.name || '').trim()
+    if (!raw) continue
+    const compact = raw.replace(/[\s\u3000]+/g, '')
+    if (compact.length >= 2) tokens.push(compact)
+    if (raw !== compact && raw.length >= 2) tokens.push(raw)
+    for (const part of raw.split(/[\s\u3000]+/)) {
+      if (part && part.length >= 2) tokens.push(part)
+    }
+  }
+  // 長い順に置換（短い語が先に当たって取りこぼすのを防ぐ）
+  return Array.from(new Set(tokens)).sort((a, b) => b.length - a.length)
+}
+
+type AiMaskResult = { text: string; hits: Record<string, number> }
+
+function aiMask(text: string, nameTokens: string[]): AiMaskResult {
+  let out = String(text == null ? '' : text)
+  const hits: Record<string, number> = {}
+  const bump = (k: string) => { hits[k] = (hits[k] || 0) + 1 }
+  if (!out.trim()) return { text: out, hits }
+
+  // 1) 登録会員の氏名
+  for (const t of nameTokens) {
+    if (!t || out.indexOf(t) === -1) continue
+    const re = new RegExp(aiEscapeRe(t), 'g')
+    out = out.replace(re, () => { bump('氏名'); return '［会員名］' })
+  }
+  // 2) メールアドレス
+  out = out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, () => { bump('メール'); return '［メール］' })
+  // 3) 電話番号
+  out = out.replace(/0\d{1,4}[-(]?\d{2,4}[-)]?\d{3,4}/g, () => { bump('電話'); return '［電話］' })
+  // 4) 学校名（固有名詞＋小学校/中学校）
+  out = out.replace(/[\u4e00-\u9fffヶヵ\u30a1-\u30f6ー]{2,6}(小学校|中学校|小学部|中学部)/g, () => { bump('学校名'); return '［学校名］' })
+  // 5) ○○先生（役職語は除く）
+  out = out.replace(/([\u4e00-\u9fff\u30a1-\u30f6ー]{1,6})(先生)/g, (m: string, pre: string) => {
+    if (AI_ROLE_WORDS.some((w) => pre.endsWith(w))) return m
+    bump('氏名（先生）'); return '［先生］'
+  })
+  // 6) ○○さん / ○○くん（一般名詞は除く）
+  out = out.replace(/([\u4e00-\u9fff\u30a1-\u30f6ー]{2,4})(さん|くん|君|ちゃん)/g, (m: string, pre: string) => {
+    if (AI_NONNAME_BEFORE_SAN.some((w) => pre.endsWith(w))) return m
+    bump('氏名（敬称つき）'); return '［個人名］'
+  })
+  return { text: out, hits }
+}
+
+// 置換はしないが、事務局に確認してほしいもの
+function aiDetectRisk(text: string): string[] {
+  const w: string[] = []
+  const t = String(text || '')
+  if (/[\u4e00-\u9fffヶヵ\u30a1-\u30f6ー]{2,6}(小|中)(?![学\u4e00-\u9fff])/.test(t)) w.push('学校名の省略形（○○小・○○中）かもしれない語')
+  if (t.length > 100) w.push('100字を超える長い記述')
+  return w
+}
+
+function aiFmtExp(v: any): string {
+  if (v === null || v === undefined || v === '') return '未記入'
+  return String(v) + '年目'
+}
+function aiSchoolTypeLabel(t: string): string {
+  if (t === 'elementary') return '小学校'
+  if (t === 'junior_high') return '中学校'
+  if (t === 'admin_staff') return '主幹・管理職'
+  return '未設定'
+}
+
+// --- 会員1名分の匿名データを組み立てる ---
+async function aiBuildMemberBlock(db: any, userId: number, fy: number, anonId: string, nameTokens: string[]) {
+  const u = await db.prepare(
+    "SELECT id, name, school_type, experience_years, grade, position FROM users WHERE id = ? AND role = 'member'"
+  ).bind(userId).first() as any
+  if (!u) return null
+
+  const note = await db.prepare('SELECT goal, reflection FROM annual_notes WHERE user_id = ? AND fiscal_year = ?').bind(userId, fy).first() as any
+  const { results: sels } = await db.prepare('SELECT viewpoint, step, memo FROM selections WHERE user_id = ?').bind(userId).all() as any
+  const { results: evs } = await db.prepare(`
+    SELECT e.id as event_id, e.title, e.event_date, sa.comment
+    FROM attendances a JOIN events e ON e.id = a.event_id
+    LEFT JOIN survey_answers sa ON sa.event_id = e.id AND sa.user_id = a.user_id
+    WHERE a.user_id = ? ORDER BY e.event_date ASC`).bind(userId).all() as any
+  const { results: cas } = await db.prepare(`
+    SELECT ca.event_id, ca.answer_text, q.question_text, q.sort_order
+    FROM custom_answers ca JOIN survey_questions q ON q.id = ca.question_id
+    WHERE ca.user_id = ? AND TRIM(ca.answer_text) <> '' ORDER BY q.sort_order`).bind(userId).all() as any
+
+  const hits: Record<string, number> = {}
+  const risks: string[] = []
+  const mask = (t: string) => {
+    const r = aiMask(t, nameTokens)
+    for (const k of Object.keys(r.hits)) hits[k] = (hits[k] || 0) + r.hits[k]
+    for (const w of aiDetectRisk(t)) if (risks.indexOf(w) === -1) risks.push(w)
+    return r.text
+  }
+
+  const L: string[] = []
+  L.push('MEMBER_ID: ' + anonId)
+  L.push('校種: ' + aiSchoolTypeLabel(u.school_type || ''))
+  L.push('経験年数: ' + aiFmtExp(u.experience_years))
+  L.push('担当学年: ' + (u.grade ? String(u.grade) : '未記入'))
+  L.push('役職: ' + (u.position ? String(u.position) : '記載なし'))
+  L.push('')
+  L.push('【' + fy + '年度の目標（なりたい自分）】')
+  L.push(note && String(note.goal || '').trim() ? mask(String(note.goal)) : '（未記入）')
+  if (note && String(note.reflection || '').trim()) {
+    L.push('')
+    L.push('【' + fy + '年度の振り返り】')
+    L.push(mask(String(note.reflection)))
+  }
+
+  L.push('')
+  L.push('【成長の視点と現在地】')
+  if (!sels || !sels.length) {
+    L.push('（まだ選択されていません）')
+  } else {
+    for (const s of sels) {
+      const label = AI_VP_LABELS[s.viewpoint] || s.viewpoint
+      const kws = AI_STEP_KEYWORDS[s.viewpoint]
+      const kw = (kws && kws[(s.step || 1) - 1]) ? kws[(s.step || 1) - 1] : ''
+      L.push('・' + label + '：' + (kw ? '「' + kw + '」に取り組んでいる' : '選択あり'))
+      if (String(s.memo || '').trim()) L.push('　　メモ：' + mask(String(s.memo)))
+    }
+  }
+
+  const caByEvent: Record<number, any[]> = {}
+  for (const ca of (cas || [])) {
+    if (!caByEvent[ca.event_id]) caByEvent[ca.event_id] = []
+    caByEvent[ca.event_id].push(ca)
+  }
+  L.push('')
+  L.push('【参加した研修と振り返り（古い順）】')
+  if (!evs || !evs.length) {
+    L.push('（参加記録なし）')
+  } else {
+    for (const e of evs) {
+      L.push('■ ' + mask(String(e.title || '')) + '（' + String(e.event_date || '') + '）')
+      const list = caByEvent[e.event_id] || []
+      if (String(e.comment || '').trim()) L.push('　・感想：' + mask(String(e.comment)))
+      for (const ca of list) {
+        L.push('　・' + String(ca.question_text || '') + '：' + mask(String(ca.answer_text || '')))
+      }
+      if (!list.length && !String(e.comment || '').trim()) L.push('　（振り返りの記入なし）')
+    }
+  }
+
+  const attendCount = (evs || []).length
+  const answered = (cas || []).length
+  L.push('')
+  L.push('【記録の量】')
+  L.push('研修の参加：' + attendCount + '回 ／ 振り返りの記入：' + answered + '項目 ／ 成長の視点の選択：' + ((sels || []).length) + '件')
+  if (attendCount <= 1) {
+    L.push('※参加が1回以下のため、時間の経過による変化を読み取る材料はありません。③は「判断材料が不足」としてください。')
+  }
+
+  const thin = attendCount === 0 && (!note || !String(note.goal || '').trim()) && (!sels || !sels.length)
+  return { name: u.name, text: L.join('\n'), hits, risks, thin, attendCount }
+}
+
+const AI_INSTRUCTION = `あなたは社会科同好会の事務局が、
+会員の成長に伴走するための「伴走支援AI」です。
+
+会員を評価することが目的ではありません。
+
+本人の
+「なりたい自分」
+「現在地」
+「これまでの研修での学び」
+「これからやってみたいこと」
+をもとに、
+事務局が本人との対話や、
+次の学びの機会を考えるための材料を整理してください。
+
+成長の視点の段階について、その高低を能力の高低として扱わないでください。
+段階を上げること自体を目的にしないでください。
+本人の記録にないことを決めつけないでください。
+
+以下を整理してください。
+
+① 今、この人が大切にしていそうなこと
+② 最近の学び・関心
+③ 過去の記録と比較して見られる変化
+※変化が読み取れない場合は無理に作らない
+④ 次の一歩として考えられること
+2〜3案
+⑤ 事務局ができそうな伴走
+例：
+・話を聞く
+・関連する研修を紹介する
+・実践について聞く
+・同じ関心をもつ人につなぐ
+・指導者層につなぐ
+・発表や模擬授業への挑戦を提案する
+・今は見守る
+など
+⑥ 次に本人へ聞いてみたい問い
+2〜3個
+⑦ 次に会ったときの自然な声かけ例
+1〜2個
+⑧ つながると学びが広がりそうな
+「人のタイプ」や「実践テーマ」
+
+注意：
+・会員を評価しない
+・順位付けしない
+・段階の昇格を目的にしない
+・弱点や不足を断定しない
+・本人の記録から読み取れないことは推測しすぎない
+・事務局が本人と対話するための材料として提案する
+・簡潔にまとめる
+
+最後に、サイトへ貼り戻すため、
+必ず以下の機械的に解析しやすい形式でも出力してください。
+
+===AI_BANSOU_START===
+MEMBER_ID: 会員A
+IMPORTANT:
+INTEREST:
+CHANGE:
+NEXT_STEP:
+SUPPORT:
+QUESTION:
+VOICE:
+CONNECTION:
+===AI_BANSOU_END===
+
+この形式・項目名・MEMBER_IDを変更しないでください。
+MEMBER_IDには、下の記録に書かれている値をそのまま使ってください。`
+
+function aiBatchCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let s = ''
+  const arr = new Uint8Array(4)
+  crypto.getRandomValues(arr)
+  for (let i = 0; i < 4; i++) s += chars[arr[i] % chars.length]
+  return s
+}
+
+
 // Token store using D1 for production persistence
 async function setToken(db: D1Database, token: string, userId: number) {
   const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
@@ -736,6 +1024,180 @@ app.get('/api/admin/group-summary', authMiddleware, adminMiddleware, async (c) =
     groups[g].push({ id: m.id, name: m.name, school: m.school || '', school_type: m.school_type || '', goal: m.goal || '', reflection: m.reflection || '', selections, events: attMap[m.id] || [] })
   }
   return c.json({ groups, fiscal_year: fy })
+})
+
+// ========== AI伴走支援 API（すべて管理者専用） ==========
+
+// 匿名プロンプトを生成し、対応表をサーバー側に保存する
+app.post('/api/admin/ai-support/export', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  const me = c.get('user')
+  await ensureSupportTables(db)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const userId = parseInt(String(body.user_id || ''), 10)
+  if (!userId) return c.json({ error: '会員が指定されていません' }, 400)
+  const fy = getCurrentFiscalYear()
+
+  const nameTokens = await aiLoadNameTokens(db)
+  const block = await aiBuildMemberBlock(db, userId, fy, '会員A', nameTokens)
+  if (!block) return c.json({ error: '会員が見つかりません' }, 404)
+
+  const prompt = AI_INSTRUCTION + '\n\n===== 対象の会員の記録 =====\n' + block.text + '\n===== 記録ここまで ====='
+
+  // 念のための最終検査：実名・メールが混入していないか
+  const leaked: string[] = []
+  for (const t of nameTokens) { if (t.length >= 2 && prompt.indexOf(t) !== -1) leaked.push(t) }
+  if (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(prompt)) leaked.push('メールアドレス')
+  if (leaked.length) return c.json({ error: '個人情報が残っている可能性があるため中止しました（' + leaked.slice(0, 3).join('・') + '）' }, 500)
+
+  const code = aiBatchCode()
+  const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  const mapping: Record<string, number> = { '会員A': userId }
+  await db.prepare("INSERT INTO ai_export_batches (batch_code, scope, label, mapping, created_by, expires_at) VALUES (?,?,?,?,?,?)")
+    .bind(code, 'member', block.name, JSON.stringify(mapping), me.id, expires).run()
+
+  const maskList = Object.keys(block.hits).map((k) => ({ label: k, count: block.hits[k] }))
+  return c.json({
+    batch_code: code, prompt, label: block.name,
+    masked: maskList, risks: block.risks, thin: block.thin, attend_count: block.attendCount
+  })
+})
+
+// 貼り付け画面で選ぶための、最近のコピー履歴
+app.get('/api/admin/ai-support/batches', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  await ensureSupportTables(db)
+  await db.prepare("DELETE FROM ai_export_batches WHERE expires_at < datetime('now')").run()
+  const { results } = await db.prepare(
+    "SELECT batch_code, scope, label, created_at, (mapping = '{}') as used FROM ai_export_batches ORDER BY id DESC LIMIT 20"
+  ).all() as any
+  return c.json({ batches: results || [] })
+})
+
+// AIの回答を解析して、匿名IDを実会員に戻す（★保存はしない）
+app.post('/api/admin/ai-support/parse', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  await ensureSupportTables(db)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const code = typeof body.batch_code === 'string' ? body.batch_code.trim().toUpperCase() : ''
+  const raw = typeof body.text === 'string' ? body.text : ''
+  if (!code) return c.json({ error: 'どのコピーに対する結果かを選んでください' }, 400)
+  if (!raw.trim()) return c.json({ error: 'AIの回答を貼り付けてください' }, 400)
+
+  const batch = await db.prepare('SELECT * FROM ai_export_batches WHERE batch_code = ?').bind(code).first() as any
+  if (!batch) return c.json({ error: 'コピー履歴が見つかりません（期限切れの可能性があります）' }, 404)
+  let mapping: Record<string, number> = {}
+  try { mapping = JSON.parse(batch.mapping || '{}') } catch (e) { mapping = {} }
+  if (!Object.keys(mapping).length) return c.json({ error: 'このコピーは既に取り込み済みです。もう一度コピーからやり直してください' }, 400)
+
+  // ブロックを抽出（複数可）
+  const blocks: string[] = []
+  const re = /===\s*AI_BANSOU_START\s*===([\s\S]*?)===\s*AI_BANSOU_END\s*===/g
+  let mm: any
+  while ((mm = re.exec(raw)) !== null) blocks.push(mm[1])
+  if (!blocks.length) {
+    return c.json({ error: '指定の形式が見つかりませんでした。AIの回答の最後にある ===AI_BANSOU_START=== から ===AI_BANSOU_END=== までを含めて貼り付けてください' }, 400)
+  }
+
+  const KEYS: Record<string, string> = {
+    MEMBER_ID: 'member_id', IMPORTANT: 'important', INTEREST: 'interest', CHANGE: 'change_note',
+    NEXT_STEP: 'next_step', SUPPORT: 'support', QUESTION: 'question', VOICE: 'voice', CONNECTION: 'connection'
+  }
+  const entries: any[] = []
+  const unmatched: string[] = []
+  const leftovers: string[] = []
+
+  for (const b of blocks) {
+    const lines = b.split(/\r?\n/)
+    const cur: any = {}
+    let key = ''
+    for (const lineRaw of lines) {
+      const line = lineRaw.replace(/\*\*/g, '').replace(/^\s*[-・*]\s*/, '')
+      const m2 = line.match(/^\s*([A-Z_]+)\s*[:：]\s*([\s\S]*)$/)
+      if (m2 && KEYS[m2[1]]) {
+        key = KEYS[m2[1]]
+        cur[key] = String(m2[2] || '').trim()
+      } else if (key) {
+        const t = lineRaw.trim()
+        if (t) cur[key] = (cur[key] ? cur[key] + '\n' : '') + t
+      } else if (lineRaw.trim()) {
+        leftovers.push(lineRaw.trim())
+      }
+    }
+    const anon = String(cur.member_id || '').trim()
+    const uid = mapping[anon]
+    if (!uid) { if (anon) unmatched.push(anon); continue }
+    const u = await db.prepare('SELECT id, name, school FROM users WHERE id = ?').bind(uid).first() as any
+    if (!u) { unmatched.push(anon); continue }
+    const existing = await db.prepare('SELECT * FROM support_notes WHERE user_id = ? AND fiscal_year = ?')
+      .bind(uid, getCurrentFiscalYear()).first() as any
+    entries.push({
+      user_id: uid, anon_id: anon, name: u.name,
+      important: cur.important || '', interest: cur.interest || '', change_note: cur.change_note || '',
+      next_step: cur.next_step || '', support: cur.support || '', question: cur.question || '',
+      voice: cur.voice || '', connection: cur.connection || '',
+      existing: existing ? {
+        important: existing.important || '', interest: existing.interest || '', change_note: existing.change_note || '',
+        next_step: existing.next_step || '', support: existing.support || '', question: existing.question || '',
+        voice: existing.voice || '', connection: existing.connection || '', updated_at: existing.updated_at || ''
+      } : null
+    })
+  }
+  if (!entries.length) {
+    return c.json({ error: 'MEMBER_ID を、このコピーの内容と対応づけられませんでした。選んだコピーが正しいかご確認ください', unmatched }, 400)
+  }
+  return c.json({ entries, unmatched, leftovers: leftovers.slice(0, 20), batch_code: code })
+})
+
+// 事務局が確認・編集した内容だけを保存する
+app.post('/api/admin/ai-support/notes', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  const me = c.get('user')
+  await ensureSupportTables(db)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const notes = Array.isArray(body.notes) ? body.notes : []
+  if (!notes.length) return c.json({ error: '保存する内容がありません' }, 400)
+  const fy = getCurrentFiscalYear()
+  const cut = (v: any) => String(v == null ? '' : v).slice(0, 2000)
+  let saved = 0
+  for (const n of notes) {
+    const uid = parseInt(String(n.user_id || ''), 10)
+    if (!uid) continue
+    const ok = await db.prepare("SELECT id FROM users WHERE id = ? AND role = 'member'").bind(uid).first()
+    if (!ok) continue
+    await db.prepare(`INSERT INTO support_notes
+      (user_id, fiscal_year, important, interest, change_note, next_step, support, question, voice, connection, source, updated_by, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+      ON CONFLICT(user_id, fiscal_year) DO UPDATE SET
+        important=excluded.important, interest=excluded.interest, change_note=excluded.change_note,
+        next_step=excluded.next_step, support=excluded.support, question=excluded.question,
+        voice=excluded.voice, connection=excluded.connection, source=excluded.source,
+        updated_by=excluded.updated_by, updated_at=datetime('now')`)
+      .bind(uid, fy, cut(n.important), cut(n.interest), cut(n.change_note), cut(n.next_step),
+             cut(n.support), cut(n.question), cut(n.voice), cut(n.connection),
+             (n.source === 'manual' ? 'manual' : 'ai'), me.id).run()
+    saved++
+  }
+  // 取り込みが済んだバッチの対応表は消す（不要な保持をしない）
+  const code = typeof body.batch_code === 'string' ? body.batch_code.trim().toUpperCase() : ''
+  if (code) await db.prepare("UPDATE ai_export_batches SET mapping = '{}' WHERE batch_code = ?").bind(code).run()
+  return c.json({ success: true, saved })
+})
+
+// 伴走メモの取得（グループ画面の表示用）
+app.get('/api/admin/ai-support/notes', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  await ensureSupportTables(db)
+  const fy = getCurrentFiscalYear()
+  const { results } = await db.prepare(`SELECT sn.*, u.name as updater_name
+    FROM support_notes sn LEFT JOIN users u ON u.id = sn.updated_by
+    WHERE sn.fiscal_year = ?`).bind(fy).all() as any
+  const map: Record<number, any> = {}
+  for (const r of (results || [])) map[r.user_id] = r
+  return c.json({ notes: map, fiscal_year: fy })
 })
 
 app.get('/api/admin/export', authMiddleware, adminMiddleware, async (c) => {
@@ -3924,8 +4386,48 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .unset-hdr{background:#9e9e9e;color:#fff;padding:10px 20px;font-size:15px;font-weight:700}
 .unset-list{padding:12px 20px;display:flex;flex-wrap:wrap;gap:8px}
 .unset-item{font-size:12px;background:#f5f5f5;border-radius:6px;padding:4px 10px;color:#555}
+.sub-hdr{background:#eceff1;color:#37474f;padding:8px 20px;font-size:13px;font-weight:700;border-top:1px solid #e0e0e0}
+.ai-copy-btn{margin-left:auto;background:#6a1b9a;color:#fff;border:none;border-radius:8px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap}
+.ai-copy-btn:hover{background:#4a148c}
+.ai-copy-btn:disabled{opacity:.5}
+.ai-paste-btn{background:#6a1b9a;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:16px;margin-left:8px}
+.ai-paste-btn:hover{background:#4a148c}
+.note-wrap{margin-top:6px}
+.note-toggle{background:#f3e5f5;border:1px solid #ce93d8;color:#6a1b9a;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:6px}
+.note-toggle:hover{background:#ead4f0}
+.note-body{display:none;margin-top:6px;background:#faf5fc;border-left:3px solid #ce93d8;border-radius:0 8px 8px 0;padding:8px 12px}
+.note-body.show{display:block}
+.note-item{font-size:12px;color:#444;margin-bottom:6px;line-height:1.6}
+.note-item b{color:#6a1b9a;display:block;font-size:11px;margin-bottom:1px}
+.note-meta{font-size:11px;color:#999;margin-top:6px;border-top:1px dashed #ddd;padding-top:5px}
+.ai-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:400;overflow-y:auto;padding:16px}
+.ai-modal.show{display:block}
+.ai-box{background:#fff;border-radius:14px;width:100%;max-width:700px;margin:0 auto;padding:18px}
+.ai-box h3{margin:0 0 4px;font-size:17px;color:#4a148c;font-family:'Zen Maru Gothic',sans-serif}
+.ai-box .sub{font-size:12px;color:#888;margin-bottom:14px}
+.ai-warn{background:#fff8e1;border:1px solid #ffca28;border-radius:10px;padding:10px 12px;font-size:12px;color:#6d4c00;line-height:1.7;margin-bottom:12px}
+.ai-warn b{color:#e65100}
+.ai-ok{background:#e8f5e9;border:1px solid #a5d6a7;border-radius:10px;padding:10px 12px;font-size:12px;color:#2e7d32;margin-bottom:12px}
+.ai-pre{background:#fafafa;border:1px solid #e0e0e0;border-radius:10px;padding:10px;font-size:11.5px;white-space:pre-wrap;max-height:260px;overflow-y:auto;line-height:1.65;color:#333;font-family:inherit}
+.ai-ta{width:100%;min-height:150px;padding:10px;border:2px solid #ce93d8;border-radius:10px;font-size:13px;font-family:inherit;line-height:1.6;resize:vertical;box-sizing:border-box}
+.ai-ta:focus{outline:none;border-color:#6a1b9a}
+.ai-sel{width:100%;padding:9px 10px;border:2px solid #ce93d8;border-radius:10px;font-size:13px;font-family:inherit;background:#fff;margin-bottom:12px;box-sizing:border-box}
+.ai-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.ai-primary{flex:1;min-width:140px;background:#6a1b9a;color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+.ai-primary:hover{background:#4a148c}
+.ai-primary:disabled{opacity:.5}
+.ai-cancel{background:#eee;color:#555;border:none;border-radius:10px;padding:12px 20px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+.ai-field{margin-bottom:10px}
+.ai-field label{display:block;font-size:12px;font-weight:700;color:#6a1b9a;margin-bottom:3px}
+.ai-field textarea{width:100%;padding:8px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:inherit;line-height:1.6;resize:vertical;min-height:44px;box-sizing:border-box}
+.ai-field textarea:focus{outline:none;border-color:#6a1b9a}
+.ai-entry{border:2px solid #e1bee7;border-radius:12px;padding:12px;margin-bottom:14px}
+.ai-entry h4{margin:0 0 10px;font-size:15px;color:#333}
+.ai-status{font-size:12px;margin-top:10px;line-height:1.6}
+@media(max-width:600px){.ai-modal{padding:0}.ai-box{border-radius:0;min-height:100vh}.ai-copy-btn{margin-left:0}}
 @media print{
-  .top-bar,.group-tabs,#bulkToggle,#printBtn,.no-print{display:none!important}
+  .top-bar,.group-tabs,#bulkToggle,#printBtn,.no-print,.ai-copy-btn,.ai-paste-btn,.ai-modal{display:none!important}
+  .note-body{display:block!important}
   .group-panel{display:none!important}
   .group-panel.active{display:block!important}
   .group-card{box-shadow:none;border:1px solid #ccc}
@@ -3951,11 +4453,14 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
   <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
   <button type="button" id="bulkToggle" class="bulk-toggle" style="display:none"><i class="fas fa-expand"></i> すべて開く</button>
   <button type="button" id="printBtn" class="bulk-toggle" style="display:none;margin-left:8px"><i class="fas fa-print"></i> このグループを印刷</button>
+  <button type="button" id="aiPasteBtn" class="ai-paste-btn no-print"><i class="fas fa-wand-magic-sparkles"></i> AI分析結果を貼り付け</button>
   <div id="gList"><p style="color:#888;text-align:center;padding:40px">読み込み中...</p></div>
 </div>
+<div class="ai-modal no-print" id="aiModal"><div class="ai-box" id="aiBox"></div></div>
 <script>
 const token = localStorage.getItem('token');
-if (!token) window.location.href = '/login';
+const user = JSON.parse(localStorage.getItem('user')||'null');
+if (!token || !user || user.role !== 'admin') { window.location.href = '/login'; throw new Error('redirect'); }
 const VP = {lesson_plan:'授業をつくる',lesson_practice:'授業をする',student_eval:'子どもを見る',connection:'つながる',research:'深める',j_lesson_plan:'授業をつくる',j_material:'資料',j_dialogue:'対話',j_inquiry:'探究',j_student_eval:'生徒を見る',j_connection:'つながる',j_research:'深める',a_school_support:'授業支援',a_school_mgmt:'学校運営',a_member_support:'会員支援',a_leader_dev:'人材育成',a_org_mgmt:'組織運営',a_outreach:'発信'};
 const STEP_INFO={"lesson_plan":[{"k":"基本型をまねる","d":"教科書や既存の資料を使って、基本的な授業を構成してみたい。まずはここから。"},{"k":"足でかせいでアレンジ","d":"先輩の基本型を参考にしながら、名古屋の身近な話題や地域を「足でかせいで」集めた教材で、目の前の子どもに合わせてアレンジしてみたい。"},{"k":"子どもの「なぜ？」をうむ","d":"子どもが「なぜ？」と思わず問いたくなる教材を仕掛け、社会的な見方・考え方を働かせる授業を構想してみたい。"},{"k":"単元を自分でつくる","d":"自分で足を使って教材や場所とつながりながら、オリジナルの単元を構想・提案してみたい。"}],"lesson_practice":[{"k":"楽しい授業をする","d":"まずは子どもが楽しめる授業をしてみたい。笑顔や「もっとやりたい！」が生まれたらOK！"},{"k":"子どもが動く活動へ","d":"調べ学習やグループワークなど、子どもが自ら動く「活動」を取り入れてみたい。"},{"k":"見方・考え方を働かせる","d":"単なる活動で終わらせず、社会的な見方・考え方を働かせる授業を意識してみたい。"},{"k":"対話で成り立つ授業を","d":"教師からの一方通行でなく、子ども同士の対話で成り立つ授業を展開してみたい。"}],"student_eval":[{"k":"まずザックリ観察する","d":"最初はザックリでOK！授業中の子どもの姿や声に目を向けてみたい。「楽しそう？」「困っている？」を感じ取るところから始めたい。"},{"k":"「わかった」を言葉にさせる","d":"ノートや発言から「この子はここまでわかっているかな？」とのぞいてみたい。「わかった」を自分の言葉で表現できる場を、気負わずに作ってみたい。"},{"k":"点数にならない良さを見つける","d":"正解・不正解だけでなく、粘り強く考えを表現しようとしている姿など、点数になりにくい良さをそっと認めてみたい。"},{"k":"子どもの姿で授業を問い直す","d":"「この子たちの反応は、自分の授業への答えだ」と捉え、子どもの姿を元に授業を再構成してみたい。"}],"connection":[{"k":"場に参加する","d":"同好会に入会し、イベントや例会に参加してみたい。同期や先輩と顔見知りになれたらOK！"},{"k":"横のつながりを作る","d":"同期など、横のつながりを作り、話しやすい関係を築いてみたい。"},{"k":"縦のつながりを作る","d":"先輩や役員など、縦のつながりを作り、授業実践について教えを請うてみたい。"},{"k":"仲間を支える側に回る","d":"悩みや本音を語り合える仲間を持ち、時には仲間を支える側に回ってみたい。"}],"research":[{"k":"参加してみる","d":"同好会の例会にとにかく参加してみたい。まずは足を運んで、どんな場かを感じるところから始めたい。"},{"k":"インプット・刺激を受ける","d":"先輩たちの実践記録を読んでインプットし、刺激を受けたい。"},{"k":"実践をアウトプット","d":"自分の実践を「体験記録」として書き、アウトプットしてみたい。"},{"k":"理論を磨き合う","d":"自分の実践を理論づけ、より良い実践になるように議論し、理論を磨き合いたい。"}],"j_lesson_plan":[{"k":"基本型をまねる","d":"教科書や既存の資料を参考にしながら、地理・歴史・公民の基本的な授業を構成してみたい。"},{"k":"生徒の「なぜ？」をうむ","d":"生徒が「なぜ？」と自然と問いを持てるような教材を仕掛け、社会的な見方・考え方を働かせる授業を構想してみたい。"},{"k":"足でかせいでアレンジ","d":"先輩の基本型を参考にしながら、身近な地域の事例や時事問題を「足でかせいで」仕入れ、生徒の実態に合わせてアレンジしてみたい。"},{"k":"単元を自分でつくる","d":"自分で足を使って教材を発掘し、ほかの分野の見方・考え方を生かしたオリジナルの単元を構想・提案してみたい。"}],"j_material":[{"k":"基本資料を読み解く","d":"教科書の図版や基本資料を読み解き、授業の基本の流れに組み込んでみたい。"},{"k":"複数資料を比較・関連付ける","d":"地図とグラフ、異なる立場の史料など複数の資料を比較・関連付けさせ、生徒の「なぜ？」を引き出してみたい。"},{"k":"多様な資料を足で集める","d":"新聞記事（NIE）や最新の統計データなど、多様な資料を足で稼いで集め、提示を工夫してみたい。"},{"k":"生徒が主体的に資料を読む","d":"生徒自身が目的に応じて資料を見つけ出し、多面的・多角的に読み解く力を育ててみたい。"}],"j_dialogue":[{"k":"つぶやきを拾って広げる","d":"生徒の些細なつぶやきや疑問を丁寧に拾い、学級全体に広げることから始めてみたい。"},{"k":"自分の考えを言葉にする場を作る","d":"ペアやグループワークを効果的に取り入れ、自分の考えを言葉にして伝え合う場を作ってみたい。"},{"k":"根拠を持って意見を出し合う","d":"異なる意見をもつ立場で話し合い、根拠を持って意見を出し合ってみたい。"},{"k":"合意形成に向かう対話を支援する","d":"生徒同士の対話から新たな価値観を生み出し、社会的な合意形成に向かう話し合いを支援してみたい。"}],"j_inquiry":[{"k":"調べる・まとめる時間を確保する","d":"授業の中で、基礎的な知識を「調べる」「まとめる」時間をしっかり確保することから始めたい。"},{"k":"自分事として調べる学習を仕掛ける","d":"ICTを活用したり、身近な地域の事象と結びつけたりして、生徒が自分事として調べる学習を仕掛けてみたい。"},{"k":"「大きな問い」で探究サイクルを作る","d":"単元を貫く「大きな問い」を設定し、生徒が主体的に探究し続けるサイクルを作ってみたい。"},{"k":"高度な探究をデザインする","d":"現代社会にみられる課題に対して、生徒が自ら問いを立てて解決策を模索する高度な探究をデザインしてみたい。"}],"j_student_eval":[{"k":"まずザックリ観察する","d":"最初はザックリでOK！授業中の生徒の表情や発言に目を向け、「理解できてる？」「関心がある？」を感じ取るところから始めたい。"},{"k":"「わかった」を言葉にさせる","d":"ノートや発言からの理解を確認しながら、「わかった」を自分の言葉で表現できる場を気負わずに作ってみたい。毎時間できなくてOK！"},{"k":"点数にならない良さを見つける","d":"正解・不正解だけでなく、粘り強く考えた過程や多面的な視点など、点数になりにくい良さをそっと認めてみたい。その気づきが、次の問いにつながる。"},{"k":"生徒の姿で授業を問い直す","d":"「この生徒たちの反応は、自分の授業への答えだ」と捉え、生徒を元に授業を再構成してみたい。"}],"j_connection":[{"k":"場に参加する","d":"同好会に入会し、イベントや会に参加してみたい。同期や先輩と顔見知りになれたらOK！"},{"k":"横のつながりを作る","d":"同期など、同校・近隣校の先生と横のつながりを作り、気軽に話しやすい関係を築いてみたい。"},{"k":"縦のつながりを作る","d":"先輩や役員など、縦のつながりを作り、授業実践について教えを請うてみたい。"},{"k":"仲間を支える側に回る","d":"悩みや本音を語り合える仲間を持ち、時には仲間を支える側に回ってみたい。"}],"j_research":[{"k":"参加を楽しむ","d":"同好会の雰囲気を知り、まずは参加を楽しんでみたい。「こんな世界があるんだ！」と感じることから始めたい。"},{"k":"インプット・刺激を受ける","d":"中学地理・歴史・公民に関する先輩たちの実践記録を読んでインプットし、刺激を受けたい。"},{"k":"実践をアウトプット","d":"自分の実践を「体験記録」として書き、アウトプットしてみたい。"},{"k":"理論を磨き合う","d":"自分の実践を理論づけ、部員に向けて議論し、理論を磨き合いたい。"}],"a_school_support":[{"k":"例会に顔を出す","d":"まずは例会やイベントに参加して、場の雰囲気づくりに協力するところから始めてみたい。"},{"k":"例会の学びを深める","d":"授業検討会などで、主幹・管理職としての経験を活かした助言や問いかけで学びを深めてみたい。"},{"k":"研究会の内容充実に関わる","d":"授業検討会やフィールドワークの企画に関わり、会の学びの質を高めることに貢献したい。"},{"k":"会の学びの文化を守る","d":"同好会が大切にしてきた「授業で語り合う」文化を次の世代にも伝え、学びの質を守りたい。"}],"a_school_mgmt":[{"k":"声をかける","d":"例会で一人でいる会員や新しい会員に声をかけ、「来てよかった」と思える安心感を生みたい。"},{"k":"世代をつなぐ","d":"ベテランと若手の橋渡し役として、会員同士が気軽に話せる関係づくりを促してみたい。"},{"k":"学び合いの場をつくる","d":"会員同士が実践を見合ったり、気軽に相談し合えるような関係性やグループをつくりたい。"},{"k":"会の一体感を育てる","d":"会員みんなが「ここが自分の居場所だ」と思える温かい雰囲気をつくり、会の一体感を育てたい。"}],"a_member_support":[{"k":"やってみたことを聞いて感想を伝える","d":"「授業でこうしてみた」という話を聞き、「それ面白いね」「子どもが変わったね」と伝えることから始めたい。"},{"k":"実践を言葉にする手助けをする","d":"やってみたことを記録や発表にまとめるきっかけづくり（「書いてみない？」の声かけ等）をしてみたい。"},{"k":"論文・記録の方向性を一緒に考える","d":"「何を書きたいか」を整理し、手立ての有効性や検証方法についても相談しながら、実践記録や論文の方向づけを手伝ってみたい。"},{"k":"書き上げるまで伴走し、書く文化を広げる","d":"構成から推敲まで粘り強く伴走し、「書いてみようかな」と思える雰囲気を会に広げたい。"}],"a_leader_dev":[{"k":"若手の話を聞く","d":"若手会員の悩みや思いに耳を傾け、「聞いてもらえる存在」になることから始めたい。"},{"k":"役割を任せてみる","d":"例会やイベントの一部を若手に任せ、経験を積ませる場をつくってみたい。"},{"k":"一緒に企画・運営する","d":"大きなイベントや研究大会の企画を若手と一緒に進め、運営のノウハウを伝えたい。"},{"k":"任せて見守る","d":"次世代のリーダーに中心を譲り、困ったときだけ支える「見守る」立場で関わりたい。"}],"a_org_mgmt":[{"k":"例会に参加して助言する","d":"例会や研究会に参加し、主幹・管理職の視点から率直な感想や助言を伝えてみたい。"},{"k":"会の方向性を一緒に考える","d":"役員会などで会の今後の方向性やテーマについて、自分の意見を積極的に出してみたい。"},{"k":"大会・イベントの運営を支える","d":"研究大会やフィールドワークの運営面で、主幹・管理職としての経験や人脈を活かして調整役を担ってみたい。"},{"k":"会の未来を描く","d":"5年後・10年後の会の姿を構想し、持続可能な組織づくりの道筋をつくりたい。"}],"a_outreach":[{"k":"他の研究会の情報を持ち帰る","d":"主幹・管理職の集まりや他教科の研究会で得た情報を、同好会に持ち帰って共有してみたい。"},{"k":"外部講師や連携先を紹介する","d":"大学の先生や他地区の優れた先生など、主幹・管理職のネットワークを活かして会に紹介してみたい。"},{"k":"自分の経験を語る","d":"自分がこれまで積み重ねた社会科の授業づくりの経験や学校経営の知見を、講演や寄稿で次世代に伝えてみたい。"},{"k":"社会科教育の価値を広める","d":"主幹・管理職の立場から社会科教育の重要性を周囲に発信し、名古屋の社会科の文化を守り育てたい。"}]};
 function showStepInfo(vp,step,anchorEl){var arr=STEP_INFO[vp];if(!arr)return;var info=arr[step-1];if(!info)return;var pop=document.getElementById('stepPop');if(!pop){pop=document.createElement('div');pop.id='stepPop';pop.className='step-pop';document.body.appendChild(pop);}pop.innerHTML='<div class="sp-head"><span class="sp-vp">'+esc(VP[vp]||vp)+'</span> <span class="sp-step s'+step+'">STEP'+step+'</span></div><div class="sp-key">'+esc(info.k)+'</div><div class="sp-desc">'+esc(info.d)+'</div>';var r=anchorEl.getBoundingClientRect();var pw=Math.min(320,window.innerWidth-20);pop.style.width=pw+'px';pop.style.display='block';var left=r.left+window.scrollX;if(left+pw>window.scrollX+window.innerWidth-10)left=window.scrollX+window.innerWidth-pw-10;if(left<window.scrollX+10)left=window.scrollX+10;pop.style.top=(r.bottom+window.scrollY+6)+'px';pop.style.left=left+'px';}
@@ -3966,7 +4471,9 @@ async function load(){
   try{
     const res=await fetch('/api/admin/group-summary',{headers:{'Authorization':'Bearer '+token}});
     if(res.status===401||res.status===403){localStorage.clear();window.location.href='/login';return;}
-    const d=await res.json();render(d.groups,d.fiscal_year);
+    const d=await res.json();
+    await loadNotes();
+    render(d.groups,d.fiscal_year);
   }catch(e){document.getElementById('gList').innerHTML='<p style="color:#c62828;text-align:center">読み込みに失敗しました</p>';}
 }
 function render(groups,fy){
@@ -3987,9 +4494,15 @@ function render(groups,fy){
   if(unset.length){
     var pid='gp_unset';
     tabs.push({id:pid,label:'<i class="fas fa-question-circle"></i> 未設定 ('+unset.length+')',col:'#9e9e9e'});
-    var u='<div class="unset-section"><div class="unset-hdr"><i class="fas fa-question-circle"></i> グループ未設定 ('+unset.length+'名)</div><div class="unset-list">';
-    unset.forEach(function(m){var st=m.school_type==='elementary'?'小':m.school_type==='junior_high'?'中':'';u+='<div class="unset-item">'+esc(m.name)+(st?'（'+st+'）':'')+'</div>';});
-    u+='</div></div>';
+    var secs=[['elementary','小学校'],['junior_high','中学校'],['admin_staff','主幹・管理職'],['','校種未設定']];
+    var u='<div class="group-card"><div class="group-header" style="background:#9e9e9e"><i class="fas fa-question-circle"></i> グループ未設定 <span class="group-count">('+unset.length+'名)</span><button class="grp-print no-print" onclick="window.print()" title="このグループを印刷"><i class="fas fa-print"></i> 印刷</button></div>';
+    secs.forEach(function(sec){
+      var list=unset.filter(function(m){return (m.school_type||'')===sec[0];});
+      if(!list.length)return;
+      u+='<div class="sub-hdr">'+esc(sec[1])+'（'+list.length+'名）</div>';
+      list.forEach(function(m){u+=mRow(m,fy);});
+    });
+    u+='</div>';
     panels+='<div class="group-panel" id="'+pid+'">'+u+'</div>';
   }
   var tabBar='<div class="group-tabs">'+tabs.map(function(t,i){return '<button class="group-tab'+(i===0?' active':'')+'" data-target="'+t.id+'" style="background:'+t.col+'">'+t.label+'</button>';}).join('')+'</div>';
@@ -4036,6 +4549,7 @@ function mRow(m,fy){
   h+='<div class="member-name">'+esc(m.name);
   if(stL)h+=' <span class="school-badge '+stC+'">'+stL+'</span>';
   if(m.school)h+=' <span class="school-nm">'+esc(m.school)+'</span>';
+  h+='<button type="button" class="ai-copy-btn no-print" data-ai-copy="'+m.id+'">\u2728 AI伴走用にコピー</button>';
   h+='</div>';
   h+='<div class="steps-row">'+stepsHtml+'</div>';
   if(ev>0){
@@ -4047,9 +4561,203 @@ function mRow(m,fy){
   }
   if(m.goal)h+='<div class="info-row">🎯 <strong>'+fy+'年度の目標</strong><div class="note-box">'+esc(m.goal)+'</div></div>';
   if(m.reflection)h+='<div class="info-row">💭 <strong>振り返り</strong><div class="note-box">'+esc(m.reflection)+'</div></div>';
+  h+='<div class="note-wrap" id="noteWrap_'+m.id+'">'+noteBoxHtml(m.id)+'</div>';
   h+='</div>';
   return h;
 }
+
+// ===== 伴走メモ =====
+var NOTES={};
+var NOTE_FIELDS=[
+  ['important','大切にしていそうなこと'],
+  ['interest','最近の関心'],
+  ['change_note','変化'],
+  ['next_step','次の一歩'],
+  ['support','事務局の伴走'],
+  ['question','次に聞きたいこと'],
+  ['voice','声かけ例'],
+  ['connection','つながり候補']
+];
+function noteBoxHtml(uid){
+  var n=NOTES[uid];
+  if(!n)return '';
+  var body='';
+  for(var i=0;i<NOTE_FIELDS.length;i++){
+    var k=NOTE_FIELDS[i][0];var lab=NOTE_FIELDS[i][1];
+    if(!n[k]||!String(n[k]).trim())continue;
+    body+='<div class="note-item"><b>'+lab+'</b>'+esc(n[k]).replace(/\\n/g,'<br>')+'</div>';
+  }
+  if(!body)return '';
+  var meta='最終更新：'+esc(String(n.updated_at||'').replace('T',' ').slice(0,16));
+  if(n.updater_name)meta+='（'+esc(n.updater_name)+'）';
+  var bid='nb_'+uid;
+  return '<button type="button" class="note-toggle" data-note-target="'+bid+'">🤝 <strong>伴走メモ</strong> <span class="ev-caret">▼</span></button>'
+    +'<div class="note-body" id="'+bid+'">'+body+'<div class="note-meta">'+meta+'</div></div>';
+}
+
+// ===== AI伴走：コピー =====
+function aiModal(html){
+  var m=document.getElementById('aiModal');
+  document.getElementById('aiBox').innerHTML=html;
+  m.classList.add('show');
+  document.body.style.overflow='hidden';
+  m.scrollTop=0;
+}
+function aiClose(){
+  document.getElementById('aiModal').classList.remove('show');
+  document.body.style.overflow='';
+}
+function aiCopyText(text,statusEl){
+  function fallback(){
+    var ta=document.getElementById('aiHiddenTa');
+    if(ta){ta.focus();ta.select();
+      try{document.execCommand('copy');if(statusEl){statusEl.style.color='#2e7d32';statusEl.textContent='コピーしました。AIに貼り付けてください。';}return;}catch(e){}
+    }
+    if(statusEl){statusEl.style.color='#c62828';statusEl.innerHTML='自動コピーできませんでした。下の枠を長押しして「すべて選択」→「コピー」してください。';}
+    var pre=document.getElementById('aiPromptPre');if(pre)pre.style.display='block';
+  }
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(function(){
+      if(statusEl){statusEl.style.color='#2e7d32';statusEl.textContent='✅ コピーしました。ClaudeやChatGPTに貼り付けてください。';}
+    }).catch(fallback);
+  }else{fallback();}
+}
+async function aiCopyMember(uid,btn){
+  if(btn){btn.disabled=true;btn.textContent='準備中...';}
+  try{
+    var res=await fetch('/api/admin/ai-support/export',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({user_id:uid})});
+    var d={};try{d=await res.json();}catch(e){}
+    if(!res.ok){alert(d.error||'準備に失敗しました');return;}
+    var warn='';
+    if(d.masked&&d.masked.length){
+      warn+='<div class="ai-warn"><b>自動で伏せ字にしました</b><br>';
+      warn+=d.masked.map(function(x){return '・'+esc(x.label)+' '+x.count+'か所';}).join('<br>');
+      warn+='</div>';
+    }
+    if(d.risks&&d.risks.length){
+      warn+='<div class="ai-warn"><b>念のためご確認ください</b><br>'+d.risks.map(function(r){return '・'+esc(r)+'が残っている可能性があります';}).join('<br>')+'</div>';
+    }
+    if(d.thin){
+      warn+='<div class="ai-warn"><b>記録がまだ少ない方です</b><br>目標・参加記録がほとんどないため、AIの分析も限られたものになります。</div>';
+    }
+    if(!warn)warn='<div class="ai-ok">氏名・学校名にあたる語は見つかりませんでした。</div>';
+    var html='<h3>✨ AI伴走用にコピー</h3>'
+      +'<div class="sub">'+esc(d.label)+' さん　／　このまま外部AIに渡す内容です（氏名・学校名は含まれません）</div>'
+      +warn
+      +'<div class="ai-pre" id="aiPromptPre">'+esc(d.prompt)+'</div>'
+      +'<textarea id="aiHiddenTa" style="position:absolute;left:-9999px;top:0" readonly>'+esc(d.prompt)+'</textarea>'
+      +'<div class="ai-status" id="aiCopyStatus">内容を確認してから「コピーする」を押してください。</div>'
+      +'<div class="ai-actions"><button type="button" class="ai-primary" id="aiDoCopy">📋 コピーする</button>'
+      +'<button type="button" class="ai-cancel" onclick="aiClose()">閉じる</button></div>';
+    aiModal(html);
+    document.getElementById('aiDoCopy').addEventListener('click',function(){
+      aiCopyText(d.prompt,document.getElementById('aiCopyStatus'));
+    });
+  }catch(e){alert('通信エラーが発生しました');}
+  finally{if(btn){btn.disabled=false;btn.innerHTML='\u2728 AI伴走用にコピー';}}
+}
+
+// ===== AI伴走：貼り付け =====
+var AI_PARSED=null;var AI_BATCH='';
+async function aiOpenPaste(){
+  var opts='';
+  try{
+    var res=await fetch('/api/admin/ai-support/batches',{headers:{'Authorization':'Bearer '+token}});
+    var d=await res.json();
+    var list=(d.batches||[]).filter(function(b){return !b.used;});
+    if(!list.length){
+      aiModal('<h3>✨ AI分析結果を貼り付け</h3><div class="ai-warn">まだコピーの履歴がありません。<br>先に会員の「✨ AI伴走用にコピー」を押して、AIに分析してもらってください。</div><div class="ai-actions"><button type="button" class="ai-cancel" onclick="aiClose()">閉じる</button></div>');
+      return;
+    }
+    opts=list.map(function(b){
+      var t=String(b.created_at||'').replace('T',' ').slice(5,16);
+      return '<option value="'+esc(b.batch_code)+'">'+esc(b.label||b.batch_code)+'（'+t+' にコピー）</option>';
+    }).join('');
+  }catch(e){alert('読み込みに失敗しました');return;}
+  aiModal('<h3>✨ AI分析結果を貼り付け</h3>'
+    +'<div class="sub">AIの回答を、そのまま丸ごと貼り付けてください</div>'
+    +'<div class="ai-field"><label>どのコピーに対する結果ですか？</label><select class="ai-sel" id="aiBatchSel">'+opts+'</select></div>'
+    +'<textarea class="ai-ta" id="aiPasteTa" placeholder="ここにAIの回答を貼り付け"></textarea>'
+    +'<div class="ai-status" id="aiParseStatus"></div>'
+    +'<div class="ai-actions"><button type="button" class="ai-primary" id="aiParseBtn">解析する</button>'
+    +'<button type="button" class="ai-cancel" onclick="aiClose()">閉じる</button></div>');
+  document.getElementById('aiParseBtn').addEventListener('click',aiParse);
+}
+async function aiParse(){
+  var st=document.getElementById('aiParseStatus');
+  var code=document.getElementById('aiBatchSel').value;
+  var text=document.getElementById('aiPasteTa').value;
+  if(!text.trim()){st.style.color='#c62828';st.textContent='AIの回答を貼り付けてください';return;}
+  var btn=document.getElementById('aiParseBtn');btn.disabled=true;
+  st.style.color='#888';st.textContent='解析中...';
+  try{
+    var res=await fetch('/api/admin/ai-support/parse',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({batch_code:code,text:text})});
+    var d={};try{d=await res.json();}catch(e){}
+    if(!res.ok){st.style.color='#c62828';st.textContent=d.error||'解析に失敗しました';btn.disabled=false;return;}
+    AI_PARSED=d.entries;AI_BATCH=d.batch_code;
+    aiShowPreview(d);
+  }catch(e){st.style.color='#c62828';st.textContent='通信エラーが発生しました';btn.disabled=false;}
+}
+function aiShowPreview(d){
+  var h='<h3>✨ AI分析 取り込みプレビュー</h3>'
+    +'<div class="sub">内容を確認・修正してから保存してください。保存するまでは記録されません。</div>';
+  if(d.unmatched&&d.unmatched.length){
+    h+='<div class="ai-warn"><b>対応づけできなかったID</b><br>'+d.unmatched.map(esc).join('、')+'</div>';
+  }
+  for(var i=0;i<AI_PARSED.length;i++){
+    var e=AI_PARSED[i];
+    h+='<div class="ai-entry"><h4>'+esc(e.name)+' さん</h4>';
+    if(e.existing){h+='<div class="ai-warn">この方には既に伴走メモがあります（'+esc(String(e.existing.updated_at||'').slice(0,10))+' 更新）。保存すると上書きされます。</div>';}
+    for(var j=0;j<NOTE_FIELDS.length;j++){
+      var k=NOTE_FIELDS[j][0];
+      h+='<div class="ai-field"><label>'+NOTE_FIELDS[j][1]+'</label>'
+        +'<textarea data-idx="'+i+'" data-key="'+k+'">'+esc(e[k]||'')+'</textarea></div>';
+    }
+    h+='</div>';
+  }
+  h+='<div class="ai-status" id="aiSaveStatus"></div>'
+    +'<div class="ai-actions"><button type="button" class="ai-primary" id="aiSaveBtn">この内容で保存</button>'
+    +'<button type="button" class="ai-cancel" onclick="aiClose()">キャンセル</button></div>';
+  aiModal(h);
+  document.getElementById('aiSaveBtn').addEventListener('click',aiSave);
+}
+async function aiSave(){
+  var st=document.getElementById('aiSaveStatus');
+  var btn=document.getElementById('aiSaveBtn');
+  document.querySelectorAll('#aiBox textarea[data-idx]').forEach(function(ta){
+    AI_PARSED[parseInt(ta.getAttribute('data-idx'),10)][ta.getAttribute('data-key')]=ta.value;
+  });
+  btn.disabled=true;st.style.color='#888';st.textContent='保存中...';
+  try{
+    var res=await fetch('/api/admin/ai-support/notes',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({batch_code:AI_BATCH,notes:AI_PARSED})});
+    var d={};try{d=await res.json();}catch(e){}
+    if(!res.ok){st.style.color='#c62828';st.textContent=d.error||'保存に失敗しました';btn.disabled=false;return;}
+    var ids=AI_PARSED.map(function(e){return e.user_id;});
+    await loadNotes();
+    ids.forEach(function(uid){
+      var w=document.getElementById('noteWrap_'+uid);
+      if(w)w.innerHTML=noteBoxHtml(uid);
+    });
+    aiClose();
+  }catch(e){st.style.color='#c62828';st.textContent='通信エラーが発生しました';btn.disabled=false;}
+}
+async function loadNotes(){
+  try{
+    var res=await fetch('/api/admin/ai-support/notes',{headers:{'Authorization':'Bearer '+token}});
+    if(!res.ok)return;
+    var d=await res.json();NOTES=d.notes||{};
+  }catch(e){}
+}
+document.addEventListener('click',function(e){
+  var cb=e.target.closest&&e.target.closest('[data-ai-copy]');
+  if(cb){aiCopyMember(parseInt(cb.getAttribute('data-ai-copy'),10),cb);return;}
+  var nt=e.target.closest&&e.target.closest('[data-note-target]');
+  if(nt){var b=document.getElementById(nt.getAttribute('data-note-target'));
+    if(b){var open=b.classList.toggle('show');nt.classList.toggle('open',open);}return;}
+  var md=document.getElementById('aiModal');
+  if(md&&e.target===md)aiClose();
+});
+document.getElementById('aiPasteBtn').addEventListener('click',aiOpenPaste);
 load();
 </script></body></html>`)
 })
