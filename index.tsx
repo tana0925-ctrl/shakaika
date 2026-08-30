@@ -1,0 +1,5503 @@
+import { Hono } from 'hono'
+import { cors } from 'hono/cors'
+
+type Bindings = {
+  DB: D1Database
+}
+
+type Variables = {
+  user: { id: number; name: string; email: string; school: string; role: string }
+}
+
+const app = new Hono<{ Bindings: Bindings; Variables: Variables }>()
+
+app.use('/api/*', cors())
+
+async function ensureGuestTable(db: any) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS guest_attendances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    school TEXT DEFAULT '',
+    district TEXT DEFAULT '',
+    experience_years INTEGER,
+    token TEXT DEFAULT '',
+    attended_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`).run()
+  try { await db.prepare("ALTER TABLE guest_attendances ADD COLUMN token TEXT DEFAULT ''").run() } catch (e) { /* already added */ }
+  await db.prepare(`CREATE TABLE IF NOT EXISTS guest_answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guest_id INTEGER NOT NULL,
+    event_id INTEGER NOT NULL,
+    question_id INTEGER NOT NULL,
+    answer_text TEXT DEFAULT '',
+    answered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(guest_id, question_id)
+  )`).run()
+}
+
+// ========== Utility ==========
+async function hashPassword(password: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const data = encoder.encode(password + '_shakaika_salt_2026')
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+  const hashArray = Array.from(new Uint8Array(hashBuffer))
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function generateToken(): string {
+  const arr = new Uint8Array(32)
+  crypto.getRandomValues(arr)
+  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// ========== AI伴走支援（管理者専用） ==========
+let _aiTablesOk = false
+async function ensureSupportTables(db: any) {
+  if (_aiTablesOk) return
+  await db.prepare(`CREATE TABLE IF NOT EXISTS support_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    fiscal_year INTEGER NOT NULL,
+    important TEXT DEFAULT '',
+    interest TEXT DEFAULT '',
+    change_note TEXT DEFAULT '',
+    next_step TEXT DEFAULT '',
+    support TEXT DEFAULT '',
+    question TEXT DEFAULT '',
+    voice TEXT DEFAULT '',
+    connection TEXT DEFAULT '',
+    source TEXT DEFAULT 'ai',
+    updated_by INTEGER,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, fiscal_year)
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS ai_export_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_code TEXT UNIQUE NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'member',
+    label TEXT DEFAULT '',
+    mapping TEXT NOT NULL DEFAULT '{}',
+    created_by INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_support_notes_user ON support_notes(user_id, fiscal_year)').run()
+  _aiTablesOk = true
+}
+
+const AI_VP_LABELS: Record<string, string> = {"lesson_plan": "授業をつくる", "lesson_practice": "授業をする", "student_eval": "子どもを見る", "connection": "つながる", "research": "深める", "j_lesson_plan": "授業をつくる", "j_material": "資料", "j_dialogue": "対話", "j_inquiry": "探究", "j_student_eval": "生徒を見る", "j_connection": "つながる", "j_research": "深める", "a_school_support": "会の活動を支える", "a_school_mgmt": "会員同士をつなぐ", "a_member_support": "会員の成長を支える", "a_leader_dev": "次世代リーダー", "a_org_mgmt": "運営に貢献", "a_outreach": "外とつなぐ"}
+
+const AI_STEP_KEYWORDS: Record<string, string[]> = {"lesson_plan": ["基本型をまねる", "足でかせいでアレンジ", "子どもの「なぜ？」をうむ", "単元を自分でつくる"], "lesson_practice": ["楽しい授業をする", "子どもが動く活動へ", "見方・考え方を働かせる", "対話で成り立つ授業を"], "student_eval": ["まずザックリ観察する", "「わかった」を言葉にさせる", "点数にならない良さを見つける", "子どもの姿で授業を問い直す"], "connection": ["場に参加する", "横のつながりを作る", "縦のつながりを作る", "仲間を支える側に回る"], "research": ["参加してみる", "インプット・刺激を受ける", "実践をアウトプット", "理論を磨き合う"], "j_lesson_plan": ["基本型をまねる", "生徒の「なぜ？」をうむ", "足でかせいでアレンジ", "単元を自分でつくる"], "j_material": ["基本資料を読み解く", "複数資料を比較・関連付ける", "多様な資料を足で集める", "生徒が主体的に資料を読む"], "j_dialogue": ["つぶやきを拾って広げる", "自分の考えを言葉にする場を作る", "根拠を持って意見を出し合う", "合意形成に向かう対話を支援する"], "j_inquiry": ["調べる・まとめる時間を確保する", "自分事として調べる学習を仕掛ける", "「大きな問い」で探究サイクルを作る", "高度な探究をデザインする"], "j_student_eval": ["まずザックリ観察する", "「わかった」を言葉にさせる", "点数にならない良さを見つける", "生徒の姿で授業を問い直す"], "j_connection": ["場に参加する", "横のつながりを作る", "縦のつながりを作る", "仲間を支える側に回る"], "j_research": ["参加を楽しむ", "インプット・刺激を受ける", "実践をアウトプット", "理論を磨き合う"], "a_school_support": ["例会に顔を出す", "例会の学びを深める", "研究会の内容充実に関わる", "会の学びの文化を守る"], "a_school_mgmt": ["声をかける", "世代をつなぐ", "学び合いの場をつくる", "会の一体感を育てる"], "a_member_support": ["やってみたことを聞いて感想を伝える", "実践を言葉にする手助けをする", "論文・記録の方向性を一緒に考える", "書き上げるまで伴走し、書く文化を広げる"], "a_leader_dev": ["若手の話を聞く", "役割を任せてみる", "一緒に企画・運営する", "任せて見守る"], "a_org_mgmt": ["例会に参加して助言する", "会の方向性を一緒に考える", "大会・イベントの運営を支える", "会の未来を描く"], "a_outreach": ["他の研究会の情報を持ち帰る", "外部講師や連携先を紹介する", "自分の経験を語る", "社会科教育の価値を広める"]}
+
+// --- 匿名化・マスキング ---
+function aiEscapeRe(s: string): string { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+
+// 「先生」「さん」の前に来ても人名ではない語
+const AI_ROLE_WORDS = ['校長', '教頭', '担任', '主幹', '指導', '専科', '前任', '後任', '他校', '本校', '大学', '講師', '先輩', '後輩', '教員', '同僚', '相手']
+const AI_NONNAME_BEFORE_SAN = ['生徒', '児童', '子ども', '子供', 'みな', '皆', '大学', '先輩', '後輩', '教員', '先生', '保護者', 'お子']
+
+async function aiLoadNameTokens(db: any): Promise<string[]> {
+  const { results } = await db.prepare('SELECT name FROM users').all() as any
+  const tokens: string[] = []
+  for (const r of (results || [])) {
+    const raw = String(r.name || '').trim()
+    if (!raw) continue
+    const compact = raw.replace(/[\s\u3000]+/g, '')
+    if (compact.length >= 2) tokens.push(compact)
+    if (raw !== compact && raw.length >= 2) tokens.push(raw)
+    for (const part of raw.split(/[\s\u3000]+/)) {
+      if (part && part.length >= 2) tokens.push(part)
+    }
+  }
+  // 長い順に置換（短い語が先に当たって取りこぼすのを防ぐ）
+  return Array.from(new Set(tokens)).sort((a, b) => b.length - a.length)
+}
+
+type AiMaskResult = { text: string; hits: Record<string, number> }
+
+function aiMask(text: string, nameTokens: string[]): AiMaskResult {
+  let out = String(text == null ? '' : text)
+  const hits: Record<string, number> = {}
+  const bump = (k: string) => { hits[k] = (hits[k] || 0) + 1 }
+  if (!out.trim()) return { text: out, hits }
+
+  // 1) 登録会員の氏名
+  for (const t of nameTokens) {
+    if (!t || out.indexOf(t) === -1) continue
+    const re = new RegExp(aiEscapeRe(t), 'g')
+    out = out.replace(re, () => { bump('氏名'); return '［会員名］' })
+  }
+  // 2) メールアドレス
+  out = out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, () => { bump('メール'); return '［メール］' })
+  // 3) 電話番号
+  out = out.replace(/0\d{1,4}[-(]?\d{2,4}[-)]?\d{3,4}/g, () => { bump('電話'); return '［電話］' })
+  // 4) 学校名（固有名詞＋小学校/中学校）
+  out = out.replace(/[\u4e00-\u9fffヶヵ\u30a1-\u30f6ー]{2,6}(小学校|中学校|小学部|中学部)/g, () => { bump('学校名'); return '［学校名］' })
+  // 5) ○○先生（役職語は除く）
+  out = out.replace(/([\u4e00-\u9fff\u30a1-\u30f6ー]{1,6})(先生)/g, (m: string, pre: string) => {
+    if (AI_ROLE_WORDS.some((w) => pre.endsWith(w))) return m
+    bump('氏名（先生）'); return '［先生］'
+  })
+  // 6) ○○さん / ○○くん（一般名詞は除く）
+  out = out.replace(/([\u4e00-\u9fff\u30a1-\u30f6ー]{2,4})(さん|くん|君|ちゃん)/g, (m: string, pre: string) => {
+    if (AI_NONNAME_BEFORE_SAN.some((w) => pre.endsWith(w))) return m
+    bump('氏名（敬称つき）'); return '［個人名］'
+  })
+  return { text: out, hits }
+}
+
+// 置換はしないが、事務局に確認してほしいもの
+function aiDetectRisk(text: string): string[] {
+  const w: string[] = []
+  const t = String(text || '')
+  if (/[\u4e00-\u9fffヶヵ\u30a1-\u30f6ー]{2,6}(小|中)(?![学\u4e00-\u9fff])/.test(t)) w.push('学校名の省略形（○○小・○○中）かもしれない語')
+  if (t.length > 100) w.push('100字を超える長い記述')
+  return w
+}
+
+function aiFmtExp(v: any): string {
+  if (v === null || v === undefined || v === '') return '未記入'
+  return String(v) + '年目'
+}
+function aiSchoolTypeLabel(t: string): string {
+  if (t === 'elementary') return '小学校'
+  if (t === 'junior_high') return '中学校'
+  if (t === 'admin_staff') return '主幹・管理職'
+  return '未設定'
+}
+
+// --- 会員1名分の匿名データを組み立てる ---
+async function aiBuildMemberBlock(db: any, userId: number, fy: number, anonId: string, nameTokens: string[]) {
+  const u = await db.prepare(
+    "SELECT id, name, school_type, experience_years, grade, position FROM users WHERE id = ? AND role = 'member'"
+  ).bind(userId).first() as any
+  if (!u) return null
+
+  const note = await db.prepare('SELECT goal, reflection FROM annual_notes WHERE user_id = ? AND fiscal_year = ?').bind(userId, fy).first() as any
+  const { results: sels } = await db.prepare('SELECT viewpoint, step, memo FROM selections WHERE user_id = ?').bind(userId).all() as any
+  const { results: evs } = await db.prepare(`
+    SELECT e.id as event_id, e.title, e.event_date, sa.comment
+    FROM attendances a JOIN events e ON e.id = a.event_id
+    LEFT JOIN survey_answers sa ON sa.event_id = e.id AND sa.user_id = a.user_id
+    WHERE a.user_id = ? ORDER BY e.event_date ASC`).bind(userId).all() as any
+  const { results: cas } = await db.prepare(`
+    SELECT ca.event_id, ca.answer_text, q.question_text, q.sort_order
+    FROM custom_answers ca JOIN survey_questions q ON q.id = ca.question_id
+    WHERE ca.user_id = ? AND TRIM(ca.answer_text) <> '' ORDER BY q.sort_order`).bind(userId).all() as any
+
+  const hits: Record<string, number> = {}
+  const risks: string[] = []
+  const mask = (t: string) => {
+    const r = aiMask(t, nameTokens)
+    for (const k of Object.keys(r.hits)) hits[k] = (hits[k] || 0) + r.hits[k]
+    for (const w of aiDetectRisk(t)) if (risks.indexOf(w) === -1) risks.push(w)
+    return r.text
+  }
+
+  const L: string[] = []
+  L.push('MEMBER_ID: ' + anonId)
+  L.push('校種: ' + aiSchoolTypeLabel(u.school_type || ''))
+  L.push('経験年数: ' + aiFmtExp(u.experience_years))
+  L.push('担当学年: ' + (u.grade ? String(u.grade) : '未記入'))
+  L.push('役職: ' + (u.position ? String(u.position) : '記載なし'))
+  L.push('')
+  L.push('【' + fy + '年度の目標（なりたい自分）】')
+  L.push(note && String(note.goal || '').trim() ? mask(String(note.goal)) : '（未記入）')
+  if (note && String(note.reflection || '').trim()) {
+    L.push('')
+    L.push('【' + fy + '年度の振り返り】')
+    L.push(mask(String(note.reflection)))
+  }
+
+  L.push('')
+  L.push('【成長の視点と現在地】')
+  if (!sels || !sels.length) {
+    L.push('（まだ選択されていません）')
+  } else {
+    for (const s of sels) {
+      const label = AI_VP_LABELS[s.viewpoint] || s.viewpoint
+      const kws = AI_STEP_KEYWORDS[s.viewpoint]
+      const kw = (kws && kws[(s.step || 1) - 1]) ? kws[(s.step || 1) - 1] : ''
+      L.push('・' + label + '：' + (kw ? '「' + kw + '」に取り組んでいる' : '選択あり'))
+      if (String(s.memo || '').trim()) L.push('　　メモ：' + mask(String(s.memo)))
+    }
+  }
+
+  const caByEvent: Record<number, any[]> = {}
+  for (const ca of (cas || [])) {
+    if (!caByEvent[ca.event_id]) caByEvent[ca.event_id] = []
+    caByEvent[ca.event_id].push(ca)
+  }
+  L.push('')
+  L.push('【参加した研修と振り返り（古い順）】')
+  if (!evs || !evs.length) {
+    L.push('（参加記録なし）')
+  } else {
+    for (const e of evs) {
+      L.push('■ ' + mask(String(e.title || '')) + '（' + String(e.event_date || '') + '）')
+      const list = caByEvent[e.event_id] || []
+      if (String(e.comment || '').trim()) L.push('　・感想：' + mask(String(e.comment)))
+      for (const ca of list) {
+        L.push('　・' + String(ca.question_text || '') + '：' + mask(String(ca.answer_text || '')))
+      }
+      if (!list.length && !String(e.comment || '').trim()) L.push('　（振り返りの記入なし）')
+    }
+  }
+
+  const attendCount = (evs || []).length
+  const answered = (cas || []).length
+  L.push('')
+  L.push('【記録の量】')
+  L.push('研修の参加：' + attendCount + '回 ／ 振り返りの記入：' + answered + '項目 ／ 成長の視点の選択：' + ((sels || []).length) + '件')
+  if (attendCount <= 1) {
+    L.push('※参加が1回以下のため、時間の経過による変化を読み取る材料はありません。③は「判断材料が不足」としてください。')
+  }
+
+  const thin = attendCount === 0 && (!note || !String(note.goal || '').trim()) && (!sels || !sels.length)
+  return { name: u.name, text: L.join('\n'), hits, risks, thin, attendCount }
+}
+
+const AI_INSTRUCTION = `あなたは社会科同好会の事務局が、
+会員の成長に伴走するための「伴走支援AI」です。
+
+会員を評価することが目的ではありません。
+
+本人の
+「なりたい自分」
+「現在地」
+「これまでの研修での学び」
+「これからやってみたいこと」
+をもとに、
+事務局が本人との対話や、
+次の学びの機会を考えるための材料を整理してください。
+
+成長の視点の段階について、その高低を能力の高低として扱わないでください。
+段階を上げること自体を目的にしないでください。
+本人の記録にないことを決めつけないでください。
+
+以下を整理してください。
+
+① 今、この人が大切にしていそうなこと
+② 最近の学び・関心
+③ 過去の記録と比較して見られる変化
+※変化が読み取れない場合は無理に作らない
+④ 次の一歩として考えられること
+2〜3案
+⑤ 事務局ができそうな伴走
+例：
+・話を聞く
+・関連する研修を紹介する
+・実践について聞く
+・同じ関心をもつ人につなぐ
+・指導者層につなぐ
+・発表や模擬授業への挑戦を提案する
+・今は見守る
+など
+⑥ 次に本人へ聞いてみたい問い
+2〜3個
+⑦ 次に会ったときの自然な声かけ例
+1〜2個
+⑧ つながると学びが広がりそうな
+「人のタイプ」や「実践テーマ」
+
+注意：
+・会員を評価しない
+・順位付けしない
+・段階の昇格を目的にしない
+・弱点や不足を断定しない
+・本人の記録から読み取れないことは推測しすぎない
+・事務局が本人と対話するための材料として提案する
+・簡潔にまとめる
+
+最後に、サイトへ貼り戻すため、
+必ず以下の機械的に解析しやすい形式でも出力してください。
+
+===AI_BANSOU_START===
+MEMBER_ID: 会員A
+IMPORTANT:
+INTEREST:
+CHANGE:
+NEXT_STEP:
+SUPPORT:
+QUESTION:
+VOICE:
+CONNECTION:
+===AI_BANSOU_END===
+
+この形式・項目名・MEMBER_IDを変更しないでください。
+MEMBER_IDには、下の記録に書かれている値をそのまま使ってください。`
+
+function aiBatchCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let s = ''
+  const arr = new Uint8Array(4)
+  crypto.getRandomValues(arr)
+  for (let i = 0; i < 4; i++) s += chars[arr[i] % chars.length]
+  return s
+}
+
+
+// Token store using D1 for production persistence
+async function setToken(db: D1Database, token: string, userId: number) {
+  const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  await db.prepare(
+    'INSERT OR REPLACE INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)'
+  ).bind(token, userId, expires).run()
+}
+
+async function getUserIdFromToken(db: D1Database, token: string): Promise<number | null> {
+  const row = await db.prepare(
+    'SELECT user_id, expires_at FROM sessions WHERE token = ?'
+  ).bind(token).first() as any
+  if (!row) return null
+  if (new Date(row.expires_at) < new Date()) {
+    await db.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run()
+    return null
+  }
+  return row.user_id
+}
+
+// ========== Auth Middleware ==========
+async function authMiddleware(c: any, next: any) {
+  const authHeader = c.req.header('Authorization')
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return c.json({ error: 'ログインが必要です' }, 401)
+  }
+  const token = authHeader.replace('Bearer ', '')
+  const userId = await getUserIdFromToken(c.env.DB, token)
+  if (!userId) {
+    return c.json({ error: 'セッションが無効です。再ログインしてください' }, 401)
+  }
+  const user = await c.env.DB.prepare('SELECT id, name, email, school, school_type, role, district, experience_years, grade, position FROM users WHERE id = ?').bind(userId).first()
+  if (!user) {
+    return c.json({ error: 'ユーザーが見つかりません' }, 401)
+  }
+  c.set('user', user)
+  await next()
+}
+
+async function adminMiddleware(c: any, next: any) {
+  const user = c.get('user')
+  if (user.role !== 'admin') {
+    return c.json({ error: '管理者権限が必要です' }, 403)
+  }
+  await next()
+}
+
+// ========== DB Init ==========
+app.get('/api/init', async (c) => {
+  const db = c.env.DB
+
+  // Always run column migrations first (safe to run repeatedly)
+  await db.prepare(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    school TEXT NOT NULL DEFAULT '',
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('member', 'admin')),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`).run()
+
+  try {
+    const { results: cols } = (await db.prepare("PRAGMA table_info(users)").all()) as any
+    const hasSchool = Array.isArray(cols) && cols.some((c: any) => c.name === 'school')
+    if (!hasSchool) {
+      await db.prepare("ALTER TABLE users ADD COLUMN school TEXT NOT NULL DEFAULT ''").run()
+    }
+    const hasSchoolType = Array.isArray(cols) && cols.some((c: any) => c.name === 'school_type')
+    if (!hasSchoolType) {
+      await db.prepare("ALTER TABLE users ADD COLUMN school_type TEXT NOT NULL DEFAULT ''").run()
+    }
+    const hasSecretQ = Array.isArray(cols) && cols.some((c: any) => c.name === 'secret_question')
+    if (!hasSecretQ) {
+      await db.prepare("ALTER TABLE users ADD COLUMN secret_question TEXT DEFAULT ''").run()
+      await db.prepare("ALTER TABLE users ADD COLUMN secret_answer_hash TEXT DEFAULT ''").run()
+    }
+    const hasTrainingGroup = Array.isArray(cols) && cols.some((c: any) => c.name === 'training_group')
+    if (!hasTrainingGroup) {
+      await db.prepare("ALTER TABLE users ADD COLUMN training_group TEXT DEFAULT ''").run()
+    }
+    await ensureGuestTable(db)
+  } catch (e) {
+    // ignore
+  }
+
+  // Block further init if admin already exists
+  try {
+    const existing = await db.prepare('SELECT id FROM users WHERE role = ? LIMIT 1').bind('admin').first()
+    if (existing) return c.json({ message: '既に初期化済みです（マイグレーション実行済み）' })
+  } catch(e) { /* continue */ }
+
+  await db.prepare(`CREATE TABLE IF NOT EXISTS selections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    viewpoint TEXT NOT NULL,
+    step INTEGER NOT NULL CHECK(step BETWEEN 1 AND 4),
+    memo TEXT DEFAULT '',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(user_id, viewpoint)
+  )`).run()
+
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_selections_user_id ON selections(user_id)').run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)').run()
+
+  // Event tables
+  await db.prepare(`CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT DEFAULT '',
+    event_date TEXT NOT NULL, event_code TEXT UNIQUE NOT NULL, is_active INTEGER DEFAULT 1,
+    created_by INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (created_by) REFERENCES users(id)
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS attendances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+    attended_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, UNIQUE(event_id, user_id)
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS survey_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, question_text TEXT NOT NULL,
+    question_type TEXT NOT NULL CHECK(question_type IN ('text','radio','rating','checkbox')),
+    options TEXT DEFAULT '', sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS survey_answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+    satisfaction INTEGER CHECK(satisfaction BETWEEN 1 AND 5), comment TEXT DEFAULT '',
+    answered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, UNIQUE(event_id, user_id)
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS custom_answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+    question_id INTEGER NOT NULL, answer_text TEXT DEFAULT '',
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (question_id) REFERENCES survey_questions(id) ON DELETE CASCADE,
+    UNIQUE(event_id, user_id, question_id)
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_attendances_event ON attendances(event_id)').run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_events_code ON events(event_code)').run()
+
+  // Sessions table for persistent auth tokens
+  await db.prepare(`CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)').run()
+  // Clean up expired sessions
+  await db.prepare("DELETE FROM sessions WHERE expires_at < datetime('now')").run()
+
+
+  // Annual notes (goal/reflection) per fiscal year
+  await db.prepare(`CREATE TABLE IF NOT EXISTS annual_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    fiscal_year INTEGER NOT NULL,
+    goal TEXT DEFAULT '',
+    reflection TEXT DEFAULT '',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(user_id, fiscal_year)
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_annual_notes_user_year ON annual_notes(user_id, fiscal_year)').run()
+
+  // Points table for gamification
+  await db.prepare(`CREATE TABLE IF NOT EXISTS points (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    event_id INTEGER,
+    points INTEGER NOT NULL DEFAULT 1,
+    reason TEXT NOT NULL DEFAULT 'event_survey',
+    fiscal_year INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE SET NULL,
+    UNIQUE(user_id, event_id)
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_points_user_fy ON points(user_id, fiscal_year)').run()
+
+  // Create default admin if not exists
+  const adminHash = await hashPassword('admin123')
+  await db.prepare(
+    'INSERT OR IGNORE INTO users (name, email, school, password_hash, role) VALUES (?, ?, ?, ?, ?)'
+  ).bind('管理者', 'admin@example.com', '（管理者）', adminHash, 'admin').run()
+
+  return c.json({ message: 'データベースを初期化しました' })
+})
+
+// ========== Auth API ==========
+app.post('/api/auth/register', async (c) => {
+  const { name, school, school_type, district, experience_years, grade, email, password } = await c.req.json()
+  if (!name || !school || !email || !password) {
+    return c.json({ error: '名前・学校名・メールアドレス・パスワードは必須です' }, 400)
+  }
+  if (password.length < 4) {
+    return c.json({ error: 'パスワードは4文字以上にしてください' }, 400)
+  }
+  const existing = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first()
+  if (existing) {
+    return c.json({ error: 'このメールアドレスは既に登録されています' }, 400)
+  }
+  const passwordHash = await hashPassword(password)
+  const result = await c.env.DB.prepare(
+    'INSERT INTO users (name, email, school, school_type, district, experience_years, grade, password_hash, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(name, email, school || '', school_type || '', district || '', experience_years || null, grade || '', passwordHash, 'member').run()
+
+  const userId = result.meta.last_row_id as number
+  const token = generateToken()
+  await setToken(c.env.DB, token, userId)
+
+  return c.json({ token, user: { id: userId, name, school, email, role: 'member' } })
+})
+
+app.post('/api/auth/login', async (c) => {
+  const { email, password } = await c.req.json()
+  if (!email || !password) {
+    return c.json({ error: 'メールアドレスとパスワードを入力してください' }, 400)
+  }
+  const passwordHash = await hashPassword(password)
+  const user = await c.env.DB.prepare(
+    'SELECT id, name, email, school, school_type, role, district, experience_years, grade, position FROM users WHERE email = ? AND password_hash = ?'
+  ).bind(email, passwordHash).first()
+  if (!user) {
+    return c.json({ error: 'メールアドレスまたはパスワードが正しくありません' }, 401)
+  }
+  const token = generateToken()
+  await setToken(c.env.DB, token, user.id as number)
+
+  return c.json({ token, user: { id: user.id, name: user.name, school: (user as any).school || '', email: user.email, role: user.role } })
+})
+
+app.get('/api/auth/me', authMiddleware, async (c) => {
+  return c.json({ user: c.get('user') })
+})
+
+// パスワード忘れ：メールアドレスから秘密の質問を取得
+app.post('/api/auth/get-question', async (c) => {
+  const { email } = await c.req.json() as any
+  if (!email) return c.json({ error: 'メールアドレスを入力してください' }, 400)
+  const user = await c.env.DB.prepare('SELECT secret_question FROM users WHERE email = ?').bind(email).first() as any
+  if (!user) return c.json({ error: 'このメールアドレスは登録されていません' }, 404)
+  if (!user.secret_question) return c.json({ error: '秘密の質問が設定されていません。管理者にパスワードリセットを依頼してください。' }, 404)
+  return c.json({ question: user.secret_question })
+})
+
+// パスワード忘れ：答えを確認してパスワードをリセット
+app.post('/api/auth/reset-by-question', async (c) => {
+  const { email, answer, newPassword } = await c.req.json() as any
+  if (!email || !answer || !newPassword) return c.json({ error: '入力が不足しています' }, 400)
+  if (newPassword.length < 4) return c.json({ error: 'パスワードは4文字以上にしてください' }, 400)
+  const user = await c.env.DB.prepare('SELECT id, secret_answer_hash FROM users WHERE email = ?').bind(email).first() as any
+  if (!user) return c.json({ error: 'このメールアドレスは登録されていません' }, 404)
+  const answerHash = await hashPassword(answer)
+  if (user.secret_answer_hash !== answerHash) return c.json({ error: '答えが正しくありません' }, 400)
+  const newHash = await hashPassword(newPassword)
+  await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(newHash, user.id).run()
+  await c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id).run()
+  return c.json({ success: true })
+})
+
+// 秘密の質問を設定（ログイン済みユーザー）
+app.post('/api/me/secret-question', authMiddleware, async (c) => {
+  const u = c.get('user')
+  const { question, answer } = await c.req.json() as any
+  if (!question || !answer) return c.json({ error: '質問と答えを入力してください' }, 400)
+  const answerHash = await hashPassword(answer)
+  await c.env.DB.prepare('UPDATE users SET secret_question = ?, secret_answer_hash = ? WHERE id = ?').bind(question, answerHash, u.id).run()
+  return c.json({ success: true })
+})
+
+// Update my profile
+app.post('/api/me/profile', authMiddleware, async (c) => {
+  const u = c.get('user')
+  const body = await c.req.json().catch(() => ({} as any))
+  const school = typeof body.school === 'string' ? body.school.trim() : undefined
+  const school_type = typeof body.school_type === 'string' ? body.school_type.trim() : undefined
+  const district = typeof body.district === 'string' ? body.district.trim() : undefined
+  const experience_years = body.experience_years !== undefined ? (body.experience_years === '' || body.experience_years === null ? null : parseInt(body.experience_years, 10)) : undefined
+  const grade = typeof body.grade === 'string' ? body.grade.trim() : undefined
+  const position = typeof body.position === 'string' ? body.position.trim() : undefined
+  const sets = []
+  const params = []
+  if (school !== undefined) { sets.push('school = ?'); params.push(school) }
+  if (school_type !== undefined) { sets.push('school_type = ?'); params.push(school_type); }
+  if (district !== undefined) { sets.push('district = ?'); params.push(district) }
+  if (experience_years !== undefined) { sets.push('experience_years = ?'); params.push(experience_years) }
+  if (grade !== undefined) { sets.push('grade = ?'); params.push(grade) }
+  if (position !== undefined) { sets.push('position = ?'); params.push(position) }
+  if (sets.length === 0) return c.json({ error: 'No fields' }, 400)
+  sets.push("updated_at = datetime('now')")
+  params.push(u.id)
+  await c.env.DB.prepare('UPDATE users SET ' + sets.join(', ') + ' WHERE id = ?').bind(...params).run()
+  const updated = await c.env.DB.prepare('SELECT id, name, email, school, school_type, role, district, experience_years, grade, position FROM users WHERE id = ?').bind(u.id).first()
+  if (!updated) return c.json({ error: 'Failed' }, 500)
+  return c.json({ user: updated })
+})
+
+// ========== Selections API ==========
+app.get('/api/selections', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const { results } = await c.env.DB.prepare(
+    'SELECT viewpoint, step, memo, updated_at FROM selections WHERE user_id = ?'
+  ).bind(user.id).all()
+  return c.json({ selections: results })
+})
+
+app.post('/api/selections', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const { viewpoint, step, memo } = await c.req.json()
+
+  if (!viewpoint || !step || step < 1 || step > 4) {
+    return c.json({ error: '不正な選択です' }, 400)
+  }
+
+  const validViewpoints = ['lesson_plan', 'lesson_practice', 'student_eval', 'connection', 'research', 'j_lesson_plan', 'j_material', 'j_dialogue', 'j_inquiry', 'j_student_eval', 'j_connection', 'j_research', 'a_school_support', 'a_school_mgmt', 'a_member_support', 'a_leader_dev', 'a_org_mgmt', 'a_outreach']
+  if (!validViewpoints.includes(viewpoint)) {
+    return c.json({ error: '不正な視点です' }, 400)
+  }
+
+  await c.env.DB.prepare(`
+    INSERT INTO selections (user_id, viewpoint, step, memo, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(user_id, viewpoint) DO UPDATE SET
+      step = excluded.step,
+      memo = excluded.memo,
+      updated_at = datetime('now')
+  `).bind(user.id, viewpoint, step, memo || '').run()
+
+  return c.json({ success: true })
+})
+
+app.delete('/api/selections/:viewpoint', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const viewpoint = c.req.param('viewpoint')
+  await c.env.DB.prepare(
+    'DELETE FROM selections WHERE user_id = ? AND viewpoint = ?'
+  ).bind(user.id, viewpoint).run()
+  return c.json({ success: true })
+})
+
+
+// ========== My Annual Notes & History ==========
+function getCurrentFiscalYear(): number {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth() + 1
+  return m >= 4 ? y : y - 1
+}
+
+app.get('/api/me/annual-notes', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const qfy = c.req.query('fy')
+  const fy = qfy ? parseInt(qfy) : getCurrentFiscalYear()
+  const fiscalYear = Number.isFinite(fy) ? fy : getCurrentFiscalYear()
+
+  const row = await c.env.DB.prepare(
+    'SELECT fiscal_year, goal, reflection, datetime(updated_at, "+9 hours") as updated_at FROM annual_notes WHERE user_id = ? AND fiscal_year = ?'
+  ).bind(user.id, fiscalYear).first() as any
+
+  return c.json({
+    fiscal_year: fiscalYear,
+    goal: row?.goal || '',
+    reflection: row?.reflection || '',
+    updated_at: row?.updated_at || null
+  })
+})
+
+app.post('/api/me/annual-notes', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const body = await c.req.json()
+  const fiscal_year = parseInt(body?.fiscal_year)
+  const goal = (body?.goal ?? '').toString()
+  const reflection = (body?.reflection ?? '').toString()
+
+  if (!Number.isFinite(fiscal_year) || fiscal_year < 2000 || fiscal_year > 3000) {
+    return c.json({ error: '年度が不正です' }, 400)
+  }
+  if (goal.length > 8000 || reflection.length > 8000) {
+    return c.json({ error: '入力が長すぎます（8000文字以内）' }, 400)
+  }
+
+  await c.env.DB.prepare(`
+    INSERT INTO annual_notes (user_id, fiscal_year, goal, reflection, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(user_id, fiscal_year) DO UPDATE SET
+      goal = excluded.goal,
+      reflection = excluded.reflection,
+      updated_at = datetime('now')
+  `).bind(user.id, fiscal_year, goal, reflection).run()
+
+  return c.json({ success: true })
+})
+
+// ========== Points API ==========
+app.get('/api/me/points', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const qfy = c.req.query('fy')
+  const fy = qfy ? parseInt(qfy) : getCurrentFiscalYear()
+  const fiscalYear = Number.isFinite(fy) ? fy : getCurrentFiscalYear()
+  const db = c.env.DB
+  const row = await db.prepare(
+    'SELECT COALESCE(SUM(points), 0) as total FROM points WHERE user_id = ? AND fiscal_year = ?'
+  ).bind(user.id, fiscalYear).first() as any
+  return c.json({ fiscal_year: fiscalYear, total_points: row?.total || 0 })
+})
+
+// survey_questions.required 列の遅延マイグレーション（既存DBを壊さない）
+let _reqColOk = false
+async function ensureRequiredColumn(db: any) {
+  if (_reqColOk) return
+  try {
+    const { results: cols } = await db.prepare('PRAGMA table_info(survey_questions)').all() as any
+    if (Array.isArray(cols) && cols.length > 0) {
+      if (!cols.some((col: any) => col.name === 'required')) {
+        await db.prepare('ALTER TABLE survey_questions ADD COLUMN required INTEGER DEFAULT 0').run()
+      }
+      _reqColOk = true
+    }
+  } catch (e) { /* ignore */ }
+}
+
+app.get('/api/me/history', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const qfy = c.req.query('fy')
+  const fy = qfy ? parseInt(qfy) : getCurrentFiscalYear()
+  const fiscalYear = Number.isFinite(fy) ? fy : getCurrentFiscalYear()
+  const start = `${fiscalYear}-04-01`
+  const end = `${fiscalYear + 1}-03-31`
+
+  const db = c.env.DB
+  const { results: baseRows } = await db.prepare(
+    `SELECT
+      e.id as event_id,
+      e.title,
+      e.description,
+      e.event_date,
+      e.event_code,
+      a.attended_at,
+      sa.satisfaction,
+      sa.comment,
+      sa.answered_at
+    FROM attendances a
+    JOIN events e ON e.id = a.event_id
+    LEFT JOIN survey_answers sa ON sa.event_id = e.id AND sa.user_id = a.user_id
+    WHERE a.user_id = ? AND e.event_date >= ? AND e.event_date <= ?
+    ORDER BY e.event_date DESC`
+  ).bind(user.id, start, end).all() as any
+
+  await ensureRequiredColumn(db)
+  const { results: qaRows } = await db.prepare(
+    `SELECT
+      e.id as event_id,
+      q.id as question_id,
+      q.question_text,
+      q.question_type,
+      q.options,
+      q.sort_order,
+      ${_reqColOk ? 'q.required,' : ''}
+      ca.answer_text
+    FROM attendances a
+    JOIN events e ON e.id = a.event_id
+    JOIN survey_questions q ON q.event_id = e.id
+    LEFT JOIN custom_answers ca ON ca.event_id = e.id AND ca.question_id = q.id AND ca.user_id = a.user_id
+    WHERE a.user_id = ? AND e.event_date >= ? AND e.event_date <= ?
+    ORDER BY e.event_date DESC, q.sort_order ASC`
+  ).bind(user.id, start, end).all() as any
+
+  const map = new Map<number, any>()
+  for (const r of (baseRows || [])) {
+    map.set(r.event_id, {
+      event_id: r.event_id,
+      title: r.title,
+      description: r.description || '',
+      event_date: r.event_date,
+      event_code: r.event_code,
+      attended_at: r.attended_at,
+      survey: {
+        satisfaction: r.satisfaction ?? null,
+        comment: r.comment || '',
+        answered_at: r.answered_at ?? null
+      },
+      questions: [] as any[]
+    })
+  }
+  for (const q of (qaRows || [])) {
+    const ev = map.get(q.event_id)
+    if (!ev) continue
+    ev.questions.push({
+      question_id: q.question_id,
+      question_text: q.question_text,
+      question_type: q.question_type,
+      options: q.options || '',
+      required: q.required ? 1 : 0,
+      answer_text: q.answer_text || ''
+    })
+  }
+
+  return c.json({ fiscal_year: fiscalYear, events: Array.from(map.values()) })
+})
+
+
+// ========== Admin API ==========
+app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
+  const { results: members } = await c.env.DB.prepare(
+    `SELECT u.id, u.name, u.school, u.email, u.role, u.district, u.experience_years, u.grade, u.position, u.school_type, u.training_group,
+      datetime(u.created_at, '+9 hours') as created_at,
+      GROUP_CONCAT(s.viewpoint || ':' || s.step || ':' || COALESCE(s.memo,''), '||') as selections_raw
+     FROM users u
+     LEFT JOIN selections s ON u.id = s.user_id
+     GROUP BY u.id
+     ORDER BY u.created_at DESC`
+  ).all()
+
+  const parsed = members.map((m: any) => {
+    const selections: Record<string, { step: number; memo: string }> = {}
+    if (m.selections_raw) {
+      const parts = (m.selections_raw as string).split('||')
+      for (const part of parts) {
+        const [vp, stepStr, ...memoParts] = part.split(':')
+        if (vp && stepStr) {
+          selections[vp] = { step: parseInt(stepStr), memo: memoParts.join(':') }
+        }
+      }
+    }
+    return {
+      id: m.id,
+      name: m.name,
+      school: m.school || '',
+      email: m.email,
+      role: m.role,
+      district: m.district || '',
+      experience_years: m.experience_years,
+      grade: m.grade || '',
+      position: m.position || '',
+      school_type: m.school_type || '',
+      training_group: (m as any).training_group || '',
+      created_at: m.created_at,
+      selections
+    }
+  })
+
+  return c.json({ members: parsed })
+})
+
+app.put('/api/admin/members/:id/role', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const user = c.get('user')
+  if (user.id === id) return c.json({ error: '自分自身の役割は変更できません' }, 400)
+  const { role } = await c.req.json()
+  if (!['member', 'admin'].includes(role)) {
+    return c.json({ error: '不正な役割です' }, 400)
+  }
+  await c.env.DB.prepare('UPDATE users SET role = ? WHERE id = ?').bind(role, id).run()
+  return c.json({ success: true })
+})
+
+app.patch('/api/admin/members/:id/school_type', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const { school_type } = await c.req.json()
+  const allowed = ['elementary', 'junior_high', 'admin_staff', '']
+  if (!allowed.includes(school_type)) {
+    return c.json({ error: '無効な校種です' }, 400)
+  }
+  await c.env.DB.prepare('UPDATE users SET school_type = ? WHERE id = ?').bind(school_type, id).run()
+  return c.json({ success: true })
+})
+
+app.patch('/api/admin/members/:id/training-group', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const { training_group } = await c.req.json()
+  await c.env.DB.prepare('UPDATE users SET training_group = ? WHERE id = ?').bind(training_group || '', id).run()
+  return c.json({ success: true })
+})
+
+app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const user = c.get('user')
+  if (user.id === id) {
+    return c.json({ error: '自分自身は削除できません' }, 400)
+  }
+  await c.env.DB.prepare('DELETE FROM selections WHERE user_id = ?').bind(id).run()
+  await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id).run()
+  return c.json({ success: true })
+})
+
+// Admin: Reset password
+app.post('/api/admin/members/:id/reset-password', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const body = await c.req.json() as any
+  const newPassword = body.password
+  if (!newPassword || newPassword.length < 4) {
+    return c.json({ error: 'パスワードは4文字以上にしてください' }, 400)
+  }
+  const hash = await hashPassword(newPassword)
+  await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(hash, id).run()
+  await c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id).run()
+  return c.json({ success: true })
+})
+
+// Admin: Annual Notes (goal/reflection)
+app.get('/api/admin/annual-notes', authMiddleware, adminMiddleware, async (c) => {
+  const userId = parseInt(c.req.query('user_id') || '')
+  const fy = parseInt(c.req.query('fy') || '')
+
+  if (!Number.isFinite(userId) || userId <= 0) {
+    return c.json({ error: 'user_id が不正です' }, 400)
+  }
+
+  // FY未指定なら今年度
+  const fiscalYear = Number.isFinite(fy) ? fy : getCurrentFiscalYear()
+
+  const row = await c.env.DB.prepare(
+    'SELECT fiscal_year, goal, reflection, datetime(updated_at, "+9 hours") as updated_at FROM annual_notes WHERE user_id = ? AND fiscal_year = ?'
+  ).bind(userId, fiscalYear).first() as any
+
+  return c.json({
+    fiscal_year: fiscalYear,
+    goal: row?.goal || '',
+    reflection: row?.reflection || '',
+    updated_at: row?.updated_at || null
+  })
+})
+
+// ========== CSV Export ==========
+// ========== Group Summary API ==========
+app.get('/api/admin/group-summary', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  const now = new Date()
+  const fy = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1
+  const { results: members } = await db.prepare(`
+    SELECT u.id, u.name, u.school, u.school_type, u.training_group,
+      GROUP_CONCAT(s.viewpoint || ':' || s.step, '||') as sel_raw,
+      an.goal, an.reflection
+    FROM users u
+    LEFT JOIN selections s ON u.id = s.user_id
+    LEFT JOIN annual_notes an ON an.user_id = u.id AND an.fiscal_year = ?
+    WHERE u.role = 'member'
+    GROUP BY u.id ORDER BY u.training_group, u.name
+  `).bind(fy).all() as any
+  const { results: evts } = await db.prepare(`
+    SELECT a.user_id, e.id as event_id, e.title, e.event_date, sa.satisfaction, sa.comment
+    FROM attendances a JOIN events e ON e.id = a.event_id
+    LEFT JOIN survey_answers sa ON sa.event_id = e.id AND sa.user_id = a.user_id
+    ORDER BY e.event_date DESC
+  `).all() as any
+  const { results: customAnswers } = await db.prepare(`
+    SELECT ca.user_id, ca.event_id, ca.answer_text, q.question_text, q.question_type
+    FROM custom_answers ca JOIN survey_questions q ON q.id = ca.question_id
+    WHERE ca.answer_text != '' ORDER BY ca.event_id, q.sort_order
+  `).all() as any
+  const caMap: Record<number, Record<number, Array<{q:string;a:string;type:string}>>> = {}
+  for (const ca of customAnswers) {
+    if (!caMap[ca.user_id]) caMap[ca.user_id] = {}
+    if (!caMap[ca.user_id][ca.event_id]) caMap[ca.user_id][ca.event_id] = []
+    caMap[ca.user_id][ca.event_id].push({ q: ca.question_text, a: ca.answer_text, type: ca.question_type })
+  }
+  const attMap: Record<number, Array<any>> = {}
+  for (const ev of evts) {
+    if (!attMap[ev.user_id]) attMap[ev.user_id] = []
+    attMap[ev.user_id].push({ title: ev.title, date: ev.event_date, satisfaction: ev.satisfaction||null, comment: ev.comment||'', answers: (caMap[ev.user_id]&&caMap[ev.user_id][ev.event_id])||[] })
+  }
+  const groups: Record<string, any[]> = {}
+  for (const m of members) {
+    const selections: Record<string, number> = {}
+    if (m.sel_raw) {
+      for (const part of (m.sel_raw as string).split('||')) {
+        const [vp, stepStr] = part.split(':')
+        if (vp && stepStr) selections[vp] = parseInt(stepStr)
+      }
+    }
+    const g = (m.training_group && (m.training_group as string).trim()) ? (m.training_group as string).trim() : '未設定'
+    if (!groups[g]) groups[g] = []
+    groups[g].push({ id: m.id, name: m.name, school: m.school || '', school_type: m.school_type || '', goal: m.goal || '', reflection: m.reflection || '', selections, events: attMap[m.id] || [] })
+  }
+  return c.json({ groups, fiscal_year: fy })
+})
+
+// ========== AI伴走支援 API（すべて管理者専用） ==========
+
+// 匿名ID（会員A、会員B…、27人目以降は会員AA…）
+function aiAnonId(i: number): string {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  let s = ''
+  let n = i
+  do { s = A[n % 26] + s; n = Math.floor(n / 26) - 1 } while (n >= 0)
+  return '会員' + s
+}
+
+const AI_MULTI_NOTE = `※この依頼には複数の会員の記録が含まれています。
+会員ごとに、それぞれ独立して①〜⑧を整理してください。
+他の会員と比べたり、順位をつけたりしないでください。
+最後の機械可読ブロックも、会員ごとに1つずつ（人数分）出力してください。
+MEMBER_IDには、各記録に書かれている値（会員A、会員B…）をそのまま使ってください。`
+
+// 匿名プロンプトを生成し、対応表をサーバー側に保存する
+app.post('/api/admin/ai-support/export', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  const me = c.get('user')
+  await ensureSupportTables(db)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+
+  // user_id（1名）でも user_ids（複数）でも受ける
+  let ids: number[] = []
+  if (Array.isArray(body.user_ids)) {
+    for (const v of body.user_ids) { const n = parseInt(String(v), 10); if (n && ids.indexOf(n) === -1) ids.push(n) }
+  }
+  const single = parseInt(String(body.user_id || ''), 10)
+  if (!ids.length && single) ids = [single]
+  if (!ids.length) return c.json({ error: '会員が指定されていません' }, 400)
+  if (ids.length > 60) return c.json({ error: '一度に書き出せるのは60名までです。分けてコピーしてください' }, 400)
+
+  const fy = getCurrentFiscalYear()
+  const nameTokens = await aiLoadNameTokens(db)
+
+  const blocks: string[] = []
+  const mapping: Record<string, number> = {}
+  const hits: Record<string, number> = {}
+  const risks: string[] = []
+  const thinNames: string[] = []
+  const names: string[] = []
+  let idx = 0
+  for (const uid of ids) {
+    const b = await aiBuildMemberBlock(db, uid, fy, aiAnonId(idx), nameTokens)
+    if (!b) continue
+    mapping[aiAnonId(idx)] = uid
+    names.push(b.name)
+    if (b.thin) thinNames.push(b.name)
+    for (const k of Object.keys(b.hits)) hits[k] = (hits[k] || 0) + b.hits[k]
+    for (const w of b.risks) if (risks.indexOf(w) === -1) risks.push(w)
+    blocks.push(b.text)
+    idx++
+  }
+  if (!blocks.length) return c.json({ error: '対象の会員が見つかりません' }, 404)
+
+  const isMulti = blocks.length > 1
+  let prompt = AI_INSTRUCTION
+  if (isMulti) prompt += '\n\n' + AI_MULTI_NOTE
+  prompt += '\n\n===== 対象の会員の記録（' + blocks.length + '名） =====\n'
+  prompt += blocks.join('\n\n--------------------\n\n')
+  prompt += '\n===== 記録ここまで ====='
+
+  // 念のための最終検査：実名・メールが混入していないか
+  const leaked: string[] = []
+  for (const t of nameTokens) { if (t.length >= 2 && prompt.indexOf(t) !== -1) leaked.push(t) }
+  if (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(prompt)) leaked.push('メールアドレス')
+  if (leaked.length) return c.json({ error: '個人情報が残っている可能性があるため中止しました（' + leaked.slice(0, 3).join('・') + '）' }, 500)
+
+  const rawLabel = typeof body.label === 'string' ? body.label.trim().slice(0, 60) : ''
+  const label = isMulti ? ((rawLabel || 'まとめて') + ' ' + blocks.length + '名') : names[0]
+
+  const code = aiBatchCode()
+  const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  await db.prepare("INSERT INTO ai_export_batches (batch_code, scope, label, mapping, created_by, expires_at) VALUES (?,?,?,?,?,?)")
+    .bind(code, isMulti ? 'group' : 'member', label, JSON.stringify(mapping), me.id, expires).run()
+
+  const maskList = Object.keys(hits).map((k) => ({ label: k, count: hits[k] }))
+  return c.json({
+    batch_code: code, prompt, label,
+    count: blocks.length, chars: prompt.length,
+    masked: maskList, risks, thin_names: thinNames, thin: thinNames.length > 0
+  })
+})
+
+// 貼り付け画面で選ぶための、最近のコピー履歴
+app.get('/api/admin/ai-support/batches', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  await ensureSupportTables(db)
+  await db.prepare("DELETE FROM ai_export_batches WHERE expires_at < datetime('now')").run()
+  const { results } = await db.prepare(
+    "SELECT batch_code, scope, label, created_at, (mapping = '{}') as used FROM ai_export_batches ORDER BY id DESC LIMIT 20"
+  ).all() as any
+  return c.json({ batches: results || [] })
+})
+
+// AIの回答を解析して、匿名IDを実会員に戻す（★保存はしない）
+app.post('/api/admin/ai-support/parse', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  await ensureSupportTables(db)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const code = typeof body.batch_code === 'string' ? body.batch_code.trim().toUpperCase() : ''
+  const raw = typeof body.text === 'string' ? body.text : ''
+  if (!code) return c.json({ error: 'どのコピーに対する結果かを選んでください' }, 400)
+  if (!raw.trim()) return c.json({ error: 'AIの回答を貼り付けてください' }, 400)
+
+  const batch = await db.prepare('SELECT * FROM ai_export_batches WHERE batch_code = ?').bind(code).first() as any
+  if (!batch) return c.json({ error: 'コピー履歴が見つかりません（期限切れの可能性があります）' }, 404)
+  let mapping: Record<string, number> = {}
+  try { mapping = JSON.parse(batch.mapping || '{}') } catch (e) { mapping = {} }
+  if (!Object.keys(mapping).length) return c.json({ error: 'このコピーは既に取り込み済みです。もう一度コピーからやり直してください' }, 400)
+
+  // ブロックを抽出（複数可）
+  const blocks: string[] = []
+  const re = /===\s*AI_BANSOU_START\s*===([\s\S]*?)===\s*AI_BANSOU_END\s*===/g
+  let mm: any
+  while ((mm = re.exec(raw)) !== null) blocks.push(mm[1])
+  if (!blocks.length) {
+    return c.json({ error: '指定の形式が見つかりませんでした。AIの回答の最後にある ===AI_BANSOU_START=== から ===AI_BANSOU_END=== までを含めて貼り付けてください' }, 400)
+  }
+
+  const KEYS: Record<string, string> = {
+    MEMBER_ID: 'member_id', IMPORTANT: 'important', INTEREST: 'interest', CHANGE: 'change_note',
+    NEXT_STEP: 'next_step', SUPPORT: 'support', QUESTION: 'question', VOICE: 'voice', CONNECTION: 'connection'
+  }
+  const entries: any[] = []
+  const unmatched: string[] = []
+  const leftovers: string[] = []
+
+  for (const b of blocks) {
+    const lines = b.split(/\r?\n/)
+    const cur: any = {}
+    let key = ''
+    for (const lineRaw of lines) {
+      const line = lineRaw.replace(/\*\*/g, '').replace(/^\s*[-・*]\s*/, '')
+      const m2 = line.match(/^\s*([A-Z_]+)\s*[:：]\s*([\s\S]*)$/)
+      if (m2 && KEYS[m2[1]]) {
+        key = KEYS[m2[1]]
+        cur[key] = String(m2[2] || '').trim()
+      } else if (key) {
+        const t = lineRaw.trim()
+        if (t) cur[key] = (cur[key] ? cur[key] + '\n' : '') + t
+      } else if (lineRaw.trim()) {
+        leftovers.push(lineRaw.trim())
+      }
+    }
+    const anon = String(cur.member_id || '').trim()
+    const uid = mapping[anon]
+    if (!uid) { if (anon) unmatched.push(anon); continue }
+    const u = await db.prepare('SELECT id, name, school FROM users WHERE id = ?').bind(uid).first() as any
+    if (!u) { unmatched.push(anon); continue }
+    const existing = await db.prepare('SELECT * FROM support_notes WHERE user_id = ? AND fiscal_year = ?')
+      .bind(uid, getCurrentFiscalYear()).first() as any
+    entries.push({
+      user_id: uid, anon_id: anon, name: u.name,
+      important: cur.important || '', interest: cur.interest || '', change_note: cur.change_note || '',
+      next_step: cur.next_step || '', support: cur.support || '', question: cur.question || '',
+      voice: cur.voice || '', connection: cur.connection || '',
+      existing: existing ? {
+        important: existing.important || '', interest: existing.interest || '', change_note: existing.change_note || '',
+        next_step: existing.next_step || '', support: existing.support || '', question: existing.question || '',
+        voice: existing.voice || '', connection: existing.connection || '', updated_at: existing.updated_at || ''
+      } : null
+    })
+  }
+  if (!entries.length) {
+    return c.json({ error: 'MEMBER_ID を、このコピーの内容と対応づけられませんでした。選んだコピーが正しいかご確認ください', unmatched }, 400)
+  }
+  return c.json({ entries, unmatched, leftovers: leftovers.slice(0, 20), batch_code: code })
+})
+
+// 事務局が確認・編集した内容だけを保存する
+app.post('/api/admin/ai-support/notes', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  const me = c.get('user')
+  await ensureSupportTables(db)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const notes = Array.isArray(body.notes) ? body.notes : []
+  if (!notes.length) return c.json({ error: '保存する内容がありません' }, 400)
+  const fy = getCurrentFiscalYear()
+  const cut = (v: any) => String(v == null ? '' : v).slice(0, 2000)
+  let saved = 0
+  for (const n of notes) {
+    const uid = parseInt(String(n.user_id || ''), 10)
+    if (!uid) continue
+    const ok = await db.prepare("SELECT id FROM users WHERE id = ? AND role = 'member'").bind(uid).first()
+    if (!ok) continue
+    await db.prepare(`INSERT INTO support_notes
+      (user_id, fiscal_year, important, interest, change_note, next_step, support, question, voice, connection, source, updated_by, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+      ON CONFLICT(user_id, fiscal_year) DO UPDATE SET
+        important=excluded.important, interest=excluded.interest, change_note=excluded.change_note,
+        next_step=excluded.next_step, support=excluded.support, question=excluded.question,
+        voice=excluded.voice, connection=excluded.connection, source=excluded.source,
+        updated_by=excluded.updated_by, updated_at=datetime('now')`)
+      .bind(uid, fy, cut(n.important), cut(n.interest), cut(n.change_note), cut(n.next_step),
+             cut(n.support), cut(n.question), cut(n.voice), cut(n.connection),
+             (n.source === 'manual' ? 'manual' : 'ai'), me.id).run()
+    saved++
+  }
+  // 取り込みが済んだバッチの対応表は消す（不要な保持をしない）
+  const code = typeof body.batch_code === 'string' ? body.batch_code.trim().toUpperCase() : ''
+  if (code) await db.prepare("UPDATE ai_export_batches SET mapping = '{}' WHERE batch_code = ?").bind(code).run()
+  return c.json({ success: true, saved })
+})
+
+// 伴走メモの取得（グループ画面の表示用）
+app.get('/api/admin/ai-support/notes', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  await ensureSupportTables(db)
+  const fy = getCurrentFiscalYear()
+  const { results } = await db.prepare(`SELECT sn.*, u.name as updater_name
+    FROM support_notes sn LEFT JOIN users u ON u.id = sn.updated_by
+    WHERE sn.fiscal_year = ?`).bind(fy).all() as any
+  const map: Record<number, any> = {}
+  for (const r of (results || [])) map[r.user_id] = r
+  return c.json({ notes: map, fiscal_year: fy })
+})
+
+app.get('/api/admin/export', authMiddleware, adminMiddleware, async (c) => {
+  const { results: members } = await c.env.DB.prepare(
+    'SELECT id, name, school, email, role, district, experience_years, grade, position, created_at FROM users ORDER BY created_at'
+  ).all()
+
+  const { results: allSelections } = await c.env.DB.prepare(
+    'SELECT user_id, viewpoint, step, memo FROM selections'
+  ).all()
+
+  const selMap = new Map<number, Record<string, { step: number; memo: string }>>()
+  for (const s of allSelections as any[]) {
+    if (!selMap.has(s.user_id)) selMap.set(s.user_id, {})
+    selMap.get(s.user_id)![s.viewpoint] = { step: s.step, memo: s.memo || '' }
+  }
+
+  const vpLabels: Record<string, string> = {
+    lesson_plan: '授業をつくる',
+    lesson_practice: '授業をする',
+    student_eval: '子どもを見る',
+    connection: 'つながる',
+    research: '深める'
+  }
+  const stepLabels: Record<number, string> = {
+    1: 'STEP1(まずはここから)',
+    2: 'STEP2(自分で工夫する)',
+    3: 'STEP3(みんなと深める)',
+    4: 'STEP4(未来を創る)'
+  }
+  const vps = ['lesson_plan', 'lesson_practice', 'student_eval', 'connection', 'research']
+
+  // BOM for Excel
+  const BOM = '\uFEFF'
+  let csv = BOM
+  // Header
+  const headers = ['名前', '学校名', 'メールアドレス', '役割', '登録日']
+  for (const vp of vps) {
+    headers.push(vpLabels[vp] + '(ステップ)')
+    headers.push(vpLabels[vp] + '(メモ)')
+  }
+  csv += headers.map(h => `"${h}"`).join(',') + '\n'
+
+  // Rows
+  for (const m of members as any[]) {
+    const sels = selMap.get(m.id) || {}
+    const row = [
+      m.name,
+      m.school || '',
+      m.email,
+      m.role === 'admin' ? '管理者' : '会員',
+      m.created_at || ''
+    ]
+    for (const vp of vps) {
+      if (sels[vp]) {
+        row.push(stepLabels[sels[vp].step] || `STEP${sels[vp].step}`)
+        row.push(sels[vp].memo || '')
+      } else {
+        row.push('未選択')
+        row.push('')
+      }
+    }
+    csv += row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',') + '\n'
+  }
+
+  return new Response(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="shakaika_members_export.csv"'
+    }
+  })
+})
+
+// ========== Events API ==========
+function generateEventCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let code = ''
+  const arr = new Uint8Array(8)
+  crypto.getRandomValues(arr)
+  for (let i = 0; i < 8; i++) code += chars[arr[i] % chars.length]
+  return code
+}
+
+app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
+  const { title, description, event_date, custom_questions } = await c.req.json()
+  if (!title || !event_date) return c.json({ error: 'タイトルと日付は必須です' }, 400)
+  const db = c.env.DB
+  const user = c.get('user')
+  let code = ''
+  let res: any
+  for (let attempt = 0; attempt < 5; attempt++) {
+    code = generateEventCode()
+    try {
+      res = await db.prepare(
+        'INSERT INTO events (title, description, event_date, event_code, created_by) VALUES (?,?,?,?,?)'
+      ).bind(title, description || '', event_date, code, user.id).run()
+      break
+    } catch (e: any) {
+      if (attempt === 4 || !e.message?.includes('UNIQUE')) throw e
+    }
+  }
+  const eventId = res.meta.last_row_id as number
+  if (custom_questions && Array.isArray(custom_questions)) {
+    await ensureRequiredColumn(db)
+    for (let i = 0; i < custom_questions.length; i++) {
+      const q = custom_questions[i]
+      try {
+        await db.prepare(
+          'INSERT INTO survey_questions (event_id, question_text, question_type, options, sort_order, required) VALUES (?,?,?,?,?,?)'
+        ).bind(eventId, q.question_text, q.question_type || 'text', q.options || '', i, q.required ? 1 : 0).run()
+      } catch (e) {
+        // required列が無い等の場合は従来形式で保存（互換フォールバック）
+        await db.prepare(
+          'INSERT INTO survey_questions (event_id, question_text, question_type, options, sort_order) VALUES (?,?,?,?,?)'
+        ).bind(eventId, q.question_text, q.question_type || 'text', q.options || '', i).run()
+      }
+    }
+  }
+  return c.json({ id: eventId, event_code: code })
+})
+
+app.get('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  await ensureGuestTable(db)
+  const { results: events } = await db.prepare(
+    'SELECT e.*, (SELECT COUNT(*) FROM attendances a WHERE a.event_id = e.id) + (SELECT COUNT(*) FROM guest_attendances g WHERE g.event_id = e.id) as attendance_count, (SELECT COUNT(*) FROM survey_answers sa WHERE sa.event_id = e.id) as survey_count FROM events e ORDER BY e.event_date DESC'
+  ).all()
+  return c.json({ events })
+})
+
+app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE id = ?').bind(id).first()
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const { results: questions } = await db.prepare(
+    'SELECT * FROM survey_questions WHERE event_id = ? ORDER BY sort_order'
+  ).bind(id).all()
+  const { results: attendances } = await db.prepare(
+    'SELECT a.*, u.name, u.email, u.school, u.school_type FROM attendances a JOIN users u ON a.user_id = u.id WHERE a.event_id = ? ORDER BY a.attended_at'
+  ).bind(id).all()
+  const { results: answers } = await db.prepare(
+    'SELECT sa.*, u.name, u.email, u.school, u.school_type FROM survey_answers sa JOIN users u ON sa.user_id = u.id WHERE sa.event_id = ?'
+  ).bind(id).all()
+  const { results: customAnswers } = await db.prepare(
+    'SELECT ca.*, u.name, u.school_type FROM custom_answers ca JOIN users u ON ca.user_id = u.id WHERE ca.event_id = ?'
+  ).bind(id).all()
+  await ensureGuestTable(db)
+  const { results: guests } = await db.prepare(
+    'SELECT * FROM guest_attendances WHERE event_id = ? ORDER BY attended_at'
+  ).bind(id).all()
+  return c.json({ event, questions, attendances, answers, customAnswers, guests })
+})
+
+app.put('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const title = typeof body.title === 'string' ? body.title.trim() : ''
+  if (!title) return c.json({ error: 'イベント名を入力してください' }, 400)
+  if (title.length > 100) return c.json({ error: 'イベント名が長すぎます' }, 400)
+  const db = c.env.DB
+  const ev = await db.prepare('SELECT id FROM events WHERE id = ?').bind(id).first()
+  if (!ev) return c.json({ error: 'イベントが見つかりません' }, 404)
+  await db.prepare('UPDATE events SET title = ? WHERE id = ?').bind(title, id).run()
+  return c.json({ success: true, title })
+})
+
+app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const db = c.env.DB
+  await db.prepare('DELETE FROM custom_answers WHERE event_id = ?').bind(id).run()
+  await db.prepare('DELETE FROM survey_answers WHERE event_id = ?').bind(id).run()
+  await db.prepare('DELETE FROM survey_questions WHERE event_id = ?').bind(id).run()
+  await db.prepare('DELETE FROM attendances WHERE event_id = ?').bind(id).run()
+  await ensureGuestTable(db)
+  await db.prepare('DELETE FROM guest_attendances WHERE event_id = ?').bind(id).run()
+  await db.prepare('DELETE FROM events WHERE id = ?').bind(id).run()
+  return c.json({ success: true })
+})
+
+app.get('/api/admin/events/:id/export', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE id = ?').bind(id).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const { results: questions } = await db.prepare('SELECT * FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(id).all() as any
+  const { results: attendances } = await db.prepare('SELECT a.*, u.name, u.email, u.school, u.district, u.experience_years FROM attendances a JOIN users u ON a.user_id = u.id WHERE a.event_id = ?').bind(id).all() as any
+  await ensureGuestTable(db)
+  const { results: guestRows } = await db.prepare('SELECT * FROM guest_attendances WHERE event_id = ? ORDER BY attended_at').bind(id).all() as any
+  const { results: guestAnsRows } = await db.prepare('SELECT guest_id, question_id, answer_text FROM guest_answers WHERE event_id = ?').bind(id).all() as any
+  const gaMap = new Map<number, Record<number, string>>()
+  for (const ga of (guestAnsRows || [])) {
+    if (!gaMap.has(ga.guest_id)) gaMap.set(ga.guest_id, {})
+    gaMap.get(ga.guest_id)![ga.question_id] = ga.answer_text
+  }
+  const { results: answers } = await db.prepare('SELECT sa.*, u.name, u.email FROM survey_answers sa JOIN users u ON sa.user_id = u.id WHERE sa.event_id = ?').bind(id).all() as any
+  const { results: customAnswers } = await db.prepare('SELECT * FROM custom_answers WHERE event_id = ?').bind(id).all() as any
+  const caMap = new Map<number, Record<number, string>>()
+  for (const ca of customAnswers) {
+    if (!caMap.has(ca.user_id)) caMap.set(ca.user_id, {})
+    caMap.get(ca.user_id)![ca.question_id] = ca.answer_text
+  }
+  const ansMap = new Map<number, any>()
+  for (const a of answers) ansMap.set(a.user_id, a)
+  const BOM = '\uFEFF'
+  const headers = ['名前', '学校名', '区', '経験年数', 'メール', '出席時刻', '満足度', '感想']
+  for (const q of questions) headers.push(q.question_text)
+  let csv = BOM + headers.map((h: string) => `"${h}"`).join(',') + '\n'
+  for (const att of attendances) {
+    const ans = ansMap.get(att.user_id)
+    const ca = caMap.get(att.user_id) || {}
+    const row = [att.name, att.school || '', att.district || '', (att.experience_years !== null && att.experience_years !== undefined && att.experience_years !== '') ? String(att.experience_years) + '年目' : '', att.email, att.attended_at, ans ? ans.satisfaction : '', ans ? (ans.comment || '') : '']
+    for (const q of questions) row.push(ca[q.id as number] || '')
+    csv += row.map((v: any) => `"${String(v).replace(/"/g, '""')}"`).join(',') + '\n'
+  }
+  for (const g of guestRows) {
+    const ga = gaMap.get(g.id) || {}
+    const row = [String(g.name) + '（ゲスト）', g.school || '', g.district || '', (g.experience_years !== null && g.experience_years !== undefined) ? String(g.experience_years) + '年目' : '', '', g.attended_at, '', '']
+    for (const q of questions) row.push(ga[q.id as number] || '')
+    csv += row.map((v: any) => `"${String(v).replace(/"/g, '""')}"`).join(',') + '\n'
+  }
+  return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${event.title}_export.csv"` } })
+})
+
+// ========== Attendance & Survey (Member) ==========
+
+// 公開：イベント情報（ゲスト出席用）
+app.get('/api/events/:code/info', async (c) => {
+  const code = c.req.param('code')
+  const event = await c.env.DB.prepare('SELECT title, description, event_date FROM events WHERE event_code = ? AND is_active = 1').bind(code).first()
+  if (!event) return c.json({ error: 'イベントが見つからないか、受付が終了しています' }, 404)
+  return c.json({ event })
+})
+
+// 公開：ゲスト出席（未登録の方）
+app.post('/api/events/:code/guest-attend', async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT id FROM events WHERE event_code = ? AND is_active = 1').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つからないか、受付が終了しています' }, 404)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const name = typeof body.name === 'string' ? body.name.trim() : ''
+  if (!name) return c.json({ error: 'お名前を入力してください' }, 400)
+  if (name.length > 50) return c.json({ error: 'お名前が長すぎます' }, 400)
+  const school = typeof body.school === 'string' ? body.school.trim().slice(0, 100) : ''
+  const district = typeof body.district === 'string' ? body.district.trim().slice(0, 50) : ''
+  let exp: number | null = null
+  if (body.experience_years !== undefined && body.experience_years !== null && body.experience_years !== '') {
+    const n = parseInt(String(body.experience_years), 10)
+    if (!isNaN(n) && n >= 0 && n <= 60) exp = n
+  }
+  await ensureGuestTable(db)
+  const qn = await db.prepare('SELECT COUNT(*) as n FROM survey_questions WHERE event_id = ?').bind(event.id).first() as any
+  const hasQuestions = !!(qn && qn.n > 0)
+  const dup = await db.prepare('SELECT id, token FROM guest_attendances WHERE event_id = ? AND name = ? AND school = ?').bind(event.id, name, school).first() as any
+  if (dup) {
+    let gtok = dup.token || ''
+    if (!gtok) {
+      gtok = crypto.randomUUID()
+      await db.prepare('UPDATE guest_attendances SET token = ? WHERE id = ?').bind(gtok, dup.id).run()
+    }
+    return c.json({ success: true, attended: false, message: '既に出席を記録済みです', guest_id: dup.id, guest_token: gtok, has_questions: hasQuestions })
+  }
+  const gtok = crypto.randomUUID()
+  const ins = await db.prepare("INSERT INTO guest_attendances (event_id, name, school, district, experience_years, token, attended_at) VALUES (?,?,?,?,?,?,datetime('now'))").bind(event.id, name, school, district, exp, gtok).run()
+  return c.json({ success: true, attended: true, guest_id: ins.meta.last_row_id, guest_token: gtok, has_questions: hasQuestions })
+})
+
+// 公開：ゲスト出席状況・アンケート取得（再訪用）
+app.post('/api/events/:code/guest-status', async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const gid = parseInt(String(body.guest_id || ''), 10)
+  const gtok = typeof body.guest_token === 'string' ? body.guest_token : ''
+  await ensureGuestTable(db)
+  const guest = await db.prepare('SELECT * FROM guest_attendances WHERE id = ? AND event_id = ?').bind(gid || 0, event.id).first() as any
+  if (!guest || !gtok || guest.token !== gtok) return c.json({ error: '出席記録が見つかりません' }, 404)
+  await ensureRequiredColumn(db)
+  const { results: questions } = await db.prepare('SELECT id, question_text, question_type, options, sort_order' + (_reqColOk ? ', required' : '') + ' FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
+  const { results: answers } = await db.prepare('SELECT question_id, answer_text FROM guest_answers WHERE guest_id = ? AND event_id = ?').bind(guest.id, event.id).all()
+  return c.json({ event: { title: event.title, event_date: event.event_date }, guest: { id: guest.id, name: guest.name }, questions, answers })
+})
+
+// 公開：ゲスト出席記録の照合（別端末用）
+app.post('/api/events/:code/guest-find', async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT id FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const name = typeof body.name === 'string' ? body.name.trim() : ''
+  const school = typeof body.school === 'string' ? body.school.trim() : ''
+  if (!name) return c.json({ error: 'お名前を入力してください' }, 400)
+  await ensureGuestTable(db)
+  const guest = await db.prepare('SELECT id, token, name FROM guest_attendances WHERE event_id = ? AND name = ? AND school = ?').bind(event.id, name, school).first() as any
+  if (!guest) return c.json({ error: '出席記録が見つかりません。受付時と同じお名前・学校名を入力してください' }, 404)
+  let gtok = guest.token || ''
+  if (!gtok) {
+    gtok = crypto.randomUUID()
+    await db.prepare('UPDATE guest_attendances SET token = ? WHERE id = ?').bind(gtok, guest.id).run()
+  }
+  return c.json({ guest_id: guest.id, guest_token: gtok, name: guest.name })
+})
+
+// 公開：ゲストのアンケート回答
+app.post('/api/events/:code/guest-survey', async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT id FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const gid = parseInt(String(body.guest_id || ''), 10)
+  const gtok = typeof body.guest_token === 'string' ? body.guest_token : ''
+  await ensureGuestTable(db)
+  const guest = await db.prepare('SELECT id, token FROM guest_attendances WHERE id = ? AND event_id = ?').bind(gid || 0, event.id).first() as any
+  if (!guest || !gtok || guest.token !== gtok) return c.json({ error: '出席記録が見つかりません' }, 404)
+  const answers = Array.isArray(body.answers) ? body.answers : []
+  for (const a of answers) {
+    const qid = parseInt(String((a && a.question_id) || ''), 10)
+    if (!qid) continue
+    const text = (a && typeof a.answer_text === 'string') ? a.answer_text.slice(0, 2000) : ''
+    await db.prepare("INSERT INTO guest_answers (guest_id, event_id, question_id, answer_text, answered_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(guest_id, question_id) DO UPDATE SET answer_text=excluded.answer_text, answered_at=datetime('now')").bind(guest.id, event.id, qid, text).run()
+  }
+  return c.json({ success: true })
+})
+
+app.get('/api/events/:code', authMiddleware, async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db.prepare('SELECT * FROM events WHERE event_code = ? AND is_active = 1').bind(code).first()
+  if (!event) return c.json({ error: 'イベントが見つからないか、受付が終了しています' }, 404)
+  const { results: questions } = await db.prepare('SELECT * FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
+  const user = c.get('user')
+  const attendance = await db.prepare('SELECT * FROM attendances WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
+  const survey = await db.prepare('SELECT * FROM survey_answers WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
+  const { results: myCustom } = await db.prepare('SELECT * FROM custom_answers WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).all()
+  return c.json({ event, questions, attendance, survey, customAnswers: myCustom, userSchoolType: (user as any).school_type || '' })
+})
+
+app.post('/api/events/:code/attend', authMiddleware, async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  const event = await db
+    .prepare('SELECT id FROM events WHERE event_code = ? AND is_active = 1')
+    .bind(code)
+    .first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+
+  const user = c.get('user')
+
+  // 冪等（idempotent）：同じユーザーが何回叩いても「出席済み」なら成功扱い
+  const result = await db
+    .prepare("INSERT OR IGNORE INTO attendances (event_id, user_id, attended_at) VALUES (?,?,datetime('now'))")
+    .bind(event.id, user.id)
+    .run()
+
+  // D1のmeta.changes: 1なら新規作成、0なら既に存在
+  const attended = (result?.meta?.changes ?? 0) > 0
+
+  return c.json({ success: true, attended })
+})
+
+app.post('/api/events/:code/survey', authMiddleware, async (c) => {
+  const code = c.req.param('code')
+  const db = c.env.DB
+  // 出席済みの会員は、受付終了後（is_active=0）でもマイページから回答できる
+  const event = await db.prepare('SELECT * FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const user = c.get('user')
+  const att = await db.prepare('SELECT id FROM attendances WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
+  if (!att) return c.json({ error: 'このイベントの出席記録がありません' }, 403)
+  const { satisfaction, comment, custom_answers } = await c.req.json()
+  await db.prepare(`INSERT INTO survey_answers (event_id, user_id, satisfaction, comment, answered_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(event_id, user_id) DO UPDATE SET satisfaction=excluded.satisfaction, comment=excluded.comment, answered_at=datetime('now')`).bind(event.id, user.id, satisfaction || null, comment || '').run()
+  if (custom_answers && Array.isArray(custom_answers)) {
+    for (const ca of custom_answers) {
+      await db.prepare('INSERT INTO custom_answers (event_id, user_id, question_id, answer_text) VALUES (?,?,?,?) ON CONFLICT(event_id, user_id, question_id) DO UPDATE SET answer_text=excluded.answer_text').bind(event.id, user.id, ca.question_id, ca.answer_text || '').run()
+    }
+  }
+  // Grant point for survey completion (1 point per event, idempotent)
+  const eventDate = new Date(event.event_date)
+  const fy = eventDate.getMonth() + 1 >= 4 ? eventDate.getFullYear() : eventDate.getFullYear() - 1
+  await db.prepare(
+    'INSERT OR IGNORE INTO points (user_id, event_id, points, reason, fiscal_year) VALUES (?, ?, 1, ?, ?)'
+  ).bind(user.id, event.id, 'event_survey', fy).run()
+  return c.json({ success: true })
+})
+
+// ========== Health ==========
+app.get('/api/health', (c) => c.json({ status: 'ok' }))
+
+// ========== HTML Pages ==========
+
+const commonHead = `
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap');
+  :root {
+    --bg-color: #fffaf0;
+    --header-line: #d84315;
+    --text-main: #444;
+    --cat-class: #8d6e63;
+    --cat-connect: #66bb6a;
+    --cat-research: #42a5f5;
+    --cat-student: #5c6bc0;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: 'Noto Sans JP', sans-serif; color: var(--text-main); background-color: var(--bg-color); padding: 0; margin: 0; line-height: 1.5; }
+</style>`
+
+// --- Login / Register Page ---
+// --- Forgot Password Page ---
+app.get('/forgot-password', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>パスワードを忘れた方 - 社会科同好会</title>
+<style>
+  .auth-container { max-width: 440px; margin: 60px auto; padding: 0 20px; }
+  .auth-card { background: #fff; border-radius: 16px; padding: 40px 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; }
+  .auth-card h1 { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); font-size: 20px; text-align: center; margin: 0 0 8px; }
+  .auth-card .sub { text-align: center; color: #888; font-size: 13px; margin-bottom: 24px; line-height: 1.6; }
+  .form-group { margin-bottom: 18px; }
+  .form-group label { display: block; font-weight: 500; margin-bottom: 5px; font-size: 13px; color: #555; }
+  .form-group input { width: 100%; padding: 10px 14px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 15px; font-family: inherit; transition: border-color 0.2s; outline: none; box-sizing: border-box; }
+  .form-group input:focus { border-color: var(--header-line); }
+  .btn { width: 100%; padding: 12px; border: none; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.2s; }
+  .btn-primary { background: var(--header-line); color: #fff; }
+  .btn-primary:hover { background: #bf360c; }
+  .btn-back { background: #f5f5f5; color: #888; margin-top: 10px; font-size: 14px; }
+  .error-msg { background: #ffebee; color: #c62828; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .success-msg { background: #e8f5e9; color: #2e7d32; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .logo { text-align: center; margin-bottom: 20px; }
+  .logo span { display: block; font-size: 10px; letter-spacing: 2px; color: #999; }
+  .logo strong { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; color: var(--header-line); }
+  .step-label { font-size: 11px; color: #bbb; text-align: center; margin-bottom: 16px; letter-spacing: 1px; }
+  .question-box { background: #fff8f0; border: 2px solid #ffcc80; border-radius: 10px; padding: 14px 16px; font-size: 15px; font-weight: 700; color: #e65100; margin-bottom: 18px; }
+</style>
+</head><body>
+<div class="auth-container">
+  <div class="auth-card">
+    <div class="logo"><span>NAGOYA SHAKAIKA</span><strong>社会科同好会</strong></div>
+    <h1><i class="fas fa-key"></i> パスワードの再設定</h1>
+    <div id="error" class="error-msg"></div>
+    <div id="success" class="success-msg"></div>
+    <div id="step1">
+      <p class="sub">登録したメールアドレスと秘密の質問の答えで本人確認を行います。</p>
+      <div class="step-label">STEP 1 / 3　メールアドレスを入力</div>
+      <div class="form-group">
+        <label><i class="fas fa-envelope"></i> メールアドレス</label>
+        <input type="email" id="fpEmail" placeholder="example@email.com">
+      </div>
+      <button class="btn btn-primary" onclick="checkEmail()"><i class="fas fa-arrow-right"></i> 次へ</button>
+    </div>
+    <div id="step2" style="display:none">
+      <div class="step-label">STEP 2 / 3　秘密の質問に答える</div>
+      <div class="question-box" id="questionText"></div>
+      <div class="form-group">
+        <label><i class="fas fa-comment"></i> 答え</label>
+        <input type="text" id="fpAnswer" placeholder="答えを入力">
+      </div>
+      <button class="btn btn-primary" onclick="checkAnswer()"><i class="fas fa-arrow-right"></i> 次へ</button>
+    </div>
+    <div id="step3" style="display:none">
+      <div class="step-label">STEP 3 / 3　新しいパスワードを設定</div>
+      <div class="form-group">
+        <label><i class="fas fa-lock"></i> 新しいパスワード（4文字以上）</label>
+        <input type="password" id="fpNewPassword" placeholder="新しいパスワード" minlength="4">
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-lock"></i> 確認のためもう一度</label>
+        <input type="password" id="fpNewPassword2" placeholder="もう一度入力">
+      </div>
+      <button class="btn btn-primary" onclick="doReset()"><i class="fas fa-check"></i> パスワードを変更する</button>
+    </div>
+    <button class="btn btn-back" onclick="window.location.href='/login'"><i class="fas fa-arrow-left"></i> ログイン画面に戻る</button>
+  </div>
+</div>
+<script>
+let _email = '';
+function showError(msg) { const e = document.getElementById('error'); e.textContent = msg; e.style.display = 'block'; document.getElementById('success').style.display='none'; }
+function showSuccess(msg) { const e = document.getElementById('success'); e.textContent = msg; e.style.display = 'block'; document.getElementById('error').style.display='none'; }
+function hideMessages() { document.getElementById('error').style.display='none'; document.getElementById('success').style.display='none'; }
+async function checkEmail() {
+  hideMessages();
+  const email = document.getElementById('fpEmail').value.trim();
+  if (!email) { showError('メールアドレスを入力してください'); return; }
+  try {
+    const res = await fetch('/api/auth/get-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email }) });
+    const data = await res.json();
+    if (!res.ok) { showError(data.error); return; }
+    _email = email;
+    document.getElementById('questionText').textContent = data.question;
+    document.getElementById('step1').style.display = 'none';
+    document.getElementById('step2').style.display = 'block';
+  } catch(e) { showError('通信エラーが発生しました'); }
+}
+function checkAnswer() {
+  hideMessages();
+  const answer = document.getElementById('fpAnswer').value.trim();
+  if (!answer) { showError('答えを入力してください'); return; }
+  document.getElementById('step2').style.display = 'none';
+  document.getElementById('step3').style.display = 'block';
+}
+async function doReset() {
+  hideMessages();
+  const answer = document.getElementById('fpAnswer').value.trim();
+  const pw1 = document.getElementById('fpNewPassword').value;
+  const pw2 = document.getElementById('fpNewPassword2').value;
+  if (pw1.length < 4) { showError('パスワードは4文字以上にしてください'); return; }
+  if (pw1 !== pw2) { showError('パスワードが一致しません'); return; }
+  try {
+    const res = await fetch('/api/auth/reset-by-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email: _email, answer, newPassword: pw1 }) });
+    const data = await res.json();
+    if (!res.ok) { document.getElementById('step3').style.display = 'none'; document.getElementById('step2').style.display = 'block'; showError(data.error); return; }
+    showSuccess('パスワードを変更しました！ログイン画面からログインしてください。');
+    document.getElementById('step3').style.display = 'none';
+    setTimeout(() => { window.location.href = '/login'; }, 2000);
+  } catch(e) { showError('通信エラーが発生しました'); }
+}
+</script>
+</body></html>`)
+})
+
+app.get('/login', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>ログイン - 社会科同好会</title>
+<style>
+  .auth-container { max-width: 440px; margin: 60px auto; padding: 0 20px; }
+  .auth-card { background: #fff; border-radius: 16px; padding: 40px 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; }
+  .auth-card h1 { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); font-size: 22px; text-align: center; margin: 0 0 8px; }
+  .auth-card .sub { text-align: center; color: #888; font-size: 13px; margin-bottom: 28px; }
+  .form-group { margin-bottom: 18px; }
+  .form-group label { display: block; font-weight: 500; margin-bottom: 5px; font-size: 13px; color: #555; }
+  .form-group input { width: 100%; padding: 10px 14px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 15px; font-family: inherit; transition: border-color 0.2s; outline: none; }
+  .form-group input:focus { border-color: var(--header-line); }
+  .btn { width: 100%; padding: 12px; border: none; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.2s; }
+  .btn-primary { background: var(--header-line); color: #fff; }
+  .btn-primary:hover { background: #bf360c; }
+  .btn-secondary { background: #fff; color: var(--header-line); border: 2px solid var(--header-line); margin-top: 10px; }
+  .btn-secondary:hover { background: #fff3e0; }
+  .tabs { display: flex; margin-bottom: 24px; border-radius: 10px; overflow: hidden; border: 2px solid #e0d6c8; }
+  .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; font-weight: 700; font-size: 14px; background: #fafafa; color: #999; transition: all 0.2s; }
+  .tab.active { background: var(--header-line); color: #fff; }
+  .error-msg { background: #ffebee; color: #c62828; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .success-msg { background: #e8f5e9; color: #2e7d32; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .logo { text-align: center; margin-bottom: 20px; }
+  .logo span { display: block; font-size: 10px; letter-spacing: 2px; color: #999; }
+  .logo strong { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; color: var(--header-line); }
+</style>
+</head><body>
+<div class="auth-container">
+  <div class="auth-card">
+    <div class="logo"><span>NAGOYA SHAKAIKA</span><strong>社会科同好会</strong></div>
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('login')">ログイン</div>
+      <div class="tab" onclick="switchTab('register')">新規登録</div>
+    </div>
+    <div id="error" class="error-msg"></div>
+    <div id="success" class="success-msg"></div>
+
+    <form id="loginForm" onsubmit="return handleLogin(event)">
+      <div class="form-group">
+        <label><i class="fas fa-envelope"></i> メールアドレス</label>
+        <input type="email" id="loginEmail" required placeholder="example@email.com">
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-lock"></i> パスワード</label>
+        <input type="password" id="loginPassword" required placeholder="パスワードを入力">
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-sign-in-alt"></i> ログイン</button>
+      <p style="text-align:center;margin-top:12px;font-size:13px;"><a href="/forgot-password" style="color:#e65100;text-decoration:none;"><i class="fas fa-key"></i> パスワードを忘れた方はこちら</a></p>
+    </form>
+
+    <form id="registerForm" style="display:none" onsubmit="return handleRegister(event)">
+      <div class="form-group">
+        <label><i class="fas fa-user"></i> お名前</label>
+        <input type="text" id="regName" required placeholder="山田 太郎">
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-school"></i> 学校名</label>
+        <input type="text" id="regSchool" required placeholder="〇〇小学校">
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-chalkboard-teacher"></i> 校種・役職</label>
+        <select id="regSchoolType" required>
+          <option value="">選択してください</option>
+          <option value="elementary">小学校教諭</option>
+          <option value="junior_high">中学校教諭</option>
+          <option value="admin_staff">主幹・管理職</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-map-marker-alt"></i> 区</label>
+        <select id="regDistrict" required>
+          <option value="">選択してください</option>
+          <option>千種区</option><option>東区</option><option>北区</option><option>西区</option><option>中村区</option><option>中区</option><option>昭和区</option><option>瑞穂区</option><option>熱田区</option><option>中川区</option><option>港区</option><option>南区</option><option>守山区</option><option>緑区</option><option>名東区</option><option>天白区</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-calendar-alt"></i> 教員経験年数</label>
+        <input type="number" id="regExperience" required min="1" max="45" placeholder="例: 5">
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-users"></i> 担当学年（複数選択OK）</label>
+        <div id="regGradeChecks" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">
+          ${['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','主幹・管理職','その他'].map(g =>
+            `<label style="display:inline-flex;align-items:center;gap:3px;font-size:13px;background:#f5f5f5;padding:4px 10px;border-radius:14px;cursor:pointer;"><input type="checkbox" value="${g}" style="margin:0;">${g}</label>`
+          ).join('')}
+        </div>
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-envelope"></i> メールアドレス</label>
+        <input type="email" id="regEmail" required placeholder="example@email.com">
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-lock"></i> パスワード</label>
+        <input type="password" id="regPassword" required placeholder="4文字以上" minlength="4">
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-user-plus"></i> 登録する</button>
+      <p style="margin-top:10px; font-size:11px; color:#aaa; text-align:center; line-height:1.6;">ご登録いただいた情報は、社会科同好会の活動運営にのみ使用します。<br>第三者への提供・会外での利用は一切行いません。</p>
+    </form>
+  </div>
+</div>
+<script>
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach((t,i) => {
+    t.classList.toggle('active', (tab==='login' && i===0) || (tab==='register' && i===1));
+  });
+  document.getElementById('loginForm').style.display = tab==='login' ? 'block' : 'none';
+  document.getElementById('registerForm').style.display = tab==='register' ? 'block' : 'none';
+  document.getElementById('error').style.display = 'none';
+  document.getElementById('success').style.display = 'none';
+}
+function showError(msg) { const e = document.getElementById('error'); e.textContent = msg; e.style.display = 'block'; document.getElementById('success').style.display='none'; }
+function showSuccess(msg) { const e = document.getElementById('success'); e.textContent = msg; e.style.display = 'block'; document.getElementById('error').style.display='none'; }
+
+async function handleLogin(e) {
+  e.preventDefault();
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: document.getElementById('loginEmail').value, password: document.getElementById('loginPassword').value })
+    });
+    const data = await res.json();
+    if (!res.ok) { showError(data.error); return false; }
+    localStorage.setItem('token', data.token);
+    localStorage.setItem('user', JSON.stringify(data.user));
+    const redirectTo = (function(){ const r = new URLSearchParams(window.location.search).get('redirect'); return r && r.startsWith('/') && !r.startsWith('//') ? r : null; })();
+    window.location.href = redirectTo || (data.user.role === 'admin' ? '/admin' : '/mypage');
+  } catch(err) { showError('通信エラーが発生しました'); }
+  return false;
+}
+
+async function handleRegister(e) {
+  e.preventDefault();
+  try {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: document.getElementById('regName').value, school: document.getElementById('regSchool').value, school_type: document.getElementById('regSchoolType').value, district: document.getElementById('regDistrict').value, experience_years: parseInt(document.getElementById('regExperience').value) || null, grade: Array.from(document.querySelectorAll('#regGradeChecks input:checked')).map(function(c){return c.value;}).join(','), email: document.getElementById('regEmail').value, password: document.getElementById('regPassword').value })
+    });
+    const data = await res.json();
+    if (!res.ok) { showError(data.error); return false; }
+    localStorage.setItem('token', data.token);
+    localStorage.setItem('user', JSON.stringify(data.user));
+    const redirectTo = (function(){ const r = new URLSearchParams(window.location.search).get('redirect'); return r && r.startsWith('/') && !r.startsWith('//') ? r : null; })();
+    window.location.href = redirectTo || '/mypage';
+  } catch(err) { showError('通信エラーが発生しました'); }
+  return false;
+}
+
+// Redirect if already logged in
+const token = localStorage.getItem('token');
+if (token) {
+  fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } })
+    .then(r => { if (!r.ok) { localStorage.clear(); return {}; } return r.json(); })
+    .then(d => { if (d.user) { const redirectTo = (function(){ const r = new URLSearchParams(window.location.search).get('redirect'); return r && r.startsWith('/') && !r.startsWith('//') ? r : null; })(); window.location.href = redirectTo || (d.user.role === 'admin' ? '/admin' : '/mypage'); } })
+    .catch(() => { localStorage.clear(); });
+}
+</script>
+</body></html>`)
+})
+
+// --- Member My Page (with interactive rubric) ---
+app.get('/mypage', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>マイページ - 社会科同好会</title>
+<style>
+  .top-bar { background: #fff; border-bottom: 3px solid var(--header-line); padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+  .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); font-size: 18px; font-weight: 700; }
+  .top-bar .user-info { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+  .top-bar .user-info .name { font-weight: 700; color: #555; }
+  .btn-sm { padding: 6px 14px; border-radius: 8px; border: none; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .btn-logout { background: #eee; color: #888; }
+  .btn-logout:hover { background: #ddd; }
+  .btn-save { background: var(--header-line); color: #fff; font-size: 14px; padding: 10px 28px; border-radius: 10px; }
+  .btn-save:hover { background: #bf360c; }
+  .btn-admin { background: #42a5f5; color: #fff; }
+  .btn-admin:hover { background: #1e88e5; }
+
+  .main { max-width: 1250px; margin: 20px auto; padding: 0 16px; }
+  .guide { background: #fff3e0; border-left: 4px solid #ffb74d; padding: 12px 16px; border-radius: 0 8px 8px 0; margin-bottom: 20px; font-size: 13px; color: #5d4037; }
+  .guide strong { color: #e65100; }
+
+  .container { max-width: 1250px; margin: 0 auto; background-color: #fff; padding: 20px 24px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-radius: 12px; border: 2px solid #f0e6d2; overflow-x: hidden; }
+  .table-scroll-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 3px dashed var(--header-line); padding-bottom: 8px; margin-bottom: 15px; }
+  .title-block h1 { font-family: 'Zen Maru Gothic', sans-serif; font-size: 22px; margin: 0; line-height: 1.2; color: var(--header-line); }
+  .title-block .subtitle { font-size: 12px; color: #666; margin-top: 4px; font-weight: 500; }
+
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 10.5pt; table-layout: fixed; border-radius: 8px; overflow: hidden; border: 1px solid #ddd; min-width: 900px; }
+  th, td { border: 1px solid #e0e0e0; padding: 7px 9px; vertical-align: middle; word-wrap: break-word; }
+  .col-category { width: 30px; text-align: center; font-weight: bold; writing-mode: vertical-rl; letter-spacing: 3px; color: #fff; border-bottom: 1px solid rgba(255,255,255,0.3); }
+  .col-viewpoint { width: 85px; background-color: #fff8e1; font-weight: bold; color: #5d4037; font-family: 'Zen Maru Gothic', sans-serif; cursor: pointer; user-select: none; }
+  .col-viewpoint:hover { background-color: #fff0c0; }
+  .vp-toggle { font-size: 10px; color: #aaa; margin-right: 2px; }
+  .vp-hint { display: block; font-size: 9px; color: #aaa; font-weight: normal; margin-top: 4px; }
+  tr:not(.vp-collapsed) .vp-hint { display: none; }
+  tr.vp-collapsed .col-step .cell-content p { display: none; }
+  tr.vp-collapsed .col-step .memo-input { display: none; }
+  tr.vp-collapsed .col-step.selected .memo-input { display: block; }
+  tr.vp-collapsed .col-step .memo-hint { display: none; }
+  tr.vp-collapsed .col-step { padding: 5px 7px; vertical-align: middle; }
+  .col-step { width: 22%; background-color: #fff; vertical-align: top; cursor: pointer; transition: all 0.2s; position: relative; }
+  @media (hover: hover) and (pointer: fine) { .col-step:not(.selected):hover { background-color: #f5f5f5; } }
+  .col-step.selected { background-color: #fff3e0; box-shadow: inset 0 0 0 3px var(--header-line); border-radius: 2px; }
+  .col-step.selected::after { content: '\\2713'; position: absolute; top: 4px; right: 6px; color: var(--header-line); font-size: 18px; font-weight: bold; }
+  thead th { text-align: center; background-color: #fff; border-bottom: 3px solid var(--header-line); padding: 8px 5px; }
+  .step-header { display: flex; flex-direction: column; align-items: center; }
+  .step-label { font-size: 13px; font-weight: bold; color: var(--header-line); margin-bottom: 2px; font-family: 'Zen Maru Gothic', sans-serif; }
+  .step-desc { font-size: 9px; font-weight: bold; color: #5d4037; background-color: #ffccbc; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+  .cell-content { display: flex; flex-direction: column; }
+  .cell-content p { margin: 0 0 2px 0; font-size: 9.5pt; line-height: 1.4; }
+  .keyword { font-weight: bold; color: #bf360c; display: inline-block; margin-bottom: 3px; font-size: 10.5pt; font-family: 'Zen Maru Gothic', sans-serif; border-bottom: 2px dotted #ffab91; padding-bottom: 1px; }
+  .cat-class { background-color: var(--cat-class); }
+  .cat-connect { background-color: var(--cat-connect); }
+  .cat-research { background-color: var(--cat-research); }
+  .cat-student { background-color: var(--cat-student); }
+  .ss-term { background: linear-gradient(transparent 70%, #fff59d 70%); font-weight: bold; color: #555; }
+
+  .row-action td { background-color: #fff3e0; border-top: 3px solid #ffb74d; padding: 6px 8px; }
+  .action-list { margin: 0; padding-left: 14px; font-size: 9pt; list-style-type: none; }
+  .action-list li { margin-bottom: 2px; }
+  .action-list li::before { content: '\\1F449'; font-size: 8px; margin-right: 4px; }
+
+  .footer-note { margin-top: 15px; display: flex; justify-content: space-between; align-items: flex-start; font-size: 8.5pt; }
+  .save-area { text-align: center; margin-top: 20px; }
+  .save-status { font-size: 13px; color: #2e7d32; margin-top: 10px; display: none; }
+
+
+  .notes-card { background: #fff; border: 2px dashed #ffb74d; padding: 14px 16px; border-radius: 12px; margin: 12px 0 14px; }
+  .notes-card h2 { font-family: 'Zen Maru Gothic', sans-serif; font-size: 16px; margin: 0 0 8px; color: #e65100; display: flex; align-items: center; gap: 8px; }
+  .notes-card textarea { width: 100%; min-height: 84px; padding: 10px 12px; border: 2px solid #e0d6c8; border-radius: 10px; font-size: 14px; font-family: inherit; resize: vertical; outline: none; }
+  .notes-card textarea:focus { border-color: var(--header-line); }
+  .notes-meta { font-size: 12px; color: #888; margin-top: 6px; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+
+  .history-card { background: #fff; border: 2px solid #f0e6d2; border-radius: 12px; padding: 16px; margin-top: 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+  .history-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .history-header h2 { margin: 0; font-family: 'Zen Maru Gothic', sans-serif; color: #2e7d32; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+  .fy-select { padding: 6px 10px; border: 2px solid #ddd; border-radius: 8px; font-family: inherit; font-size: 13px; }
+  .fy-select:focus { outline: none; border-color: #2e7d32; }
+
+  .event-item { border-top: 1px solid #eee; padding: 12px 0; }
+  .event-item:first-child { border-top: none; }
+  .event-title { font-weight: 700; color: #444; }
+  .event-meta { color: #888; font-size: 12px; margin-top: 2px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+  .tag-answered { background: #e8f5e9; color: #2e7d32; }
+  .tag-pending { background: #fff3e0; color: #e65100; }
+  .toggle-btn { background: #eee; border: none; border-radius: 8px; padding: 6px 10px; cursor: pointer; font-family: inherit; font-weight: 700; font-size: 12px; }
+  .toggle-btn:hover { background: #e0e0e0; }
+  .answer-btn { background: var(--header-line); color: #fff; border: none; border-radius: 8px; padding: 6px 12px; cursor: pointer; font-family: inherit; font-weight: 700; font-size: 12px; }
+  .answer-btn:hover { opacity: 0.85; }
+  .mp-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+  .mp-opt { padding: 6px 12px; border: 2px solid #e0d6c8; border-radius: 8px; cursor: pointer; font-size: 12px; background: #fff; }
+  .mp-opt.selected { border-color: var(--header-line); background: #fff3e0; color: var(--header-line); font-weight: 700; }
+  .mp-stars { display: flex; gap: 4px; }
+  .mp-star { font-size: 24px; cursor: pointer; color: #ddd; }
+  .mp-star.active { color: #ffb300; }
+  .event-detail { display: none; margin-top: 10px; background: #fafafa; border: 1px solid #eee; border-radius: 10px; padding: 10px 12px; }
+  .event-detail.show { display: block; }
+  .qa { margin-top: 10px; }
+  .qa .q { font-weight: 700; font-size: 13px; margin-top: 8px; color: #555; }
+  .qa .a { color: #555; font-size: 13px; padding-left: 10px; border-left: 3px solid #ddd; margin-top: 4px; white-space: pre-wrap; }
+
+
+  .memo-input { width: 100%; margin-top: 6px; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 9pt; font-family: inherit; resize: none; display: none; }
+  .col-step.selected .memo-input { display: block; }
+.memo-hint { font-size: 10px; color: #bbb; margin-top: 2px; display: none; }
+.col-step.selected .memo-hint { display: block; }
+
+  .scroll-hint { display: none; text-align: center; color: #999; font-size: 12px; margin-bottom: 8px; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:0.5} 50%{opacity:1} }
+
+  @media (max-width: 768px) {
+    /* B: トップバー最適化 */
+    .top-bar { padding: 8px 12px; flex-wrap: wrap; gap: 6px; }
+    .top-bar .logo { font-size: 14px; }
+    .top-bar .user-info { gap: 4px; font-size: 11px; }
+    .top-bar .user-info .name { display: none; }
+    .btn-sm { padding: 6px 8px; font-size: 11px; }
+    .btn-sm .btn-label { display: none; }
+
+    .main { padding: 0 8px; margin: 12px auto; }
+    .guide { font-size: 12px; padding: 10px 12px; }
+    .container { padding: 12px; border-radius: 8px; }
+
+    /* C: 旅カードをスマホでは横幅いっぱいに */
+    .header { flex-direction: column; align-items: stretch !important; gap: 8px !important; }
+    .title-block h1 { font-size: 16px; }
+    #travelCard { max-width: 100% !important; min-width: 0 !important; }
+
+    .scroll-hint { display: block; }
+    .footer-note { flex-direction: column; gap: 8px; }
+    .footer-note > div { max-width: 100% !important; text-align: left !important; }
+    .save-area { margin-top: 16px; }
+    .save-area .btn-sm { padding: 14px 24px; font-size: 16px; }
+
+    /* D: テーブルのタッチ操作改善 */
+    table { min-width: 650px; font-size: 9pt; }
+    th, td { padding: 8px 6px; }
+    .col-category { width: 24px; letter-spacing: 2px; font-size: 10px; }
+    .col-viewpoint { width: 70px; font-size: 11px; padding: 10px 6px; }
+    .col-step { font-size: 10px; line-height: 1.5; padding: 10px 8px; min-height: 60px; }
+    .col-step.selected { box-shadow: inset 0 0 0 3px var(--header-line); background-color: #fff3e0; }
+    .col-step.selected::after { font-size: 22px; top: 2px; right: 4px; }
+    .col-step .step-title { font-size: 11px; }
+    .col-step .step-desc { font-size: 10px; line-height: 1.4; }
+    .step-header { font-size: 10px; padding: 3px 6px; }
+    .memo-input { font-size: 13px; padding: 6px 8px; min-height: 44px; }
+    .action-row td { font-size: 10px; padding: 5px 6px; }
+    .note-text { font-size: 11px; }
+    .school-type-selector { font-size: 13px; }
+    .school-type-selector label { padding: 6px 14px; }
+    .container { padding: 8px; border-width: 1px; }
+
+    /* 目標・振り返りのタッチ改善 */
+    .notes-card textarea { font-size: 15px; padding: 12px; min-height: 100px; }
+  }
+
+  @media print {
+    .top-bar, .guide, .save-area, .memo-input, .scroll-hint, .vp-hint { display: none !important; }
+    #journeyCard, #travelCard { display: none !important; }
+    @page { size: A4 landscape; margin: 3mm; }
+    html { zoom: 48%; }
+    body { width: 620mm; margin: 0; padding: 0; background-color: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .container { max-width: none; box-shadow: none; border: none; padding: 0; margin: 0; }
+    .col-step.selected { box-shadow: inset 0 0 0 2px var(--header-line); }
+    .col-step.selected::after { font-size: 14px; }
+    table { font-size: 8.5pt; }
+    th, td { padding: 4px 6px; }
+    .keyword { font-size: 9.5pt; }
+    .cell-content p { font-size: 8.5pt; line-height: 1.3; }
+  }
+</style>
+</head><body>
+<div class="top-bar">
+  <div class="logo"><i class="fas fa-map"></i> 社会科同好会</div>
+  <div class="user-info">
+    <span class="name" id="userName"></span>
+    <span id="adminLink"></span>
+    <button class="btn-sm" style="background:#fff3e0;color:#e65100" onclick="document.getElementById('profileModal').style.display='flex'"><i class="fas fa-user-edit"></i><span class="btn-label"> プロフィール</span></button>
+    <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i><span class="btn-label"> ログアウト</span></button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="guide">
+    <strong><i class="fas fa-hand-pointer"></i> 使い方：</strong>
+    今の自分に当てはまるステップのセルをクリックしてください。各視点ごとに1つ選べます。メモも書けます。最後に「保存する」を押すと記録されます。
+  </div>
+
+  <div class="container">
+    <div class="header" style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
+      <div class="title-block" style="flex-shrink:0">
+        <h1>社会科同好会 成長の道しるべ</h1>
+        <div class="subtitle">授業も、つながりも。あなたのペースで歩むガイドマップ</div>
+      </div>
+      <div id="travelCard" style="flex:1;min-width:260px;max-width:420px;background:#fffaf0;border:1px solid #ffe0b2;border-radius:10px;padding:8px 12px">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-family:'Zen Maru Gothic',sans-serif;font-size:12px;font-weight:700;color:#e65100"><i class="fas fa-globe-asia"></i> 社会科の旅</span>
+          <span style="font-size:10px;color:#888" id="travelFyLabel"></span>
+          <span id="travelStageLabel" style="font-size:12px;font-weight:700"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span id="travelIcon" style="font-size:16px"></span>
+          <div style="flex:1;background:#f5f0e8;border-radius:6px;height:14px;overflow:hidden">
+            <div id="travelBar" style="height:100%;border-radius:6px;transition:width 0.8s ease;width:0%"></div>
+          </div>
+          <span id="travelProgress" style="font-size:10px;color:#888;white-space:nowrap"></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
+          <span id="travelNext" style="font-size:9px;color:#bbb"></span>
+          <span style="font-size:9px;color:#bbb">💡 アンケート回答で1pt</span>
+        </div>
+      </div>
+    </div>
+    <!-- Profile Modal -->
+    <div id="profileModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:1000;justify-content:center;align-items:center;padding:16px" onclick="if(event.target===this)this.style.display='none'">
+      <div style="background:#fff;border-radius:16px;padding:24px;max-width:480px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,0.15)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <h2 style="margin:0;font-family:'Zen Maru Gothic',sans-serif;color:#e65100;font-size:18px"><i class="fas fa-user-edit"></i> プロフィール設定</h2>
+          <button onclick="document.getElementById('profileModal').style.display='none'" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;padding:4px 8px">&times;</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div>
+            <label style="font-size:12px;font-weight:bold;color:#5d4037;">学校名</label>
+            <input type="text" id="schoolInput" placeholder="例：橘小学校" style="width:100%;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:14px;margin-top:2px">
+            <span id="schoolSaveStatus" style="font-weight:700;font-size:12px"></span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div>
+              <label style="font-size:12px;font-weight:bold;color:#5d4037;">区</label>
+              <select id="profile-district" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;">
+                <option value="">選択してください</option>
+                <option value="千種区">千種区</option><option value="東区">東区</option>
+                <option value="北区">北区</option><option value="西区">西区</option>
+                <option value="中村区">中村区</option><option value="中区">中区</option>
+                <option value="昭和区">昭和区</option><option value="瑞穂区">瑞穂区</option>
+                <option value="熱田区">熱田区</option><option value="中川区">中川区</option>
+                <option value="港区">港区</option><option value="南区">南区</option>
+                <option value="守山区">守山区</option><option value="緑区">緑区</option>
+                <option value="名東区">名東区</option><option value="天白区">天白区</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:bold;color:#5d4037;">経験年数</label>
+              <div style="display:flex;align-items:center;gap:4px">
+                <input type="number" id="profile-experience" placeholder="例：5" min="1" max="50" style="flex:1;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;">
+                <span style="font-size:13px;white-space:nowrap">年目</span>
+              </div>
+            </div>
+          </div>
+          <div>
+            <label style="font-size:12px;font-weight:bold;color:#5d4037;">担当学年（複数選択OK）</label>
+            <div id="profile-grade-checks" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px"></div>
+          </div>
+          <div>
+            <label style="font-size:12px;font-weight:bold;color:#5d4037;">役職</label>
+            <select id="profile-position" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;">
+              <option value="">選択してください</option>
+              <option value="小学校教諭">小学校教諭</option>
+              <option value="中学校教諭">中学校教諭</option>
+              <option value="主幹教諭">主幹教諭</option>
+              <option value="教頭">教頭</option>
+              <option value="校長">校長</option>
+              <option value="指導主事">指導主事</option>
+              <option value="その他">その他</option>
+            </select>
+          </div>
+          <button class="btn-save" onclick="saveProfile()" id="btn-save-profile" style="font-size:14px;padding:10px 16px;width:100%">保存する</button>
+          <div style="border-top:1px solid #eee;margin-top:16px;padding-top:14px;">
+            <div style="font-size:12px;font-weight:bold;color:#5d4037;margin-bottom:8px;"><i class="fas fa-key"></i> 秘密の質問（パスワード忘れ時に使用）</div>
+            <div style="margin-bottom:6px;">
+              <label style="font-size:12px;color:#888;">質問を選ぶ</label>
+              <select id="profile-secret-question" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;margin-top:3px;">
+                <option value="">選択してください</option>
+                <option>小学校時代の親友の名前は？</option>
+                <option>好きな食べ物は？</option>
+                <option>生まれた市区町村は？</option>
+                <option>好きなスポーツ選手は？</option>
+                <option>初めて担任した学年は？</option>
+                <option>尊敬する先生の名前は？</option>
+              </select>
+            </div>
+            <div style="margin-bottom:6px;">
+              <label style="font-size:12px;color:#888;">答え</label>
+              <input type="text" id="profile-secret-answer" placeholder="答えを入力" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;margin-top:3px;box-sizing:border-box;">
+            </div>
+            <button onclick="saveSecretQuestion()" style="background:#e65100;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;width:100%;font-family:inherit;">秘密の質問を設定・更新する</button>
+            <div id="secret-q-msg" style="font-size:12px;margin-top:6px;display:none;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="notes-card" style="border-style:solid;border-color:#ffe0b2;margin-top:16px">
+      <h2 style="color:#e65100"><i class="fas fa-bullseye"></i> 今年度の目標 <span style="font-size:12px;color:#888;font-weight:500" id="fyLabel"></span></h2>
+      <textarea id="annualGoal" placeholder="例：月に1回は授業づくりの相談をする、FWに1回参加する など"></textarea>
+      <div class="notes-meta"><span id="annualSavedAt"></span></div>
+    </div>
+
+
+    <div class="scroll-hint"><i class="fas fa-arrows-alt-h"></i> 横にスクロールできます</div>
+    <div class="footer-note">
+      <div style="color:#666"><strong>カテゴリ：</strong><span style="color:#8d6e63">■ 授業・準備</span> <span style="color:#66bb6a">■ 仲間・活動</span> <span style="color:#42a5f5">■ 研究・発信</span></div>
+      <div style="color:#777;text-align:right;max-width:60%">※これは「ここまでやらなきゃいけない」というノルマではありません。特にSTEP4は「いつかチャレンジできたら」という可能性の入口です。今の自分に合った「次の一歩」を見つけるための地図として使ってください。</div>
+    </div>
+    <div class="table-scroll-wrap">
+    <table id="tableElem">
+      <thead><tr>
+        <th colspan="2" style="background-color: #fff8e1; border-bottom: 3px solid #5d4037;">成長の視点</th>
+        <th><div class="step-header"><span class="step-label">STEP 1</span><span class="step-desc">🔰 まずはここから</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 2</span><span class="step-desc">🏃 自分で工夫する</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 3</span><span class="step-desc">🤝 みんなと深める</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 4</span><span class="step-desc">🌏 未来を創る（挑戦できたら）</span></div></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="col-category cat-class" rowspan="3">授業<br>実践</td>
+          <td class="col-viewpoint"><div>授業をつくる</div><div style="font-size:9px;color:#888;margin-top:2px">教材研究・構成</div></td>
+          <td class="col-step" data-vp="lesson_plan" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">基本型をまねる</span><p>教科書や既存の資料を使って、基本的な授業を構成してみたい。まずはここから。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="lesson_plan" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">足でかせいでアレンジ</span><p>先輩の基本型を参考にしながら、名古屋の身近な話題や地域を「足でかせいで」集めた教材で、目の前の子どもに合わせてアレンジしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="lesson_plan" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">子どもの「なぜ？」をうむ</span><p>子どもが「なぜ？」と思わず問いたくなる教材を仕掛け、<span class="ss-term">社会的な見方・考え方</span>を働かせる授業を構想してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="lesson_plan" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">単元を自分でつくる</span><p>自分で足を使って教材や場所とつながりながら、オリジナルの単元を構想・提案してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>授業をする</div><div style="font-size:9px;color:#888;margin-top:2px">実践・対話</div></td>
+          <td class="col-step" data-vp="lesson_practice" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">楽しい授業をする</span><p>まずは子どもが楽しめる授業をしてみたい。笑顔や「もっとやりたい！」が生まれたらOK！</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="lesson_practice" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">子どもが動く活動へ</span><p>調べ学習やグループワークなど、子どもが自ら動く「活動」を取り入れてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="lesson_practice" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">見方・考え方を働かせる</span><p>単なる活動で終わらせず、<span class="ss-term">社会的な見方・考え方</span>を働かせる授業を意識してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="lesson_practice" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">対話で成り立つ授業を</span><p>教師からの一方通行でなく、子ども同士の対話で成り立つ授業を展開してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>子どもを見る</div><div style="font-size:9px;color:#888;margin-top:2px">観察・評価</div></td>
+          <td class="col-step" data-vp="student_eval" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">まずザックリ観察する</span><p>最初はザックリでOK！授業中の子どもの姿や声に目を向けてみたい。「楽しそう？」「困っている？」を感じ取るところから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="student_eval" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">「わかった」を言葉にさせる</span><p>ノートや発言から「この子はここまでわかっているかな？」とのぞいてみたい。「わかった」を自分の言葉で表現できる場を、気負わずに作ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="student_eval" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">点数にならない良さを見つける</span><p>正解・不正解だけでなく、粘り強く考えを表現しようとしている姿など、点数になりにくい良さをそっと認めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="student_eval" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">子どもの姿で授業を問い直す</span><p>「この子たちの反応は、自分の授業への答えだ」と捉え、子どもの姿を元に授業を再構成してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-connect">仲間<br>活動</td>
+          <td class="col-viewpoint"><div>つながる</div><div style="font-size:9px;color:#888;margin-top:2px">同僚性・楽しさ</div></td>
+          <td class="col-step" data-vp="connection" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">場に参加する</span><p>同好会に入会し、イベントや例会に参加してみたい。同期や先輩と顔見知りになれたらOK！</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="connection" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">横のつながりを作る</span><p>同期など、横のつながりを作り、話しやすい関係を築いてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="connection" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">縦のつながりを作る</span><p>先輩や役員など、縦のつながりを作り、授業実践について教えを請うてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="connection" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">仲間を支える側に回る</span><p>悩みや本音を語り合える仲間を持ち、時には仲間を支える側に回ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-research">研究<br>発信</td>
+          <td class="col-viewpoint"><div>深める</div><div style="font-size:9px;color:#888;margin-top:2px">探究・理論</div></td>
+          <td class="col-step" data-vp="research" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">参加してみる</span><p>同好会の例会にとにかく参加してみたい。まずは足を運んで、どんな場かを感じるところから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="research" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">インプット・刺激を受ける</span><p>先輩たちの実践記録を読んでインプットし、刺激を受けたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="research" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">実践をアウトプット</span><p>自分の実践を<span class="ss-term">「体験記録」</span>として書き、アウトプットしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="research" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">理論を磨き合う</span><p>自分の実践を理論づけ、より良い実践になるように議論し、理論を磨き合いたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr class="row-action">
+          <td colspan="2" style="text-align:right;font-weight:bold;padding-right:20px;color:#e65100"><i class="fas fa-shoe-prints"></i> おすすめのアクション</td>
+          <td><ul class="action-list"><li><strong>若手交流会</strong>で仲間作り</li><li><strong>スキルアップ研修</strong>を聞く</li><li><strong>懇親会</strong>にとりあえず行く</li></ul></td>
+          <td><ul class="action-list"><li><strong>スキルアップ研修</strong>に参加（まずこれ！）</li><li><strong>FW（フィールドワーク）</strong>へGO!</li></ul></td>
+          <td><ul class="action-list"><li><strong>模擬授業</strong>をやってみる</li><li><strong>FW・イベント</strong>を企画する</li><li><strong>研究部の議論</strong>に参加する</li><li><strong>体験記録</strong>を書いてみる</li></ul></td>
+          <td><ul class="action-list"><li><strong>同好会</strong>で発表する</li><li><strong>研究員応募論文</strong>を書いてみる</li><li><strong>全国大会</strong>の情報をチェック</li></ul></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <table id="tableJunior" style="display:none">
+      <thead><tr>
+        <th colspan="2" style="background-color: #fff8e1; border-bottom: 3px solid #5d4037;">成長の視点</th>
+        <th><div class="step-header"><span class="step-label">STEP 1</span><span class="step-desc">🔰 まずはここから</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 2</span><span class="step-desc">🏃 自分で工夫する</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 3</span><span class="step-desc">🤝 みんなと深める</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 4</span><span class="step-desc">🌏 未来を創る（挑戦できたら）</span></div></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="col-category cat-class" rowspan="5">授業<br>実践</td>
+          <td class="col-viewpoint"><div>授業をつくる</div><div style="font-size:9px;color:#888;margin-top:2px">教材研究・構成</div></td>
+          <td class="col-step" data-vp="j_lesson_plan" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">基本型をまねる</span><p>教科書や既存の資料を参考にしながら、地理・歴史・公民の基本的な授業を構成してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_lesson_plan" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">生徒の「なぜ？」をうむ</span><p>生徒が「なぜ？」と自然と問いを持てるような教材を仕掛け、社会的な見方・考え方を働かせる授業を構想してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_lesson_plan" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">足でかせいでアレンジ</span><p>先輩の基本型を参考にしながら、身近な地域の事例や時事問題を「足でかせいで」仕入れ、生徒の実態に合わせてアレンジしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_lesson_plan" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">単元を自分でつくる</span><p>自分で足を使って教材を発掘し、ほかの分野の見方・考え方を生かしたオリジナルの単元を構想・提案してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>授業をする【資料】</div><div style="font-size:9px;color:#888;margin-top:2px">読み解く・提示する</div></td>
+          <td class="col-step" data-vp="j_material" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">基本資料を読み解く</span><p>教科書の図版や基本資料を読み解き、授業の基本の流れに組み込んでみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_material" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">複数資料を比較・関連付ける</span><p>地図とグラフ、異なる立場の史料など複数の資料を比較・関連付けさせ、生徒の「なぜ？」を引き出してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_material" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">多様な資料を足で集める</span><p>新聞記事（NIE）や最新の統計データなど、多様な資料を足で稼いで集め、提示を工夫してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_material" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">生徒が主体的に資料を読む</span><p>生徒自身が目的に応じて資料を見つけ出し、多面的・多角的に読み解く力を育ててみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>授業をする【対話】</div><div style="font-size:9px;color:#888;margin-top:2px">意見を交わす・議論する</div></td>
+          <td class="col-step" data-vp="j_dialogue" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">つぶやきを拾って広げる</span><p>生徒の些細なつぶやきや疑問を丁寧に拾い、学級全体に広げることから始めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_dialogue" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">自分の考えを言葉にする場を作る</span><p>ペアやグループワークを効果的に取り入れ、自分の考えを言葉にして伝え合う場を作ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_dialogue" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">根拠を持って意見を出し合う</span><p>異なる意見をもつ立場で話し合い、根拠を持って意見を出し合ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_dialogue" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">合意形成に向かう対話を支援する</span><p>生徒同士の対話から新たな価値観を生み出し、社会的な合意形成に向かう話し合いを支援してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>授業をする【探究】</div><div style="font-size:9px;color:#888;margin-top:2px">問いを立てる・追究する</div></td>
+          <td class="col-step" data-vp="j_inquiry" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">調べる・まとめる時間を確保する</span><p>授業の中で、基礎的な知識を「調べる」「まとめる」時間をしっかり確保することから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_inquiry" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">自分事として調べる学習を仕掛ける</span><p>ICTを活用したり、身近な地域の事象と結びつけたりして、生徒が自分事として調べる学習を仕掛けてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_inquiry" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">「大きな問い」で探究サイクルを作る</span><p>単元を貫く「大きな問い」を設定し、生徒が主体的に探究し続けるサイクルを作ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_inquiry" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">高度な探究をデザインする</span><p>現代社会にみられる課題に対して、生徒が自ら問いを立てて解決策を模索する高度な探究をデザインしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>生徒を見る</div><div style="font-size:9px;color:#888;margin-top:2px">観察・評価</div></td>
+          <td class="col-step" data-vp="j_student_eval" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">まずザックリ観察する</span><p>最初はザックリでOK！授業中の生徒の表情や発言に目を向け、「理解できてる？」「関心がある？」を感じ取るところから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_student_eval" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">「わかった」を言葉にさせる</span><p>ノートや発言からの理解を確認しながら、「わかった」を自分の言葉で表現できる場を気負わずに作ってみたい。毎時間できなくてOK！</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_student_eval" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">点数にならない良さを見つける</span><p>正解・不正解だけでなく、粘り強く考えた過程や多面的な視点など、点数になりにくい良さをそっと認めてみたい。その気づきが、次の問いにつながる。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_student_eval" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">生徒の姿で授業を問い直す</span><p>「この生徒たちの反応は、自分の授業への答えだ」と捉え、生徒を元に授業を再構成してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-connect">仲間<br>活動</td>
+          <td class="col-viewpoint"><div>つながる</div><div style="font-size:9px;color:#888;margin-top:2px">仲間・同僚性</div></td>
+          <td class="col-step" data-vp="j_connection" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">場に参加する</span><p>同好会に入会し、イベントや会に参加してみたい。同期や先輩と顔見知りになれたらOK！</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_connection" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">横のつながりを作る</span><p>同期など、同校・近隣校の先生と横のつながりを作り、気軽に話しやすい関係を築いてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_connection" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">縦のつながりを作る</span><p>先輩や役員など、縦のつながりを作り、授業実践について教えを請うてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_connection" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">仲間を支える側に回る</span><p>悩みや本音を語り合える仲間を持ち、時には仲間を支える側に回ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-research">研究<br>発信</td>
+          <td class="col-viewpoint"><div>深める</div><div style="font-size:9px;color:#888;margin-top:2px">研究・発信</div></td>
+          <td class="col-step" data-vp="j_research" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">参加を楽しむ</span><p>同好会の雰囲気を知り、まずは参加を楽しんでみたい。「こんな世界があるんだ！」と感じることから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_research" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">インプット・刺激を受ける</span><p>中学地理・歴史・公民に関する先輩たちの実践記録を読んでインプットし、刺激を受けたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_research" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">実践をアウトプット</span><p>自分の実践を<span class="ss-term">「体験記録」</span>として書き、アウトプットしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="j_research" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">理論を磨き合う</span><p>自分の実践を理論づけ、部員に向けて議論し、理論を磨き合いたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr class="row-action">
+          <td colspan="2" style="text-align:right;font-weight:bold;padding-right:20px;color:#e65100"><i class="fas fa-shoe-prints"></i> おすすめのアクション</td>
+          <td><ul class="action-list"><li><strong>若手交流会</strong>で仲間作り</li><li><strong>スキルアップ研修</strong>を聞く</li><li><strong>懇親会</strong>にとりあえず行く</li></ul></td>
+          <td><ul class="action-list"><li><strong>スキルアップ研修</strong>に参加（まずこれ！）</li><li><strong>FW（フィールドワーク）</strong>へGO!</li><li><strong>新聞・統計</strong>の資料を集める</li></ul></td>
+          <td><ul class="action-list"><li><strong>模擬授業</strong>をやってみる</li><li><strong>FW・イベント</strong>を企画する</li><li><strong>研究部の議論</strong>に参加する</li><li><strong>体験記録</strong>を書いてみる</li></ul></td>
+          <td><ul class="action-list"><li><strong>同好会</strong>で発表する</li><li><strong>研究員応募論文</strong>を書いてみる</li><li><strong>全国大会</strong>の情報をチェック</li></ul></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <table id="tableAdmin" style="display:none">
+      <thead><tr>
+        <th colspan="2" style="background-color: #fff8e1; border-bottom: 3px solid #5d4037;">成長の視点</th>
+        <th><div class="step-header"><span class="step-label">STEP 1</span><span class="step-desc">🔰 まず関わる</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 2</span><span class="step-desc">🔧 仕組みをつくる</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 3</span><span class="step-desc">🌱 人を育てる</span></div></th>
+        <th><div class="step-header"><span class="step-label">STEP 4</span><span class="step-desc">🏛️ 文化を残す</span></div></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="col-category cat-class" rowspan="2">同好会<br>支援</td>
+          <td class="col-viewpoint"><div>会の活動を支える</div><div style="font-size:9px;color:#888;margin-top:2px">例会・研究会支援</div></td>
+          <td class="col-step" data-vp="a_school_support" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会に顔を出す</span><p>まずは例会やイベントに参加して、場の雰囲気づくりに協力するところから始めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_school_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会の学びを深める</span><p>授業検討会などで、主幹・管理職としての経験を活かした助言や問いかけで学びを深めてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_school_support" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">研究会の内容充実に関わる</span><p>授業検討会やフィールドワークの企画に関わり、会の学びの質を高めることに貢献したい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_school_support" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の学びの文化を守る</span><p>同好会が大切にしてきた「授業で語り合う」文化を次の世代にも伝え、学びの質を守りたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>会員同士をつなぐ</div><div style="font-size:9px;color:#888;margin-top:2px">交流・居場所づくり</div></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">声をかける</span><p>例会で一人でいる会員や新しい会員に声をかけ、「来てよかった」と思える安心感を生みたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">世代をつなぐ</span><p>ベテランと若手の橋渡し役として、会員同士が気軽に話せる関係づくりを促してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">学び合いの場をつくる</span><p>会員同士が実践を見合ったり、気軽に相談し合えるような関係性やグループをつくりたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_school_mgmt" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の一体感を育てる</span><p>会員みんなが「ここが自分の居場所だ」と思える温かい雰囲気をつくり、会の一体感を育てたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-connect" rowspan="2">人材<br>育成</td>
+          <td class="col-viewpoint"><div>会員の成長を支える</div><div style="font-size:9px;color:#888;margin-top:2px">傾聴・伴走</div></td>
+          <td class="col-step" data-vp="a_member_support" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">やってみたことを聞いて感想を伝える</span><p>「授業でこうしてみた」という話を聞き、「それ面白いね」「子どもが変わったね」と伝えることから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_member_support" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">実践を言葉にする手助けをする</span><p>やってみたことを記録や発表にまとめるきっかけづくり（「書いてみない？」の声かけ等）をしてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_member_support" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">論文・記録の方向性を一緒に考える</span><p>「何を書きたいか」を整理し、手立ての有効性や検証方法についても相談しながら、実践記録や論文の方向づけを手伝ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_member_support" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">書き上げるまで伴走し、書く文化を広げる</span><p>構成から推敲まで粘り強く伴走し、「書いてみようかな」と思える雰囲気を会に広げたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>次世代リーダーを育てる</div><div style="font-size:9px;color:#888;margin-top:2px">後進育成</div></td>
+          <td class="col-step" data-vp="a_leader_dev" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">若手の話を聞く</span><p>若手会員の悩みや思いに耳を傾け、「聞いてもらえる存在」になることから始めたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_leader_dev" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">役割を任せてみる</span><p>例会やイベントの一部を若手に任せ、経験を積ませる場をつくってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_leader_dev" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">一緒に企画・運営する</span><p>大きなイベントや研究大会の企画を若手と一緒に進め、運営のノウハウを伝えたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_leader_dev" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">任せて見守る</span><p>次世代のリーダーに中心を譲り、困ったときだけ支える「見守る」立場で関わりたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-category cat-research" rowspan="2">組織<br>・発信</td>
+          <td class="col-viewpoint"><div>同好会の運営に貢献する</div><div style="font-size:9px;color:#888;margin-top:2px">組織運営</div></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">例会に参加して助言する</span><p>例会や研究会に参加し、主幹・管理職の視点から率直な感想や助言を伝えてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の方向性を一緒に考える</span><p>役員会などで会の今後の方向性やテーマについて、自分の意見を積極的に出してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">大会・イベントの運営を支える</span><p>研究大会やフィールドワークの運営面で、主幹・管理職としての経験や人脈を活かして調整役を担ってみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_org_mgmt" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">会の未来を描く</span><p>5年後・10年後の会の姿を構想し、持続可能な組織づくりの道筋をつくりたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr>
+          <td class="col-viewpoint"><div>外とつなぐ・知見を還元する</div><div style="font-size:9px;color:#888;margin-top:2px">対外連携・還元</div></td>
+          <td class="col-step" data-vp="a_outreach" data-step="1" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">他の研究会の情報を持ち帰る</span><p>主幹・管理職の集まりや他教科の研究会で得た情報を、同好会に持ち帰って共有してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_outreach" data-step="2" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">外部講師や連携先を紹介する</span><p>大学の先生や他地区の優れた先生など、主幹・管理職のネットワークを活かして会に紹介してみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_outreach" data-step="3" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">自分の経験を語る</span><p>自分がこれまで積み重ねた社会科の授業づくりの経験や学校経営の知見を、講演や寄稿で次世代に伝えてみたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+          <td class="col-step" data-vp="a_outreach" data-step="4" onclick="selectCell(this)"><div class="cell-content"><span class="keyword">社会科教育の価値を広める</span><p>主幹・管理職の立場から社会科教育の重要性を周囲に発信し、名古屋の社会科の文化を守り育てたい。</p></div><textarea class="memo-input" rows="2" placeholder="メモ（任意）" onclick="event.stopPropagation()"></textarea><div class="memo-hint">例：試していること、困っていること等</div></td>
+        </tr>
+        <tr class="row-action">
+          <td colspan="2" style="text-align:right;font-weight:bold;padding-right:20px;color:#e65100"><i class="fas fa-shoe-prints"></i> おすすめのアクション</td>
+          <td><ul class="action-list"><li><strong>例会・FWに参加して助言</strong></li><li><strong>新しい会員に声をかける</strong></li><li><strong>会員の実践記録を読む</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>会場や資料の準備を手伝う</strong></li><li><strong>論文指導を引き受ける</strong></li><li><strong>外部講師を紹介する</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>大会運営の調整役を担う</strong></li><li><strong>若手と一緒に企画する</strong></li><li><strong>自分の経験を語る場をつくる</strong></li></ul></td>
+          <td><ul class="action-list"><li><strong>会の将来構想を描く</strong></li><li><strong>次世代リーダーに託す</strong></li><li><strong>社会科の価値を外に発信する</strong></li></ul></td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div id="reflectionCard" class="notes-card" style="border-style:solid;border-color:#bbdefb;margin-top:16px">
+      <h2 style="color:#1565c0"><i class="fas fa-pen"></i> 今年度の振り返り</h2>
+      <textarea id="annualReflection" placeholder="今年度の参加や学び、次につながったことなど"></textarea>
+      <div class="notes-meta"><span id="annualSavedAt2"></span></div>
+    </div>
+
+
+  </div>
+
+  <div class="save-area">
+    <button id="btnSave" type="button" class="btn-sm btn-save"><i class="fas fa-save"></i> 保存する</button>
+    <button id="btnPrint" type="button" class="btn-sm" style="background:#eee;color:#666;padding:10px 20px;border:none;border-radius:10px;margin-left:8px;cursor:pointer;font-family:inherit;font-weight:700"><i class="fas fa-print"></i> 印刷する</button>
+    <div class="save-status" id="saveStatus"></div>
+  </div>
+
+  <div class="history-card">
+    <div class="history-header">
+      <h2><i class="fas fa-calendar-check"></i> 参加した会・アンケート（自分用）</h2>
+      <select class="fy-select" id="fySelect" onchange="changeFY()"></select>
+    </div>
+    <div id="historyList" style="margin-top:10px;color:#666;font-size:13px">読み込み中...</div>
+  </div>
+
+
+</div>
+
+<script>
+const token = localStorage.getItem('token');
+let user = JSON.parse(localStorage.getItem('user') || 'null');
+
+const viewpointsElem = ['lesson_plan','lesson_practice','student_eval','connection','research'];
+const viewpointsJunior = ['j_lesson_plan','j_material','j_dialogue','j_inquiry','j_student_eval','j_connection','j_research'];
+const viewpointsAdmin = ['a_school_support','a_school_mgmt','a_member_support','a_leader_dev','a_org_mgmt','a_outreach'];
+let viewpoints = viewpointsElem;
+const selectedByVp = Object.create(null);
+let selectionsLoaded = false;
+
+function requireAuth() {
+  if (!token || !user) {
+    window.location.href = '/login';
+    return false;
+  }
+  return true;
+}
+
+function currentFY() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+  return m >= 4 ? y : (y - 1);
+}
+
+// FYセレクトの表示は「2026年度以降」のみに限定（年度定義は4月始まりのまま）
+const FIRST_FY = 2026;
+let activeFY = Math.max(currentFY(), FIRST_FY);
+
+function esc(s) {
+  return (s ?? '').toString().replace(/[&<>"']/g, (ch) => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'
+  }[ch]));
+}
+
+function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs || 12000);
+  const opts = Object.assign({}, options || {}, { signal: controller.signal });
+  return fetch(url, opts).finally(() => clearTimeout(id));
+}
+
+function showSaveStatus(message, ok) {
+  const el = document.getElementById('saveStatus');
+  if (!el) return;
+  const safe = esc(message || '');
+  el.style.display = 'block';
+  el.style.background = ok ? '#e8f5e9' : '#ffebee';
+  el.style.color = ok ? '#2e7d32' : '#c62828';
+  el.innerHTML = (ok ? '<i class="fas fa-check-circle"></i> ' : '<i class="fas fa-exclamation-triangle"></i> ') + safe;
+
+  if (showSaveStatus._t) clearTimeout(showSaveStatus._t);
+  showSaveStatus._t = setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+
+function showSchoolStatus(message, ok) {
+  const el = document.getElementById('schoolSaveStatus');
+  if (!el) return;
+  el.style.color = ok ? '#2e7d32' : '#c62828';
+  el.textContent = message ? message : '';
+  if (showSchoolStatus._t) clearTimeout(showSchoolStatus._t);
+  showSchoolStatus._t = setTimeout(() => { el.textContent = ''; }, 4000);
+}
+
+function updateUserBar() {
+  const userName = document.getElementById('userName');
+  if (userName) userName.textContent = user.name + ' さん' + (user.school ? '（' + user.school + '）' : '');
+}
+
+async function saveSchoolIfChanged(force) {
+  const el = document.getElementById('schoolInput');
+  if (!el) return;
+  const newSchool = (el.value || '').trim();
+  const oldSchool = (user && user.school) ? String(user.school) : '';
+  if (!force && newSchool === oldSchool) return;
+
+  if (!newSchool) throw new Error('学校名を入力してください');
+
+  const res = await fetchWithTimeout('/api/me/profile', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ school: newSchool })
+  }, 12000);
+
+  if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+  let data = {};
+  try { data = await res.json(); } catch(e) {}
+  if (!res.ok) throw new Error(data.error || ('学校名の更新に失敗しました（' + res.status + '）'));
+
+  if (data.user) {
+    user = data.user;
+    localStorage.setItem('user', JSON.stringify(user));
+    updateUserBar();
+  }
+}
+
+  async function saveProfile() {
+    const btn = document.getElementById('btn-save-profile');
+    if (btn.disabled) return;
+    btn.disabled = true; btn.textContent = '保存中...';
+    try {
+      const gradeChecks = document.querySelectorAll('#profile-grade-checks input:checked');
+      const gradeVal = Array.from(gradeChecks).map(c => c.value).join(',');
+      const schoolEl = document.getElementById('schoolEdit') || document.getElementById('schoolInput');
+      const schoolVal = schoolEl ? schoolEl.value.trim() : '';
+      const res = await fetch('/api/me/profile', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          school: schoolVal,
+          school_type: (function(pos){ if(pos==='小学校教諭') return 'elementary'; if(pos==='中学校教諭') return 'junior_high'; if(['主幹教諭','教頭','校長','指導主事'].includes(pos)) return 'admin_staff'; return ''; })(document.getElementById('profile-position').value),
+          district: document.getElementById('profile-district').value,
+          experience_years: document.getElementById('profile-experience').value,
+          grade: gradeVal,
+          position: document.getElementById('profile-position').value
+        })
+      });
+      if (!res.ok) throw new Error('保存に失敗しました');
+      if (schoolVal) { user.school = schoolVal; var dispEl = document.getElementById('schoolDisplay'); if (dispEl) dispEl.textContent = schoolVal; }
+      user.district = document.getElementById('profile-district').value;
+      user.experience_years = document.getElementById('profile-experience').value;
+      user.grade = gradeVal;
+      user.position = document.getElementById('profile-position').value;
+      localStorage.setItem('user', JSON.stringify(user));
+      btn.textContent = '✅ 保存しました';
+      setTimeout(() => { btn.textContent = '💾 プロフィールを保存'; btn.disabled = false; }, 2000);
+    } catch (e) {
+      alert(e.message); btn.textContent = '💾 プロフィールを保存'; btn.disabled = false;
+    }
+  }
+
+async function saveSecretQuestion() {
+  const question = document.getElementById('profile-secret-question').value;
+  const answer = document.getElementById('profile-secret-answer').value.trim();
+  const msg = document.getElementById('secret-q-msg');
+  if (!question) { msg.textContent = '質問を選んでください'; msg.style.color = '#c62828'; msg.style.display = 'block'; return; }
+  if (!answer) { msg.textContent = '答えを入力してください'; msg.style.color = '#c62828'; msg.style.display = 'block'; return; }
+  const token = localStorage.getItem('token');
+  const res = await fetch('/api/me/secret-question', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, answer })
+  });
+  if (res.ok) {
+    msg.textContent = '✅ 設定しました';
+    msg.style.color = '#2e7d32';
+    document.getElementById('profile-secret-answer').value = '';
+  } else {
+    msg.textContent = '❌ 設定に失敗しました';
+    msg.style.color = '#c62828';
+  }
+  msg.style.display = 'block';
+}
+
+function setupFYSelect() {
+  const sel = document.getElementById('fySelect');
+  if (!sel) return;
+
+  const now = Math.max(currentFY(), FIRST_FY);
+  activeFY = Math.max(activeFY, FIRST_FY);
+
+  sel.innerHTML = '';
+  for (let y = now; y >= FIRST_FY; y--) {
+    const opt = document.createElement('option');
+    opt.value = String(y);
+    opt.textContent = y + '年度';
+    sel.appendChild(opt);
+  }
+
+  sel.value = String(activeFY);
+  const label = document.getElementById('fyLabel');
+  if (label) label.textContent = '(' + activeFY + '年度)';
+}
+
+function changeFY() {
+  const sel = document.getElementById('fySelect');
+  if (!sel) return;
+  activeFY = parseInt(sel.value, 10);
+  const label = document.getElementById('fyLabel');
+  if (label) label.textContent = '(' + activeFY + '年度)';
+  loadAnnualNotes();
+  loadHistory();
+}
+
+async function loadAnnualNotes() {
+  try {
+    const res = await fetchWithTimeout('/api/me/annual-notes?fy=' + activeFY, { headers: { 'Authorization': 'Bearer ' + token } }, 12000);
+    if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+    if (!res.ok) throw new Error('読み込みに失敗しました（' + res.status + '）');
+    const data = await res.json();
+    const g = document.getElementById('annualGoal');
+    const r = document.getElementById('annualReflection');
+
+    // ユーザーが入力中なら上書きしない
+    if (!annualNotesDirty) {
+      if (g) g.value = (data.goal || '');
+      if (r) r.value = (data.reflection || '');
+    }
+
+    const at = data.updated_at ? ('最終更新：' + new Date(data.updated_at).toLocaleString('ja-JP')) : '';
+    const s1 = document.getElementById('annualSavedAt');
+    const s2 = document.getElementById('annualSavedAt2');
+    if (s1) s1.textContent = at;
+    if (s2) s2.textContent = at;
+  } catch(e) {
+    console.error(e);
+  }
+}
+
+let annualNotesDirty = false;
+
+function setAnnualNotesDirty() {
+  annualNotesDirty = true;
+}
+
+async function saveAnnualNotes() {
+  const gEl = document.getElementById('annualGoal');
+  // 取り違い防止：複数手段で必ず同一IDを取得
+  const rEl = document.getElementById('annualReflection') || document.querySelector('textarea#annualReflection');
+
+  if (!gEl) throw new Error('目標欄が見つかりません。画面を再読み込みしてください。');
+  if (!rEl) throw new Error('振り返り欄が見つかりません。画面を再読み込みしてください。');
+
+  const g = (gEl.value ?? '').toString();
+  const r = (rEl.value ?? '').toString();
+
+  // 入力したつもりでも空が送られてしまう事故を防ぐ
+  if (annualNotesDirty && !g.trim() && !r.trim()) {
+    throw new Error('目標/振り返りが空です。入力欄をクリックして文字が入っているか確認してください。');
+  }
+
+  const res = await fetchWithTimeout('/api/me/annual-notes', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fiscal_year: activeFY, goal: g, reflection: r })
+  }, 12000);
+
+  if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+  if (!res.ok) {
+    let data = {};
+    try { data = await res.json(); } catch(e) {}
+    throw new Error(data.error || ('保存に失敗しました（' + res.status + '）'));
+  }
+
+  annualNotesDirty = false;
+}
+
+
+function toggleDetail(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.toggle('show');
+}
+
+function renderHistory(events) {
+  const root = document.getElementById('historyList');
+  if (!root) return;
+
+  if (!events || events.length === 0) {
+    root.innerHTML = '<div style="color:#888">この年度は、出席した会がまだありません。</div>';
+    return;
+  }
+
+  historyEventsById = {};
+  let html = '';
+  for (const ev0 of events) {
+    const ev = ev0 || {};
+    historyEventsById[ev.event_id] = ev;
+    const answered = !!(ev.survey && ev.survey.answered_at);
+    const tag = answered
+      ? '<span class="tag tag-answered">回答済み</span>'
+      : '<span class="tag tag-pending">未回答</span>';
+
+    const detailId = 'detail_' + ev.event_id;
+    const comment = (ev.survey && ev.survey.comment) ? esc(ev.survey.comment) : '';
+
+    let qaHtml = '';
+    if (Array.isArray(ev.questions) && ev.questions.length > 0) {
+      qaHtml += '<div class="qa"><div style="font-weight:700;color:#555;margin-top:8px">追加質問</div>';
+      for (const q0 of ev.questions) {
+        const q = q0 || {};
+        const a = (q.answer_text && q.answer_text.trim()) ? esc(q.answer_text) : '（未回答）';
+        qaHtml += '<div class="q">Q. ' + esc(q.question_text || '') + '</div><div class="a">' + a + '</div>';
+      }
+      qaHtml += '</div>';
+    }
+
+    html += ''
+      + '<div class="event-item">'
+      +   '<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap">'
+      +     '<div>'
+      +       '<div class="event-title">' + esc(ev.title || '') + '</div>'
+      +       '<div class="event-meta">'
+      +         '<span><i class="fas fa-calendar-day"></i> ' + esc(ev.event_date || '') + '</span>'
+      +         tag
+      +       '</div>'
+      +     '</div>'
+      +     '<div style="display:flex;gap:6px;flex-wrap:wrap">'
+      +       '<button class="toggle-btn" type="button" data-detail="' + esc(detailId) + '"><i class="fas fa-eye"></i> 振り返りを見る</button>'
+      +       ((!answered && Array.isArray(ev.questions) && ev.questions.length > 0) ? '<button class="answer-btn" type="button" data-event="' + ev.event_id + '"><i class="fas fa-pen"></i> 回答する</button>' : '')
+      +     '</div>'
+      +   '</div>'
+      +   '<div class="event-detail" id="' + esc(detailId) + '">'
+      +     (comment ? '<div style="color:#555;white-space:pre-wrap">' + comment + '</div>' : '')
+      +     qaHtml
+      +   '</div>'
+      + '</div>';
+  }
+
+  root.innerHTML = html;
+
+  // Attach toggle handlers
+  root.querySelectorAll('.toggle-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-detail');
+      if (id) toggleDetail(id);
+    });
+  });
+
+  // Attach answer handlers
+  root.querySelectorAll('.answer-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.getAttribute('data-event') || '0', 10);
+      if (id) openAnswerForm(id);
+    });
+  });
+}
+
+// ===== 後からアンケート回答（マイページ） =====
+let historyEventsById = {};
+let mpSurveyData = {};
+const mpGrowthViewpoints = {
+  'elementary': [
+    {l:'授業をつくる',d:'教材研究・授業構成'},
+    {l:'授業をする',d:'実践・対話'},
+    {l:'子どもを見る',d:'観察・評価'},
+    {l:'つながる',d:'同僚性・仲間づくり'},
+    {l:'深める',d:'研究・発信'}
+  ],
+  'junior_high': [
+    {l:'授業をつくる',d:'教材研究・授業構成'},
+    {l:'資料',d:'読み解く・提示する'},
+    {l:'対話',d:'意見を交わす・議論する'},
+    {l:'探究',d:'問いを立てる・追究する'},
+    {l:'生徒を見る',d:'観察・評価'},
+    {l:'つながる',d:'仲間・同僚性'},
+    {l:'深める',d:'研究・発信'}
+  ],
+  'admin_staff': [
+    {l:'校内支援',d:'校内の社会科の授業を支える'},
+    {l:'学校経営',d:'社会科をカリキュラムに活かす'},
+    {l:'会員支援',d:'実践に寄り添い、言葉にする手助け'},
+    {l:'後進育成',d:'次世代リーダーを育てる'},
+    {l:'運営貢献',d:'同好会の運営や大会調整'},
+    {l:'対外連携',d:'外部講師の紹介・知見の還元'}
+  ]
+};
+
+function openAnswerForm(eventId) {
+  const ev = historyEventsById[eventId];
+  if (!ev) return;
+  mpSurveyData = {};
+  const det = document.getElementById('detail_' + eventId);
+  if (!det) return;
+  const qs = ev.questions || [];
+  const st = (user && user.school_type) || '';
+  let html = '<div style="font-weight:700;color:#5d4037;margin-bottom:10px"><i class="fas fa-clipboard-list"></i> アンケートに回答</div>';
+  for (const q of qs) {
+    const qid = q.question_id;
+    html += '<div style="margin-bottom:14px"><div style="font-weight:700;font-size:13px;color:#555;margin-bottom:6px">' + esc(q.question_text || '') + (q.required ? ' <span style="color:#c62828;font-size:11px;font-weight:700">＊必須</span>' : '') + '</div>';
+    if (q.question_type === 'text') {
+      html += '<textarea id="mq_' + qid + '" rows="2" placeholder="回答を入力" style="width:100%;padding:8px;border:2px solid #e0d6c8;border-radius:8px;font-family:inherit;font-size:13px;resize:vertical"></textarea>';
+    } else if (q.question_type === 'radio') {
+      const opts = q.options ? String(q.options).split('|') : [];
+      html += '<div class="mp-opts" id="mq_' + qid + '">';
+      for (const o of opts) html += '<span class="mp-opt" data-qid="' + qid + '" data-multi="0">' + esc(o) + '</span>';
+      html += '</div>';
+    } else if (q.question_type === 'checkbox') {
+      const isGrowth = (q.question_text || '').includes('成長の視点') && mpGrowthViewpoints[st];
+      const opts = isGrowth ? mpGrowthViewpoints[st].map((v) => v.l) : (q.options ? String(q.options).split('|') : []);
+      html += '<div class="mp-opts" id="mq_' + qid + '">';
+      for (const o of opts) html += '<span class="mp-opt" data-qid="' + qid + '" data-multi="1">' + esc(o) + '</span>';
+      html += '</div>';
+      if (isGrowth) {
+        html += '<div style="background:#faf6f0;border-radius:8px;padding:8px 12px;margin-top:6px;font-size:12px;color:#666">';
+        for (const v of mpGrowthViewpoints[st]) html += '<div><b>' + esc(v.l) + '</b>…' + esc(v.d) + '</div>';
+        html += '</div>';
+      }
+    } else if (q.question_type === 'rating') {
+      html += '<div class="mp-stars" id="mq_' + qid + '">';
+      for (let i = 1; i <= 5; i++) html += '<span class="mp-star" data-qid="' + qid + '" data-val="' + i + '">★</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  html += '<button type="button" class="answer-btn" id="mpSubmit_' + eventId + '" style="padding:10px 24px;font-size:13px"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
+  html += '<div id="mpStatus_' + eventId + '" style="font-size:12px;margin-top:8px;color:#c62828"></div>';
+  det.innerHTML = html;
+  det.classList.add('show');
+  det.querySelectorAll('.mp-opt').forEach((el) => {
+    el.addEventListener('click', () => {
+      const qid = el.getAttribute('data-qid');
+      if (el.getAttribute('data-multi') === '1') {
+        el.classList.toggle('selected');
+      } else {
+        el.parentElement.querySelectorAll('.mp-opt').forEach((o) => o.classList.remove('selected'));
+        el.classList.add('selected');
+      }
+      const sel = Array.from(el.parentElement.querySelectorAll('.mp-opt.selected')).map((o) => o.textContent);
+      mpSurveyData[qid] = sel.join('、');
+    });
+  });
+  det.querySelectorAll('.mp-star').forEach((el) => {
+    el.addEventListener('click', () => {
+      const qid = el.getAttribute('data-qid');
+      const v = parseInt(el.getAttribute('data-val') || '0', 10);
+      mpSurveyData[qid] = String(v);
+      det.querySelectorAll('#mq_' + qid + ' .mp-star').forEach((s, i) => s.classList.toggle('active', i < v));
+    });
+  });
+  const sb = document.getElementById('mpSubmit_' + eventId);
+  if (sb) sb.addEventListener('click', () => submitMypageSurvey(eventId));
+}
+
+async function submitMypageSurvey(eventId) {
+  const ev = historyEventsById[eventId];
+  if (!ev) return;
+  const stEl = document.getElementById('mpStatus_' + eventId);
+  const custom_answers = [];
+  for (const q of (ev.questions || [])) {
+    const qid = q.question_id;
+    const el = document.getElementById('mq_' + qid);
+    if (el && el.tagName === 'TEXTAREA') mpSurveyData[qid] = el.value;
+    if (mpSurveyData[qid]) custom_answers.push({ question_id: qid, answer_text: mpSurveyData[qid] });
+  }
+  const missingQ = (ev.questions || []).find(q => q.required && !String(mpSurveyData[q.question_id] || '').trim());
+  if (missingQ) { if (stEl) stEl.textContent = '必須の質問「' + (missingQ.question_text || '') + '」に回答してください'; return; }
+  const sb = document.getElementById('mpSubmit_' + eventId);
+  if (sb) sb.disabled = true;
+  try {
+    const res = await fetchWithTimeout('/api/events/' + encodeURIComponent(ev.event_code) + '/survey', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ satisfaction: null, comment: '', custom_answers: custom_answers })
+    }, 12000);
+    if (res.ok) { await loadHistory(); return; }
+    let d = {};
+    try { d = await res.json(); } catch (e) {}
+    if (stEl) stEl.textContent = (d && d.error) || ('送信に失敗しました（' + res.status + '）');
+  } catch (e) {
+    if (stEl) stEl.textContent = '送信に失敗しました（通信が不安定です）';
+  }
+  if (sb) sb.disabled = false;
+}
+
+async function loadHistory() {
+  const root = document.getElementById('historyList');
+  if (root) root.textContent = '読み込み中...';
+  try {
+    const res = await fetchWithTimeout('/api/me/history?fy=' + activeFY, { headers: { 'Authorization': 'Bearer ' + token } }, 12000);
+    if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+    if (!res.ok) throw new Error('読み込みに失敗しました（' + res.status + '）');
+    const data = await res.json();
+    renderHistory((data && data.events) ? data.events : []);
+  } catch(e) {
+    console.error(e);
+    if (root) root.innerHTML = '<div style="color:#c62828">読み込みに失敗しました（通信が不安定か、サーバーが応答していません）</div>';
+  }
+}
+
+function selectCell(td) {
+  const vp = td.getAttribute('data-vp') || '';
+  const step = parseInt(td.getAttribute('data-step') || '0', 10);
+  if (!vp || !step) return;
+
+  const wasSelected = td.classList.contains('selected');
+
+  // radio behavior per viewpoint
+  document.querySelectorAll('.col-step[data-vp="' + vp + '"]').forEach((el) => el.classList.remove('selected'));
+
+  if (wasSelected) {
+    // toggle off: deselect
+    delete selectedByVp[vp];
+    autoSaveViewpoint(vp, null, '');
+  } else {
+    // select new cell
+    td.classList.add('selected');
+    const memoEl = td.querySelector('.memo-input');
+    const memo = memoEl ? memoEl.value : '';
+    selectedByVp[vp] = { step: step, memo: memo };
+    autoSaveViewpoint(vp, step, memo);
+  }
+}
+
+async function autoSaveViewpoint(vp, step, memo) {
+  if (!token || !selectionsLoaded) return;
+  try {
+    if (step) {
+      await fetchWithTimeout('/api/selections', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ viewpoint: vp, step: step, memo: memo || '' })
+      }, 12000);
+    } else {
+      await fetchWithTimeout('/api/selections/' + vp, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token }
+      }, 12000);
+    }
+    showSaveStatus('保存しました', true);
+  } catch(e) {
+    showSaveStatus('保存に失敗しました', false);
+  }
+}
+
+function attachMemoListeners() {
+  document.querySelectorAll('.col-step').forEach((cell) => {
+    const vp = cell.getAttribute('data-vp') || '';
+    const step = parseInt(cell.getAttribute('data-step') || '0', 10);
+    const memo = cell.querySelector('.memo-input');
+    if (!vp || !step || !memo) return;
+    memo.addEventListener('input', () => {
+      const cur = selectedByVp[vp];
+      if (cur && cur.step === step) {
+        cur.memo = memo.value;
+        // メモ入力後1.5秒で自動保存
+        if (memo._saveTimer) clearTimeout(memo._saveTimer);
+        memo._saveTimer = setTimeout(() => { autoSaveViewpoint(vp, step, memo.value); }, 1500);
+      }
+    });
+  });
+}
+
+function clearSelectionsUI() {
+  document.querySelectorAll('.col-step.selected').forEach((el) => el.classList.remove('selected'));
+  const allViewpoints = [...viewpointsElem, ...viewpointsJunior, ...viewpointsAdmin];
+  for (const vp of allViewpoints) delete selectedByVp[vp];
+}
+
+async function loadSelections() {
+  selectionsLoaded = false;
+  try {
+    const res = await fetchWithTimeout('/api/selections', { headers: { 'Authorization': 'Bearer ' + token } }, 12000);
+    if (res.status === 401) { localStorage.clear(); window.location.href = '/login'; return; }
+    if (!res.ok) throw new Error('読み込みに失敗しました（' + res.status + '）');
+    const data = await res.json();
+    clearSelectionsUI();
+
+    const selections = (data && data.selections) ? data.selections : [];
+    for (const s0 of selections) {
+      const s = s0 || {};
+      const vp = s.viewpoint || '';
+      const step = parseInt(String(s.step || '0'), 10);
+      if (!vp || !step) continue;
+
+      // If multiple rows exist for the same viewpoint, the last one wins.
+      selectedByVp[vp] = { step: step, memo: s.memo || '' };
+    }
+
+    // Load selections for all viewpoints (all types)
+    const allViewpoints = [...viewpointsElem, ...viewpointsJunior, ...viewpointsAdmin];
+    for (const vp of allViewpoints) {
+      const sel = selectedByVp[vp];
+      if (!sel) continue;
+      const cell = document.querySelector('.col-step[data-vp="' + vp + '"][data-step="' + sel.step + '"]');
+      if (cell) {
+        cell.classList.add('selected');
+        const memo = cell.querySelector('.memo-input');
+        if (memo) memo.value = sel.memo || '';
+      }
+    }
+  } catch(e) {
+    console.error(e);
+  } finally {
+    selectionsLoaded = true;
+  }
+}
+
+async function saveSelections() {
+  if (!requireAuth()) return;
+  if (!selectionsLoaded) {
+    showSaveStatus('読み込み中です。少し待ってから保存してください。', false);
+    return;
+  }
+
+  const btn = document.getElementById('btnSave');
+  // 二重送信防止
+  if (btn && btn.disabled) return;
+
+  const prev = '<i class="fas fa-save"></i> 保存する';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 保存中...';
+  }
+
+  try {
+    const tasks = [];
+
+    for (const vp of viewpoints) {
+      const sel = selectedByVp[vp];
+      if (sel && sel.step) {
+        // Get latest memo from DOM
+        const cell = document.querySelector('.col-step[data-vp="' + vp + '"][data-step="' + sel.step + '"]');
+        let memo = sel.memo || '';
+        if (cell) {
+          const memoEl = cell.querySelector('.memo-input');
+          if (memoEl) memo = memoEl.value;
+        }
+
+        tasks.push(fetchWithTimeout('/api/selections', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ viewpoint: vp, step: sel.step, memo: memo })
+        }, 12000));
+      } else {
+        tasks.push(fetchWithTimeout('/api/selections/' + vp, {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Bearer ' + token }
+        }, 12000));
+      }
+    }
+
+    // Save school if changed
+    await saveSchoolIfChanged(false);
+
+    // Also save annual notes
+    await Promise.all(tasks);
+    await saveAnnualNotes();
+
+    showSaveStatus('保存しました', true);
+  } catch(e) {
+    console.error(e);
+    showSaveStatus((e && e.message) ? e.message : '保存に失敗しました', false);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = prev;
+    }
+  }
+}
+
+function handlePrint() {
+  try {
+    if (typeof window.print !== 'function') {
+      alert('この端末・ブラウザでは印刷が利用できない場合があります。PCブラウザをお試しください。');
+      return;
+    }
+    window.print();
+  } catch(e) {
+    alert('印刷が利用できませんでした。PCブラウザでお試しください。');
+  }
+}
+
+async function logout() {
+  const t = localStorage.getItem('token');
+  if (t) { try { await fetch('/api/auth/logout', { method:'POST', headers:{'Authorization':'Bearer '+t} }); } catch(e){} }
+  localStorage.clear();
+  window.location.href = '/login';
+}
+
+function switchSchoolType(type) {
+  const tElem = document.getElementById('tableElem');
+  const tJunior = document.getElementById('tableJunior');
+  const tAdmin = document.getElementById('tableAdmin');
+  if (tElem) tElem.style.display = 'none';
+  if (tJunior) tJunior.style.display = 'none';
+  if (tAdmin) tAdmin.style.display = 'none';
+  if (type === 'elementary' && tElem) tElem.style.display = '';
+  if (type === 'junior' && tJunior) tJunior.style.display = '';
+  if (type === 'admin' && tAdmin) tAdmin.style.display = '';
+  // Update active viewpoints so saveSelections saves the correct set
+  if (type === 'elementary') viewpoints = viewpointsElem;
+  else if (type === 'junior') viewpoints = viewpointsJunior;
+  else if (type === 'admin') viewpoints = viewpointsAdmin;
+  // Reload selections for the current type
+  loadSelections();
+}
+
+async function init() {
+  if (!requireAuth()) return;
+
+  updateUserBar();
+
+  // Fetch latest profile from API
+  try {
+    var meRes = await fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (meRes.ok) {
+      var meData = await meRes.json();
+      if (meData.user) { Object.assign(user, meData.user); localStorage.setItem('user', JSON.stringify(user)); }
+    }
+  } catch(e) { /* use cached data */ }
+
+  const schoolEdit = document.getElementById('schoolInput');
+  if (schoolEdit) schoolEdit.value = user.school || '';
+
+  const btnSchoolSave = document.getElementById('btnSchoolSave');
+    // Load profile data into form
+    const gradeOptions = ['1年','2年','3年','4年','5年','6年','中1','中2','中3','特別支援','専科','主幹・管理職','その他'];
+    const gradeContainer = document.getElementById('profile-grade-checks');
+    if (gradeContainer) {
+      const savedGrades = (user.grade || '').split(',').filter(Boolean);
+      gradeContainer.innerHTML = gradeOptions.map(g => '<label style="display:inline-flex;align-items:center;gap:2px;font-size:12px;background:#f5f5f5;padding:3px 8px;border-radius:12px;cursor:pointer;"><input type="checkbox" value="'+g+'"'+(savedGrades.includes(g)?' checked':'')+' style="margin:0;">'+g+'</label>').join('');
+    }
+    const districtEl = document.getElementById('profile-district');
+    const experienceEl = document.getElementById('profile-experience');
+    const positionEl = document.getElementById('profile-position');
+    if (districtEl && user.district) districtEl.value = user.district;
+    if (experienceEl && user.experience_years != null) experienceEl.value = user.experience_years;
+    if (positionEl && user.position) positionEl.value = user.position;
+    // Profile modal is now opened only by button click
+
+    // Auto-switch table based on position
+    function positionToSchoolType(pos) {
+      if (pos === '小学校教諭') return 'elementary';
+      if (pos === '中学校教諭') return 'junior';
+      if (['主幹教諭','教頭','校長','指導主事'].includes(pos)) return 'admin';
+      return 'elementary';
+    }
+    const posEl = document.getElementById('profile-position');
+    if (posEl) {
+      posEl.addEventListener('change', function() {
+        switchSchoolType(positionToSchoolType(this.value));
+      });
+      if (posEl.value) switchSchoolType(positionToSchoolType(posEl.value));
+    }
+
+
+  // 入力の取り違い防止（入力したのに空で保存される事故を防ぐ）
+  const gEl = document.getElementById('annualGoal');
+  const rEl = document.getElementById('annualReflection');
+  if (gEl) gEl.addEventListener('input', setAnnualNotesDirty);
+  if (rEl) rEl.addEventListener('input', setAnnualNotesDirty);
+
+  if (user.role === 'admin') {
+    const adminLink = document.getElementById('adminLink');
+    if (adminLink) adminLink.innerHTML = '<a href="/admin" class="btn-sm btn-admin" style="text-decoration:none"><i class="fas fa-cog"></i> 管理者</a> <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:#ff6f00;color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>';
+  }
+
+  setupFYSelect();
+  attachMemoListeners();
+
+  // 折りたたみ初期化
+  document.querySelectorAll('.col-viewpoint').forEach(function(vp) {
+    var tr = vp.closest('tr');
+    if (tr) {
+      tr.classList.add('vp-collapsed');
+      vp.innerHTML = '<span class="vp-toggle">\u25B6</span> ' + vp.innerHTML + '<span class="vp-hint">◀ タップで展開</span>';
+      vp.addEventListener('click', function(e) {
+        e.stopPropagation();
+        tr.classList.toggle('vp-collapsed');
+        var tog = vp.querySelector('.vp-toggle');
+        if (tog) tog.textContent = tr.classList.contains('vp-collapsed') ? '\u25B6' : '\u25BC';
+      });
+    }
+  });
+
+  const btnSave = document.getElementById('btnSave');
+  if (btnSave) btnSave.addEventListener('click', () => saveSelections());
+  const btnPrint = document.getElementById('btnPrint');
+  if (btnPrint) btnPrint.addEventListener('click', () => handlePrint());
+
+  loadSelections();
+  loadAnnualNotes();
+  loadHistory();
+  loadTravelProgress();
+}
+
+const TRAVEL_STAGES = [
+  { min: 0, max: 2, icon: '🏫', name: '学校', title: '社会科見習い', color: '#8d6e63' },
+  { min: 3, max: 5, icon: '🏙️', name: '名古屋', title: '街の実践者', color: '#ff8a65' },
+  { min: 6, max: 9, icon: '🗾', name: '愛知', title: '愛知の探究者', color: '#66bb6a' },
+  { min: 10, max: 14, icon: '🗾', name: '日本', title: '全国の挑戦者', color: '#42a5f5' },
+  { min: 15, max: 19, icon: '🌏', name: '世界', title: '世界を見る人', color: '#5c6bc0' },
+  { min: 20, max: 9999, icon: '🚀', name: '宇宙', title: '宇宙の社会科人', color: '#d84315' }
+];
+
+async function loadTravelProgress() {
+  try {
+    const res = await fetch('/api/me/points', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) return;
+    const data = await res.json();
+    const pts = data.total_points || 0;
+    const stage = TRAVEL_STAGES.find(s => pts >= s.min && pts <= s.max) || TRAVEL_STAGES[0];
+    const nextStage = TRAVEL_STAGES[TRAVEL_STAGES.indexOf(stage) + 1];
+
+    document.getElementById('travelFyLabel').textContent = '(' + data.fiscal_year + '年度)';
+    document.getElementById('travelIcon').textContent = stage.icon;
+    var sl = document.getElementById('travelStageLabel');
+    sl.textContent = '現在のステージ…' + stage.icon + ' ' + stage.name;
+    sl.style.color = stage.color;
+
+    if (nextStage) {
+      const pctInStage = ((pts - stage.min) / (stage.max - stage.min + 1)) * 100;
+      document.getElementById('travelBar').style.width = Math.min(pctInStage, 100) + '%';
+      document.getElementById('travelBar').style.background = 'linear-gradient(90deg,' + stage.color + '80,' + stage.color + ')';
+      document.getElementById('travelProgress').textContent = pts + ' / ' + nextStage.min + ' pt';
+      document.getElementById('travelNext').textContent = '次：' + nextStage.icon + ' ' + nextStage.name + '（あと' + (nextStage.min - pts) + 'pt）';
+    } else {
+      document.getElementById('travelBar').style.width = '100%';
+      document.getElementById('travelBar').style.background = 'linear-gradient(90deg,#ff8a65,#d84315,#5c6bc0,#42a5f5)';
+      document.getElementById('travelProgress').textContent = pts + ' pt';
+      document.getElementById('travelNext').textContent = '🎉 最高ステージ到達！';
+    }
+  } catch(e) { /* ignore */ }
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
+</script>
+</body></html>`)
+})
+
+// --- Admin Dashboard ---
+app.get('/admin', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>管理者ダッシュボード - 社会科同好会</title>
+<style>
+  .top-bar { background: #1a237e; color: #fff; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+  .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; font-weight: 700; }
+  .top-bar .user-info { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+  .btn-sm { padding: 6px 14px; border-radius: 8px; border: none; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .btn-back { background: rgba(255,255,255,0.2); color: #fff; }
+  .btn-back:hover { background: rgba(255,255,255,0.3); }
+  .btn-logout { background: rgba(255,255,255,0.15); color: #fff; }
+  .btn-export { background: #2e7d32; color: #fff; padding: 10px 24px; font-size: 14px; border-radius: 10px; }
+  .btn-export:hover { background: #1b5e20; }
+  .btn-danger { background: #c62828; color: #fff; font-size: 11px; padding: 4px 10px; }
+  .btn-key { background: #546e7a; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 4px; cursor: pointer; }
+  .btn-key:hover { background: #37474f; }
+  .member-table th[data-sort]:hover { background: rgba(0,0,0,0.05); }
+.sort-icon { font-size: 10px; opacity: 0.6; }
+.badge-none { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:500; background:#f0f0f0; color:#aaa; }
+.badge-step1 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#e3f2fd; color:#1565c0; }
+.badge-step2 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#e8f5e9; color:#2e7d32; }
+.badge-step3 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#fff3e0; color:#e65100; }
+.badge-step4 { display:inline-block; padding:2px 10px; border-radius:4px; font-size:12px; font-weight:700; background:#fce4ec; color:#c62828; }.badge-step1[data-memo]:hover, .badge-step2[data-memo]:hover, .badge-step3[data-memo]:hover, .badge-step4[data-memo]:hover { opacity: 0.75; transform: scale(1.08); transition: all 0.15s; }
+.badge-step1[data-memo]::after, .badge-step2[data-memo]::after, .badge-step3[data-memo]::after, .badge-step4[data-memo]::after { content: ""; display:inline-block; width:5px; height:5px; border-radius:50%; background:currentColor; margin-left:4px; vertical-align:middle; opacity:0.7; }
+
+.admin-tabs { display: flex; gap: 0; margin: 12px 0 0 0; }
+.admin-tab { padding: 10px 24px; border: 2px solid #ddd; border-bottom: none; border-radius: 10px 10px 0 0; background: #f5f5f5; color: #888; font-weight: 700; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.2s; }
+.admin-tab.active { background: #fff; color: #e65100; border-color: #e65100; position: relative; z-index: 1; margin-bottom: -2px; }
+.admin-tab:hover:not(.active) { background: #fff3e0; color: #e65100; }
+.btn-warning { background: #ff9800; color: #fff; border: none; border-radius: 4px; cursor: pointer; padding: 4px 8px; font-size: 12px; }
+  .btn-warning:hover { background: #f57c00; }
+  .btn-danger:hover { background: #b71c1c; }
+  .btn-role { background: #1565c0; color: #fff; font-size: 11px; padding: 4px 10px; }
+  .btn-role:hover { background: #0d47a1; }
+
+  .main { max-width: 1400px; margin: 20px auto; padding: 0 16px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stat-card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); border-left: 4px solid; text-align: center; }
+  .stat-card .num { font-size: 36px; font-weight: 700; font-family: 'Zen Maru Gothic', sans-serif; }
+  .stat-card .label { font-size: 12px; color: #888; margin-top: 4px; }
+  .stat-card.total { border-color: #1a237e; }
+  .stat-card.total .num { color: #1a237e; }
+  .stat-card.active { border-color: #2e7d32; }
+  .stat-card.active .num { color: #2e7d32; }
+  .stat-card.partial { border-color: #f57f17; }
+  .stat-card.partial .num { color: #f57f17; }
+  .stat-card.none { border-color: #bbb; }
+  .stat-card.none .num { color: #bbb; }
+
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
+  .search-box { padding: 8px 14px; border: 2px solid #ddd; border-radius: 8px; font-size: 14px; width: 280px; font-family: inherit; }
+  .search-box:focus { outline: none; border-color: #1a237e; }
+
+  .member-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.06); font-size: 13px; }
+  .member-table thead th { background: #f5f5f5; padding: 12px 10px; text-align: center; font-weight: 700; color: #555; border-bottom: 2px solid #ddd; white-space: nowrap; }
+  .member-table tbody td { padding: 10px; border-bottom: 1px solid #eee; text-align: center; vertical-align: middle; }
+  .member-table tbody tr:hover { background: #f5f5f5; }
+
+  .step-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; color: #fff; white-space: nowrap; }
+  .step-1 { background: #78909c; }
+  .step-2 { background: #42a5f5; }
+  .step-3 { background: #66bb6a; }
+  .step-4 { background: #ff7043; }
+  .step-none { background: #e0e0e0; color: #999; }
+
+  .role-badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 10px; font-weight: 700; }
+  .role-admin { background: #e65100; color: #fff; }
+  .role-member { background: #f5f5f5; color: #888; }
+  tr.is-admin-row { background: #fff8e1; }
+  tr.is-admin-row:hover { background: #fff3cd; }
+
+  .member-name { font-weight: 700; text-align: left !important; }
+
+  .detail-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 200; align-items: center; justify-content: center; }
+  .detail-modal.show { display: flex; }
+  .detail-content { background: #fff; border-radius: 16px; padding: 32px; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto; }
+  .detail-content h2 { font-family: 'Zen Maru Gothic', sans-serif; color: #1a237e; margin: 0 0 20px; }
+  .detail-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #eee; }
+  .detail-item .vp-name { font-weight: 700; color: #555; }
+  .detail-item .memo { font-size: 12px; color: #888; margin-top: 4px; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 2px solid #e65100; border-radius: 0 0 12px 12px; border-top: none; }
+  @media (max-width: 640px) {
+    .admin-tabs { flex-wrap: wrap; border-bottom: 2px solid #e65100; margin-bottom: 0; }
+    .admin-tab { padding: 8px 14px; font-size: 12px; border-radius: 8px 8px 0 0; border-bottom: none; flex: 1 1 auto; text-align: center; }
+    .top-bar { flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 16px; }
+    .top-bar .user-info { flex-wrap: wrap; gap: 8px; }
+    .toolbar { flex-direction: column; align-items: stretch; }
+    .search-box { width: 100%; box-sizing: border-box; }
+    .member-table { font-size: 11px; }
+    .member-table thead th { padding: 8px 6px; }
+    .member-table tbody td { padding: 8px 6px; }
+    .stat-card { padding: 12px; }
+    .stat-card .num { font-size: 28px; }
+  }
+</style>
+</head><body>
+<div class="top-bar">
+  <div class="logo"><i class="fas fa-shield-alt"></i> 管理者ダッシュボード</div>
+  <div class="user-info">
+    <a href="/mypage" class="btn-sm btn-back" style="text-decoration:none"><i class="fas fa-map"></i> マイページ</a>
+    <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>
+    <a href="/admin/groups" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-users"></i> グループ別</a>
+    <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i> ログアウト</button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="stats">
+    <div class="stat-card total"><div class="num" id="totalCount">-</div><div class="label">総会員数</div></div>
+    <div class="stat-card active"><div class="num" id="completeCount">-</div><div class="label">全項目記入済み</div></div>
+    <div class="stat-card partial"><div class="num" id="partialCount">-</div><div class="label">一部記入</div></div>
+    <div class="stat-card none"><div class="num" id="noneCount">-</div><div class="label">未記入</div></div>
+  </div>
+
+  <div class="toolbar">
+    <input type="text" class="search-box" id="searchBox" placeholder="🔍 名前・メールで検索..." oninput="filterMembers()">
+    <div style="display:flex;gap:8px">
+      <button class="btn-sm btn-export" onclick="exportCSV()"><i class="fas fa-file-excel"></i> Excel (CSV) ダウンロード</button>
+    </div>
+
+</div>
+  </div>
+
+  <div class="admin-tabs">
+    <button class="admin-tab active" data-tab="elem" onclick="switchAdminTab('elem')">小学校</button>
+    <button class="admin-tab" data-tab="junior" onclick="switchAdminTab('junior')">中学校</button>
+    <button class="admin-tab" data-tab="admin" onclick="switchAdminTab('admin')">主幹・管理職</button>
+    <button class="admin-tab" data-tab="unset" onclick="switchAdminTab('unset')">未設定</button>
+  </div>
+  <div class="table-wrap">
+    <table class="member-table">
+      <thead id="memberThead"><tr></tr></thead>
+      <tbody id="memberBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="detail-modal" id="detailModal" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="detail-content" id="detailContent"></div>
+</div>
+
+<script>
+const token = localStorage.getItem('token');
+let user = JSON.parse(localStorage.getItem('user') || 'null');
+if (!token || !user || user.role !== 'admin') { window.location.href = '/login'; throw new Error('redirect'); }
+
+let allMembers = [];
+const vpKeys = ['lesson_plan','lesson_practice','student_eval','connection','research'];
+const vpLabels = { lesson_plan:'授業をつくる', lesson_practice:'授業をする', student_eval:'子どもを見る', connection:'つながる', research:'深める' };
+const stepLabels = { 1:'STEP1', 2:'STEP2', 3:'STEP3', 4:'STEP4' };
+
+function stepBadge(sel) {
+  if (!sel) return '<span class="step-badge step-none">未選択</span>';
+  return '<span class="step-badge step-'+sel.step+'">STEP'+sel.step+'</span>';
+}
+
+var _allMembers = [];
+var _sortCol = '';
+var _sortDir = 1;
+var _activeTab = 'elem';
+
+var _vpTabConfig = {
+  elem: {
+    label: '小学校',
+    viewpoints: [
+      { key: 'lesson_plan', label: '授業をつくる' },
+      { key: 'lesson_practice', label: '授業をする' },
+      { key: 'student_eval', label: '子どもを見る' },
+      { key: 'connection', label: 'つながる' },
+      { key: 'research', label: '深める' }
+    ]
+  },
+  junior: {
+    label: '中学校',
+    viewpoints: [
+      { key: 'j_lesson_plan', label: '授業をつくる' },
+      { key: 'j_material', label: '【資料】' },
+      { key: 'j_dialogue', label: '【対話】' },
+      { key: 'j_inquiry', label: '【探究】' },
+      { key: 'j_student_eval', label: '生徒を見る' },
+      { key: 'j_connection', label: 'つながる' },
+      { key: 'j_research', label: '深める' }
+    ]
+  },
+  admin: {
+    label: '主幹・管理職',
+    viewpoints: [
+      { key: 'a_school_support', label: '会の活動を支える' },
+      { key: 'a_school_mgmt', label: '会員同士をつなぐ' },
+      { key: 'a_member_support', label: '会員の成長を支える' },
+      { key: 'a_leader_dev', label: '次世代リーダー' },
+      { key: 'a_org_mgmt', label: '運営に貢献' },
+      { key: 'a_outreach', label: '外とつなぐ' }
+    ]
+  },
+  unset: {
+    label: '未設定',
+    viewpoints: []
+  }
+};
+var _tabSchoolTypeMap = { elem: 'elementary', junior: 'junior_high', admin: 'admin_staff', unset: '' };
+function inferSchoolType(m) {
+  if (m.school_type) return m.school_type;
+  var keys = Object.keys(m.selections || {});
+  if (keys.length === 0) return '';
+  var hasJunior = keys.some(function(k) { return k.startsWith('j_'); });
+  var hasAdmin = keys.some(function(k) { return k.startsWith('a_'); });
+  var hasElem = keys.some(function(k) { return !k.startsWith('j_') && !k.startsWith('a_'); });
+  if (hasJunior && !hasElem && !hasAdmin) return 'junior_high';
+  if (hasAdmin && !hasElem && !hasJunior) return 'admin_staff';
+  if (hasElem) return 'elementary';
+  return '';
+}
+function getFilteredMembers() {
+  var st = _tabSchoolTypeMap[_activeTab];
+  if (_activeTab === 'unset') return _allMembers.filter(function(m) { return !inferSchoolType(m); });
+  return _allMembers.filter(function(m) { return inferSchoolType(m) === st; });
+}
+function switchAdminTab(tab) {
+  _activeTab = tab;
+  _sortCol = '';
+  _sortDir = 1;
+  document.querySelectorAll('.admin-tab').forEach(function(btn) {
+    btn.classList.toggle('active', btn.getAttribute('data-tab') === tab);
+  });
+  renderMembers(getFilteredMembers());
+}
+
+function showAdminMemo(el) {
+  var memo = el.getAttribute('data-memo') || '';
+  var name = el.getAttribute('data-name') || '';
+  var vp = el.getAttribute('data-vp') || '';
+  var modal = document.getElementById('adminMemoModal');
+  document.getElementById('adminMemoName').textContent = name;
+  document.getElementById('adminMemoVp').textContent = vp;
+  document.getElementById('adminMemoText').textContent = memo;
+  modal.style.display = 'flex';
+}
+function updateSchoolType(sel) {
+  var id = sel.getAttribute('data-id');
+  var school_type = sel.value;
+  fetch('/api/admin/members/' + id + '/school_type', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+    body: JSON.stringify({ school_type: school_type })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.success) {
+      loadMembers();
+    } else {
+      alert('更新に失敗しました');
+    }
+  }).catch(function() { alert('通信エラーが発生しました'); });
+}
+
+function handleGroupKey(e, inp) {
+  if (e.key === 'Enter' || e.key === 'Escape') inp.blur();
+}
+function editGroup(span) {
+  var td = span.parentNode;
+  var input = td.querySelector('.group-input');
+  span.style.display = 'none';
+  input.style.display = '';
+  input.focus();
+  input.select();
+}
+
+async function saveGroup(input) {
+  var id = input.getAttribute('data-id');
+  var value = input.value.trim();
+  var td = input.parentNode;
+  var span = td.querySelector('.group-disp');
+  input.style.display = 'none';
+  span.style.display = '';
+  span.textContent = value || '未設定';
+  span.style.background = value ? '#e3f2fd' : '';
+  span.style.color = value ? '#1565c0' : '#999';
+  span.style.fontWeight = value ? 'bold' : '';
+  try {
+    var res = await fetch('/api/admin/members/' + id + '/training-group', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+      body: JSON.stringify({ training_group: value })
+    });
+    if (res.ok) {
+      var member = _allMembers.find(function(m) { return String(m.id) === String(id); });
+      if (member) member.training_group = value;
+      var existingGroups = [];
+      _allMembers.forEach(function(m) { if (m.training_group && existingGroups.indexOf(m.training_group) === -1) existingGroups.push(m.training_group); });
+      existingGroups.sort();
+      var dl = document.getElementById('groupDatalist');
+      if (dl) dl.innerHTML = existingGroups.map(function(g) { return '<option value="' + g.replace(/"/g,'&quot;') + '">'; }).join('');
+    }
+  } catch(e) { alert('保存に失敗しました'); }
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll('.sort-icon').forEach(function(el) {
+    var col = el.getAttribute('data-col');
+    el.textContent = col === _sortCol ? (_sortDir === 1 ? '▲' : '▼') : '⇅';
+  });
+  document.querySelectorAll('[data-sort]').forEach(function(th) {
+    th.style.background = th.getAttribute('data-sort') === _sortCol ? 'rgba(0,0,0,0.08)' : '';
+  });
+}
+
+function renderMembers(members) {
+  var body = document.getElementById('memberBody');
+  var thead = document.getElementById('memberThead');
+  // NOTE: _allMembers is NOT overwritten here; it stays as the full list loaded from API.
+
+  var vps = _vpTabConfig[_activeTab].viewpoints;
+
+  // Build thead dynamically
+  var hdr = '<tr><th style="width:30px">#</th>';
+   hdr += '<th style="width:120px;cursor:pointer;user-select:none" data-sort="name">名前 <span class="sort-icon" data-col="name"></span></th>';
+  hdr += '<th style="width:120px;cursor:pointer;user-select:none" data-sort="school">学校名 <span class="sort-icon" data-col="school"></span></th>';
+  hdr += '<th style="width:60px;cursor:pointer;user-select:none" data-sort="district">区 <span class="sort-icon" data-col="district"></span></th>';
+  hdr += '<th style="width:50px;cursor:pointer;user-select:none" data-sort="experience_years">経験 <span class="sort-icon" data-col="experience_years"></span></th>';
+  hdr += '<th style="width:60px;cursor:pointer;user-select:none" data-sort="grade">学年 <span class="sort-icon" data-col="grade"></span></th>';
+  hdr += '<th style="width:80px;cursor:pointer;user-select:none" data-sort="position">所属 <span class="sort-icon" data-col="position"></span></th>';
+  hdr += '<th style="width:90px;cursor:pointer;user-select:none" data-sort="training_group">グループ <span class="sort-icon" data-col="training_group"></span></th>';
+  for (var vi = 0; vi < vps.length; vi++) {
+    hdr += '<th style="cursor:pointer;user-select:none" data-sort="vp_' + vps[vi].key + '">' + vps[vi].label + ' <span class="sort-icon" data-col="vp_' + vps[vi].key + '"></span></th>';
+  }
+  hdr += (_activeTab === 'unset' ? '<th>校種設定</th>' : '') + '<th>操作</th></tr>';
+  thead.innerHTML = hdr;
+
+  // Sort
+  if (_sortCol) {
+    var isVp = _sortCol.indexOf('vp_') === 0;
+    var vpKey = isVp ? _sortCol.slice(3) : '';
+    members = members.slice().sort(function(a, b) {
+      var av, bv;
+      if (isVp) {
+        av = (a.selections && a.selections[vpKey]) ? a.selections[vpKey].step : 0;
+        bv = (b.selections && b.selections[vpKey]) ? b.selections[vpKey].step : 0;
+        av = Number(av) || 0; bv = Number(bv) || 0;
+      } else {
+        av = a[_sortCol] != null ? a[_sortCol] : '';
+        bv = b[_sortCol] != null ? b[_sortCol] : '';
+        if (typeof av === 'number' || typeof bv === 'number') {
+          av = (av === null || av === '') ? -1 : Number(av);
+          bv = (bv === null || bv === '') ? -1 : Number(bv);
+        } else { av = String(av).toLowerCase(); bv = String(bv).toLowerCase(); }
+      }
+      return av < bv ? -_sortDir : av > bv ? _sortDir : 0;
+    });
+  }
+  updateSortHeaders();
+
+  // Build datalist for group suggestions
+  var existingGroups = [];
+  _allMembers.forEach(function(mem) { if (mem.training_group && existingGroups.indexOf(mem.training_group) === -1) existingGroups.push(mem.training_group); });
+  existingGroups.sort();
+  var dl = document.getElementById('groupDatalist');
+  if (dl) dl.innerHTML = existingGroups.map(function(g) { return '<option value="' + g.replace(/"/g,'&quot;') + '">'; }).join('');
+
+  // Build rows
+  body.innerHTML = members.map(function(m, i) {
+    var vpCells = '';
+    for (var vi = 0; vi < vps.length; vi++) {
+      var vpName = vps[vi].key;
+      var sel = m.selections ? m.selections[vpName] : null;
+      var stepLabel = sel ? 'STEP' + sel.step : '未選択';
+      var stepClass = sel ? 'step' + sel.step : 'none';
+      var memo = sel && sel.memo ? sel.memo : ''; var vpLabel = vps[vi].label || vpName; vpCells += '<td style="text-align:center"><span class="badge-' + stepClass + '"' + (memo ? ' style="cursor:pointer" data-memo="' + memo.replace(/"/g, '&quot;') + '" data-name="' + (m.name||'').replace(/"/g, '&quot;') + '" data-vp="' + vpLabel + '" onclick="showAdminMemo(this)"' : '') + '>' + stepLabel + '</span></td>';
+    }
+    var grp = m.training_group || '';
+    var grpCell = '<td style="text-align:center;white-space:nowrap">' +
+      '<span class="group-disp" data-id="' + m.id + '" onclick="editGroup(this)" style="cursor:pointer;padding:2px 6px;border-radius:4px;font-size:12px;' + (grp ? 'background:#e3f2fd;color:#1565c0;font-weight:bold' : 'color:#999') + '">' + (grp ? escapeHtml(grp) : '未設定') + '</span>' +
+      '<input type="text" list="groupDatalist" class="group-input" data-id="' + m.id + '" value="' + escapeHtml(grp) + '" placeholder="例: Aグループ" style="display:none;width:80px;font-size:12px;padding:2px 4px;border:1px solid #90caf9;border-radius:4px" onblur="saveGroup(this)" onkeydown="handleGroupKey(event,this)">' +
+      '</td>';
+    var adminBadge = (m.role === 'admin') ? ' <span class="role-badge role-admin"><i class="fas fa-shield-halved"></i> 管理者</span>' : '';
+    return '<tr' + (m.role === 'admin' ? ' class="is-admin-row"' : '') + '>' +
+      '<td>' + (i + 1) + '</td>' +
+         '<td><strong>' + (m.name || '') + '</strong>' + adminBadge + '</td>' +
+      '<td>' + (m.school || '-') + '</td>' +
+      '<td>' + (m.district || '-') + '</td>' +
+      '<td>' + (m.experience_years != null ? m.experience_years + '年目' : '-') + '</td>' +
+      '<td>' + (m.grade || '-') + '</td>' +
+      '<td>' + (m.position || '-') + '</td>' +
+      grpCell +
+      vpCells +
+      (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>主幹・管理職</option></select></td>' : '') +
+      '<td style="white-space:nowrap">' +
+        '<button class="btn-sm btn-warning" data-action="role" data-id="' + m.id + '" data-role="' + m.role + '" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '"><i class="fas ' + (m.role === 'admin' ? 'fa-user-minus' : 'fa-user-plus') + '"></i></button> ' +
+        '<button class="btn-sm btn-key" data-action="reset-password" data-id="' + m.id + '" data-name="' + escapeHtml(m.name) + '" title="パスワードリセット"><i class="fas fa-key"></i></button> ' +
+        '<button class="btn-sm btn-danger" data-action="delete" data-id="' + m.id + '" title="削除"><i class="fas fa-trash"></i></button>' +
+      '</td></tr>';
+  }).join('');
+
+  updateStats(members);
+
+  // Setup sort click handler
+  if (!thead._sortReady) {
+    thead._sortReady = true;
+    thead.addEventListener('click', function(e) {
+      var th = e.target.closest('[data-sort]');
+      if (!th) return;
+      var col = th.getAttribute('data-sort');
+      if (_sortCol === col) { _sortDir = -_sortDir; } else { _sortCol = col; _sortDir = 1; }
+      renderMembers(getFilteredMembers());
+    });
+  }
+}
+
+function updateStats(members) {
+  var total = members.length;
+  var all = 0, partial = 0, none = 0;
+  var vps = _vpTabConfig[_activeTab].viewpoints;
+  if (vps.length === 0) {
+    none = total;
+  } else {
+    members.forEach(function(m) {
+      var filled = 0;
+      for (var vi = 0; vi < vps.length; vi++) {
+        if (m.selections && m.selections[vps[vi].key]) filled++;
+      }
+      if (filled === vps.length) all++;
+      else if (filled > 0) partial++;
+      else none++;
+    });
+  }
+  document.getElementById('totalCount').textContent = total;
+  document.getElementById('completeCount').textContent = all;
+  document.getElementById('partialCount').textContent = partial;
+  document.getElementById('noneCount').textContent = none;
+}
+
+async function loadMembers() {
+  var token = localStorage.getItem('token');
+  var res = await fetch('/api/admin/members', { headers: { 'Authorization': 'Bearer ' + token } });
+  if (res.status === 401 || res.status === 403) { localStorage.clear(); window.location.href = '/login'; return; }
+  var data = await res.json();
+  _allMembers = data.members || [];
+  renderMembers(getFilteredMembers());
+}
+
+loadMembers();
+function filterMembers() {
+  const q = document.getElementById('searchBox').value.toLowerCase();
+  const filtered = getFilteredMembers().filter(m => m.name.toLowerCase().includes(q) || (m.school || '').toLowerCase().includes(q) || m.email.toLowerCase().includes(q));
+  renderMembers(filtered);
+}
+
+const ADMIN_FIRST_FY = 2026;
+function getCurrentFiscalYearClient() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth() + 1;
+  const fy = m >= 4 ? y : y - 1;
+  return Math.max(fy, ADMIN_FIRST_FY);
+}
+
+// XSS対策（管理画面でも一応）
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+async function loadAnnualNotesForMember(userId) {
+  const box = document.getElementById('annualNotesContent');
+  if (!box) return;
+  box.textContent = '読み込み中...';
+
+  const fy = getCurrentFiscalYearClient();
+
+  try {
+    const res = await fetch('/api/admin/annual-notes?user_id=' + encodeURIComponent(userId) + '&fy=' + encodeURIComponent(fy), {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (!res.ok) {
+      box.textContent = '読み込みに失敗しました';
+      return;
+    }
+    const data = await res.json();
+    const goal = (data.goal || '').trim();
+    const reflection = (data.reflection || '').trim();
+    const updated = data.updated_at ? ('最終更新: ' + new Date(data.updated_at).toLocaleString('ja-JP')) : '';
+
+    box.innerHTML =
+      '<div style="margin-bottom:10px"><div style="font-weight:700;color:#555;margin-bottom:4px">目標</div>' +
+      '<div style="white-space:pre-wrap;background:#fff;border:1px solid #eee;border-radius:10px;padding:10px">' +
+        (goal ? escapeHtml(goal) : '<span style="color:#999">未入力</span>') +
+      '</div></div>' +
+      '<div><div style="font-weight:700;color:#555;margin-bottom:4px">振り返り</div>' +
+      '<div style="white-space:pre-wrap;background:#fff;border:1px solid #eee;border-radius:10px;padding:10px">' +
+        (reflection ? escapeHtml(reflection) : '<span style="color:#999">未入力</span>') +
+      '</div></div>' +
+      (updated ? '<div style="margin-top:8px;color:#999;font-size:11px">' + escapeHtml(updated) + '</div>' : '');
+  } catch (e) {
+    box.textContent = '読み込みに失敗しました';
+  }
+}
+
+function showDetail(id) {
+  const m = allMembers.find(x => x.id === id);
+  if (!m) return;
+
+  const fy = getCurrentFiscalYearClient();
+
+  let html = '<h2><i class="fas fa-user"></i> ' + escapeHtml(m.name) + '</h2>';
+  html += '<p style="color:#888;font-size:13px;margin-bottom:14px">'
+    + (m.school ? ('学校名: ' + escapeHtml(m.school) + ' | ') : '')
+    + escapeHtml(m.email)
+    + ' | 登録日: ' + escapeHtml(m.created_at || '-')
+    + '</p>';
+
+  // 年度目標・振り返り（今年度のみ）
+  html += '<div style="margin:18px 0 18px;padding:14px;border:2px solid #f0f0f0;border-radius:12px;background:#fafafa">'
+    + '<div style="font-weight:700;color:#1a237e;margin-bottom:10px"><i class="fas fa-bullseye"></i> 年度の目標・振り返り（' + fy + '年度）</div>'
+    + '<div id="annualNotesContent" style="font-size:13px;color:#555">読み込み中...</div>'
+    + '</div>';
+
+  for (const vp of vpKeys) {
+    const sel = m.selections[vp];
+    html += '<div class="detail-item"><div><div class="vp-name">' + escapeHtml(vpLabels[vp]) + '</div>';
+    if (sel && sel.memo) html += '<div class="memo">' + escapeHtml(sel.memo) + '</div>';
+    html += '</div>' + stepBadge(sel) + '</div>';
+  }
+
+  html += '<div style="text-align:center;margin-top:24px"><button class="btn-sm" style="background:#eee;color:#555;padding:8px 24px" id="closeDetailBtn">閉じる</button></div>';
+  document.getElementById('detailContent').innerHTML = html;
+  document.getElementById('closeDetailBtn').addEventListener('click', function() { document.getElementById('detailModal').classList.remove('show'); });
+  document.getElementById('detailModal').classList.add('show');
+
+  loadAnnualNotesForMember(id);
+}
+
+async function toggleRole(id, currentRole) {
+  const newRole = currentRole === 'admin' ? 'member' : 'admin';
+  const label = newRole === 'admin' ? '管理者に変更' : '会員に変更';
+  if (!confirm(label + 'しますか？')) return;
+  await fetch('/api/admin/members/'+id+'/role', {
+    method: 'PUT',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: newRole })
+  });
+  loadMembers();
+}
+
+async function deleteMember(id, name) {
+  if (!confirm(name + ' さんを削除しますか？この操作は取り消せません。')) return;
+  await fetch('/api/admin/members/'+id, {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + token }
+  });
+  loadMembers();
+}
+
+async function resetPassword(id, name) {
+  const newPw = prompt(name + ' さんの新しいパスワードを入力してください（4文字以上）:');
+  if (newPw === null) return;
+  if (newPw.length < 4) { alert('パスワードは4文字以上にしてください'); return; }
+  const res = await fetch('/api/admin/members/'+id+'/reset-password', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: newPw })
+  });
+  if (res.ok) {
+    alert(name + ' さんのパスワードを「' + newPw + '」にリセットしました。本人に新しいパスワードを伝えてください。');
+  } else {
+    const err = await res.json();
+    alert('エラー: ' + (err.error || '不明なエラー'));
+  }
+}
+
+async function exportCSV() {
+  const res = await fetch('/api/admin/export', { headers: { 'Authorization': 'Bearer ' + token } });
+  if (!res.ok) { alert('エクスポートに失敗しました'); return; }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'shakaika_members_export.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function logout() {
+  const t = localStorage.getItem('token');
+  if (t) { try { await fetch('/api/auth/logout', { method:'POST', headers:{'Authorization':'Bearer '+t} }); } catch(e){} }
+  localStorage.clear(); window.location.href = '/login';
+}
+
+// Event delegation for member table
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const id = parseInt(btn.dataset.id);
+  if (action === 'detail') showDetail(id);
+  else if (action === 'role') toggleRole(id, btn.dataset.role);
+  else if (action === 'reset-password') resetPassword(id, btn.dataset.name);
+  else if (action === 'delete') deleteMember(id, btn.dataset.name);
+});
+
+loadMembers();
+</script>
+
+<datalist id="groupDatalist"></datalist>
+<div id="adminMemoModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'"><div style="background:#fff;border-radius:12px;padding:28px 32px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.18);position:relative"><button onclick="document.getElementById('adminMemoModal').style.display='none'" style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:22px;cursor:pointer;color:#999">&times;</button><div style="font-size:13px;color:#999;margin-bottom:4px" id="adminMemoVp"></div><div style="font-size:15px;font-weight:700;color:#333;margin-bottom:16px" id="adminMemoName"></div><div style="font-size:15px;color:#444;line-height:1.7;white-space:pre-wrap;background:#f8f8f8;padding:16px;border-radius:8px" id="adminMemoText"></div></div></div>
+</body></html>`)
+})
+
+// --- QR Attend Page (scanned by member) ---
+app.get('/attend/:code', (c) => {
+  const code = c.req.param('code').replace(/[^A-Za-z0-9]/g, '')
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>出席・アンケート - 社会科同好会</title>
+<style>
+  .attend-container { max-width: 560px; margin: 20px auto; padding: 0 16px; }
+  .card { background: #fff; border-radius: 16px; padding: 28px 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; margin-bottom: 20px; }
+  .card h2 { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); margin: 0 0 4px; font-size: 20px; }
+  .card .date { color: #888; font-size: 13px; margin-bottom: 16px; }
+  .card .desc { color: #666; font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
+  .success-box { background: #e8f5e9; border: 2px solid #66bb6a; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px; }
+  .success-box i { font-size: 40px; color: #2e7d32; }
+  .success-box p { font-size: 15px; font-weight: 700; color: #2e7d32; margin: 8px 0 0; }
+  .form-group { margin-bottom: 18px; }
+  .form-group label { display: block; font-weight: 700; font-size: 14px; color: #555; margin-bottom: 6px; }
+  .form-group .hint { font-size: 11px; color: #999; margin-bottom: 6px; }
+  .stars { display: flex; gap: 6px; }
+  .star { font-size: 32px; cursor: pointer; color: #ddd; transition: color 0.15s; }
+  .star.active { color: #ffb300; }
+  .star:hover { color: #ffc107; }
+  textarea { width: 100%; padding: 10px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 14px; font-family: inherit; resize: vertical; min-height: 80px; }
+  textarea:focus { outline: none; border-color: var(--header-line); }
+  input[type="text"] { width: 100%; padding: 10px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 14px; font-family: inherit; }
+  input[type="text"]:focus { outline: none; border-color: var(--header-line); }
+  .radio-group { display: flex; flex-wrap: wrap; gap: 8px; }
+  .radio-option { padding: 8px 16px; border: 2px solid #e0d6c8; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
+  .radio-option.selected { border-color: var(--header-line); background: #fff3e0; color: var(--header-line); font-weight: 700; }
+  .checkbox-group { display: flex; flex-wrap: wrap; gap: 8px; }
+  .checkbox-option { padding: 8px 16px; border: 2px solid #e0d6c8; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
+  .checkbox-option.selected { border-color: #1565c0; background: #e3f2fd; color: #1565c0; font-weight: 700; }
+  .vp-detail-toggle { font-size: 12px; color: #888; cursor: pointer; margin-top: 6px; padding: 4px 0; }
+  .vp-detail-box { background: #faf6f0; border-radius: 8px; padding: 10px 14px; margin-top: 6px; }
+  .vp-detail-item { font-size: 12px; color: #666; padding: 3px 0; }
+  .vp-detail-item b { color: #5d4037; }
+  .rating-stars { display: flex; gap: 4px; }
+  .rating-star { font-size: 26px; cursor: pointer; color: #ddd; transition: color 0.15s; }
+  .rating-star.active { color: #ffb300; }
+  .btn { width: 100%; padding: 14px; border: none; border-radius: 12px; font-size: 16px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .btn-primary { background: var(--header-line); color: #fff; }
+  .btn-primary:hover { background: #bf360c; }
+  .btn-secondary { background: #f5f5f5; color: #666; margin-top: 10px; }
+  .already { background: #f3e5f5; border: 2px solid #ab47bc; border-radius: 12px; padding: 16px; text-align: center; color: #6a1b9a; font-weight: 700; }
+  .login-prompt { text-align: center; padding: 40px 20px; }
+  .login-prompt a { color: var(--header-line); font-weight: 700; }
+  #loading { text-align: center; padding: 60px; color: #888; }
+</style>
+</head><body>
+<div class="attend-container">
+  <div id="loading"><i class="fas fa-spinner fa-spin fa-2x"></i><p>読み込み中...</p></div>
+  <div id="loginPrompt" style="display:none" class="card login-prompt">
+    <i class="fas fa-user-circle fa-3x" style="color:#ccc;margin-bottom:12px"></i>
+    <p>出席を記録するにはログインが必要です</p>
+    <a href="/login?redirect=/attend/${code}" class="btn btn-primary" style="display:inline-block;width:auto;padding:12px 32px;text-decoration:none;margin-top:12px">ログインする</a>
+    <div style="margin-top:24px;border-top:1px dashed #ddd;padding-top:20px">
+      <p style="font-size:13px;color:#888;margin-bottom:10px">会員登録がまだの方は、こちらから出席を記録できます</p>
+      <button type="button" class="btn btn-secondary" id="guestModeBtn" style="width:auto;padding:10px 28px"><i class="fas fa-pen"></i> ゲストとして出席する</button>
+    </div>
+    <div id="guestForm" style="display:none;text-align:left;margin-top:18px">
+      <div id="guestEventInfo" style="text-align:center;color:#555;font-size:13px;margin-bottom:14px"></div>
+      <div class="form-group"><label>お名前 <span style="color:#c62828">*</span></label><input type="text" id="gName" placeholder="例：社会　太郎"></div>
+      <div class="form-group"><label>学校名</label><input type="text" id="gSchool" placeholder="例：○○小学校"></div>
+      <div class="form-group"><label>区</label><input type="text" id="gDistrict" placeholder="例：千種区"></div>
+      <div class="form-group"><label>経験年数</label><input type="text" id="gExp" inputmode="numeric" placeholder="例：5"></div>
+      <button type="button" class="btn btn-primary" id="guestSubmitBtn"><i class="fas fa-check"></i> 出席を記録する</button>
+      <div id="guestStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>
+    </div>
+    <div style="margin-top:18px">
+      <a href="#" id="guestFindLink" style="font-size:12px;color:#888;text-decoration:underline">受付済みのゲストの方：振り返り（アンケート）に回答する</a>
+    </div>
+    <div id="guestFindForm" style="display:none;text-align:left;margin-top:14px">
+      <div class="form-group"><label>お名前（受付時と同じ） <span style="color:#c62828">*</span></label><input type="text" id="fName"></div>
+      <div class="form-group"><label>学校名（受付時と同じ）</label><input type="text" id="fSchool"></div>
+      <button type="button" class="btn btn-secondary" id="guestFindBtn" style="width:auto;padding:10px 24px;margin-top:0"><i class="fas fa-search"></i> 出席記録をさがす</button>
+      <div id="guestFindStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>
+    </div>
+  </div>
+  <div id="content" style="display:none"></div>
+</div>
+<script>
+const CODE = '${code}';
+const token = localStorage.getItem('token');
+let user = JSON.parse(localStorage.getItem('user') || 'null');
+var GKEY = 'sg_' + CODE;
+if (!token || !user) {
+  document.getElementById('loading').style.display='none';
+  document.getElementById('loginPrompt').style.display='block';
+  guestCheckReturn();
+} else { loadEvent(); }
+
+function escG(t) {
+  return String(t == null ? '' : t).replace(/[&<>"']/g, function(ch) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+  });
+}
+
+var guestModeBtn = document.getElementById('guestModeBtn');
+if (guestModeBtn) {
+  guestModeBtn.addEventListener('click', async function() {
+    guestModeBtn.style.display = 'none';
+    document.getElementById('guestForm').style.display = 'block';
+    try {
+      var r = await fetch('/api/events/' + CODE + '/info');
+      if (r.ok) {
+        var d = await r.json();
+        document.getElementById('guestEventInfo').innerHTML = '<b>' + escG(d.event.title) + '</b>（' + escG(d.event.event_date) + '）';
+      } else {
+        var ed = {};
+        try { ed = await r.json(); } catch(e) {}
+        document.getElementById('guestEventInfo').innerHTML = '<span style="color:#c62828">' + escG(ed.error || 'イベント情報を取得できませんでした') + '</span>';
+      }
+    } catch(e) {}
+  });
+}
+
+var guestSubmitBtn = document.getElementById('guestSubmitBtn');
+if (guestSubmitBtn) {
+  guestSubmitBtn.addEventListener('click', async function() {
+    var st = document.getElementById('guestStatus');
+    var name = (document.getElementById('gName').value || '').trim();
+    if (!name) { st.style.color = '#c62828'; st.textContent = 'お名前を入力してください'; return; }
+    guestSubmitBtn.disabled = true;
+    st.style.color = '#888'; st.textContent = '送信中...';
+    try {
+      var res = await fetch('/api/events/' + CODE + '/guest-attend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name,
+          school: (document.getElementById('gSchool').value || '').trim(),
+          district: (document.getElementById('gDistrict').value || '').trim(),
+          experience_years: (document.getElementById('gExp').value || '').trim()
+        })
+      });
+      var d2 = {};
+      try { d2 = await res.json(); } catch(e) {}
+      if (res.ok && d2.success) {
+        if (d2.guest_id && d2.guest_token) {
+          try { localStorage.setItem(GKEY, JSON.stringify({ gid: d2.guest_id, gtoken: d2.guest_token, name: name })); } catch(e) {}
+        }
+        var note = d2.has_questions ? '<div style="background:#fff3e0;border:2px solid #ffb74d;border-radius:12px;padding:12px 14px;font-size:13px;color:#5d4037;margin-top:14px;line-height:1.7;text-align:left"><i class="fas fa-clipboard-list"></i> 会の最後に<b>もう一度同じQRコード</b>を読むと、振り返り（アンケート）に回答できます。</div>' : '';
+        document.getElementById('loginPrompt').innerHTML = '<div class="success-box"><i class="fas fa-check-circle"></i><p>' + escG(name) + ' さんの出席を記録しました。<br>ご参加ありがとうございます！</p></div>' + (d2.attended === false ? '<p style="color:#888;font-size:12px">（' + escG(d2.message || '既に記録済みでした') + '）</p>' : '') + note;
+      } else {
+        guestSubmitBtn.disabled = false;
+        st.style.color = '#c62828'; st.textContent = d2.error || 'エラーが発生しました。もう一度お試しください。';
+      }
+    } catch(e) {
+      guestSubmitBtn.disabled = false;
+      st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました。もう一度お試しください。';
+    }
+  });
+}
+
+// ===== ゲスト振り返り（同じQR再読み込み） =====
+function gSaved() { try { return JSON.parse(localStorage.getItem(GKEY) || 'null'); } catch(e) { return null; } }
+
+async function guestCheckReturn() {
+  var saved = gSaved();
+  if (!saved || !saved.gid || !saved.gtoken) return;
+  try {
+    var r = await fetch('/api/events/' + CODE + '/guest-status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: saved.gid, guest_token: saved.gtoken }) });
+    if (!r.ok) { if (r.status === 404) { try { localStorage.removeItem(GKEY); } catch(e) {} } return; }
+    renderGuestSurvey(await r.json());
+  } catch(e) {}
+}
+
+var gAnswerData = {};
+
+function renderGuestSurvey(d) {
+  var lp = document.getElementById('loginPrompt');
+  if (!lp) return;
+  var qs = d.questions || [];
+  var answered = (d.answers || []).length > 0;
+  var head = '<div style="text-align:center;margin-bottom:6px"><i class="fas fa-user-check fa-2x" style="color:#66bb6a"></i></div>'
+    + '<p style="text-align:center;font-weight:700">おかえりなさい、' + escG(d.guest.name) + ' さん</p>'
+    + '<p style="text-align:center;color:#888;font-size:13px;margin-bottom:16px">' + escG(d.event.title) + '（' + escG(d.event.event_date) + '）の出席は記録済みです</p>';
+  if (qs.length === 0) {
+    lp.innerHTML = '<div style="text-align:left">' + head + '<div class="already"><i class="fas fa-check"></i> この会のアンケートはありません</div></div>';
+    return;
+  }
+  if (answered) {
+    lp.innerHTML = '<div style="text-align:left">' + head
+      + '<div class="already"><i class="fas fa-clipboard-check"></i> アンケートは回答済みです。ありがとうございました！</div>'
+      + '<div style="text-align:center;margin-top:10px"><a href="#" id="gReAnswer" style="font-size:12px;color:#888;text-decoration:underline">回答し直す</a></div></div>';
+    var ra = document.getElementById('gReAnswer');
+    if (ra) ra.addEventListener('click', function(ev) { ev.preventDefault(); renderGuestSurveyForm(d); });
+    return;
+  }
+  renderGuestSurveyForm(d);
+}
+
+function renderGuestSurveyForm(d) {
+  var lp = document.getElementById('loginPrompt');
+  if (!lp) return;
+  var qs = d.questions || [];
+  gAnswerData = {};
+  var prev = {};
+  (d.answers || []).forEach(function(a) { prev[a.question_id] = a.answer_text; });
+  var html = '<div style="text-align:left">'
+    + '<p style="text-align:center;font-weight:700;margin-bottom:4px">おかえりなさい、' + escG(d.guest.name) + ' さん</p>'
+    + '<p style="text-align:center;color:#888;font-size:13px;margin-bottom:14px">' + escG(d.event.title) + ' の振り返り（アンケート）</p>';
+  for (var i = 0; i < qs.length; i++) {
+    var q = qs[i];
+    html += '<div class="form-group"><label>' + escG(q.question_text) + (q.required ? ' <span style="color:#c62828;font-size:11px;font-weight:700">＊必須</span>' : '') + '</label>';
+    if (q.question_type === 'text') {
+      html += '<textarea id="gq_' + q.id + '" rows="2" placeholder="回答を入力">' + escG(prev[q.id] || '') + '</textarea>';
+    } else if (q.question_type === 'radio') {
+      var opts = q.options ? String(q.options).split('|') : [];
+      html += '<div class="radio-group" id="gq_' + q.id + '">';
+      for (var j = 0; j < opts.length; j++) html += '<div class="radio-option g-opt" data-qid="' + q.id + '" data-multi="0">' + escG(opts[j]) + '</div>';
+      html += '</div>';
+    } else if (q.question_type === 'checkbox') {
+      var isG = String(q.question_text).indexOf('成長の視点') >= 0;
+      var copts = q.options ? String(q.options).split('|') : [];
+      if (isG && copts.length === 0) copts = ['授業をつくる','授業をする','子どもを見る','つながる','深める'];
+      html += '<div class="checkbox-group" id="gq_' + q.id + '">';
+      for (var k = 0; k < copts.length; k++) html += '<div class="checkbox-option g-opt" data-qid="' + q.id + '" data-multi="1">' + escG(copts[k]) + '</div>';
+      html += '</div>';
+    } else if (q.question_type === 'rating') {
+      html += '<div class="rating-stars" id="gq_' + q.id + '">';
+      for (var s = 1; s <= 5; s++) html += '<span class="rating-star g-star" data-qid="' + q.id + '" data-val="' + s + '">★</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  html += '<button type="button" class="btn btn-primary" id="gSurveyBtn"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
+  html += '<div id="gSurveyStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>';
+  html += '</div>';
+  lp.innerHTML = html;
+  lp.querySelectorAll('.g-opt').forEach(function(el) {
+    el.addEventListener('click', function() {
+      var qid = el.getAttribute('data-qid');
+      if (el.getAttribute('data-multi') === '1') {
+        el.classList.toggle('selected');
+      } else {
+        el.parentElement.querySelectorAll('.g-opt').forEach(function(o) { o.classList.remove('selected'); });
+        el.classList.add('selected');
+      }
+      var sel = Array.prototype.map.call(el.parentElement.querySelectorAll('.g-opt.selected'), function(o) { return o.textContent; });
+      gAnswerData[qid] = sel.join('、');
+    });
+  });
+  lp.querySelectorAll('.g-star').forEach(function(el) {
+    el.addEventListener('click', function() {
+      var qid = el.getAttribute('data-qid');
+      var v = parseInt(el.getAttribute('data-val') || '0', 10);
+      gAnswerData[qid] = String(v);
+      lp.querySelectorAll('#gq_' + qid + ' .g-star').forEach(function(st, idx) { st.classList.toggle('active', idx < v); });
+    });
+  });
+  var gb = document.getElementById('gSurveyBtn');
+  if (gb) gb.addEventListener('click', function() { submitGuestSurvey(d); });
+}
+
+async function submitGuestSurvey(d) {
+  var saved = gSaved();
+  if (!saved) return;
+  var st = document.getElementById('gSurveyStatus');
+  var answers = [];
+  (d.questions || []).forEach(function(q) {
+    var el = document.getElementById('gq_' + q.id);
+    if (el && el.tagName === 'TEXTAREA') gAnswerData[q.id] = el.value;
+    if (gAnswerData[q.id]) answers.push({ question_id: q.id, answer_text: gAnswerData[q.id] });
+  });
+  var missingQ = (d.questions || []).find(function(q) { return q.required && !String(gAnswerData[q.id] || '').trim(); });
+  if (missingQ) { if (st) { st.style.color = '#c62828'; st.textContent = '必須の質問「' + missingQ.question_text + '」に回答してください'; } return; }
+  var gb = document.getElementById('gSurveyBtn');
+  if (gb) gb.disabled = true;
+  if (st) { st.style.color = '#888'; st.textContent = '送信中...'; }
+  try {
+    var res = await fetch('/api/events/' + CODE + '/guest-survey', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: saved.gid, guest_token: saved.gtoken, answers: answers }) });
+    var d2 = {};
+    try { d2 = await res.json(); } catch(e) {}
+    if (res.ok && d2.success) {
+      document.getElementById('loginPrompt').innerHTML = '<div class="success-box"><i class="fas fa-heart"></i><p>回答ありがとうございました！</p></div>';
+      return;
+    }
+    if (st) { st.style.color = '#c62828'; st.textContent = d2.error || '送信に失敗しました'; }
+  } catch(e) {
+    if (st) { st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました'; }
+  }
+  if (gb) gb.disabled = false;
+}
+
+// 別端末用：名前で出席記録をさがす
+var gfLink = document.getElementById('guestFindLink');
+if (gfLink) {
+  gfLink.addEventListener('click', function(ev) {
+    ev.preventDefault();
+    document.getElementById('guestFindForm').style.display = 'block';
+    gfLink.style.display = 'none';
+  });
+}
+var gfBtn = document.getElementById('guestFindBtn');
+if (gfBtn) {
+  gfBtn.addEventListener('click', async function() {
+    var st = document.getElementById('guestFindStatus');
+    var name = (document.getElementById('fName').value || '').trim();
+    var school = (document.getElementById('fSchool').value || '').trim();
+    if (!name) { st.style.color = '#c62828'; st.textContent = 'お名前を入力してください'; return; }
+    gfBtn.disabled = true;
+    st.style.color = '#888'; st.textContent = '確認中...';
+    try {
+      var res = await fetch('/api/events/' + CODE + '/guest-find', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name: name, school: school }) });
+      var d2 = {};
+      try { d2 = await res.json(); } catch(e) {}
+      if (res.ok && d2.guest_id) {
+        try { localStorage.setItem(GKEY, JSON.stringify({ gid: d2.guest_id, gtoken: d2.guest_token, name: d2.name })); } catch(e) {}
+        var r = await fetch('/api/events/' + CODE + '/guest-status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: d2.guest_id, guest_token: d2.guest_token }) });
+        if (r.ok) { renderGuestSurvey(await r.json()); return; }
+        st.style.color = '#c62828'; st.textContent = '読み込みに失敗しました';
+      } else {
+        st.style.color = '#c62828'; st.textContent = d2.error || '見つかりませんでした';
+      }
+    } catch(e) {
+      st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました';
+    }
+    gfBtn.disabled = false;
+  });
+}
+
+async function fetchWithTimeout(url, options, ms) {
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), ms || 10000);
+  try {
+    return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+async function loadEvent() {
+  try {
+    var res;
+    try {
+      res = await fetchWithTimeout('/api/events/'+CODE, { headers:{'Authorization':'Bearer '+token} }, 10000);
+    } catch(netErr) {
+      var msg2 = netErr && netErr.name === 'AbortError' ? '通信がタイムアウトしました。' : '通信エラーが発生しました。';
+      document.getElementById('loading').innerHTML='<p style="color:#c62828">'+msg2+'</p><button onclick="location.reload()" style="margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border:none;border-radius:20px;font-size:14px;cursor:pointer">再試行</button>';
+      return;
+    }
+    if (res.status === 401 || res.status === 403) { localStorage.clear(); document.getElementById('loading').style.display='none'; document.getElementById('loginPrompt').style.display='block'; return; }
+    if (!res.ok) {
+      var errData = {};
+      try { errData = await res.json(); } catch(e2) {}
+      document.getElementById('loading').innerHTML='<p style="color:#c62828">'+(errData.error||'エラーが発生しました（'+res.status+'）')+'</p><button onclick="location.reload()" style="margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border:none;border-radius:20px;font-size:14px;cursor:pointer">再試行</button>';
+      return;
+    }
+    var data = await res.json();
+    // Auto attend（落ちにくくするため軽いリトライ付き）
+    if (!data.attendance) {
+      await postAttendWithRetry(3);
+    }
+    renderEvent(data);
+
+  } catch(e) {
+    console.error('loadEvent error', e);
+    document.getElementById('loading').innerHTML='<p style="color:#c62828">エラーが発生しました</p><button onclick="location.reload()" style="margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border:none;border-radius:20px;font-size:14px;cursor:pointer">再試行</button>';
+  }
+}
+
+async function postAttendWithRetry(maxTry) {
+  let lastErr = null;
+  for (let i = 1; i <= (maxTry || 1); i++) {
+    try {
+      const res = await fetch('/api/events/'+CODE+'/attend', { method:'POST', headers:{'Authorization':'Bearer '+token} });
+      if (res.ok) return true;
+      // 4xx はリトライしても意味が薄い
+      if (res.status >= 400 && res.status < 500) {
+        lastErr = new Error('HTTP ' + res.status);
+        break;
+      }
+      lastErr = new Error('HTTP ' + res.status);
+    } catch (e) {
+      lastErr = e;
+    }
+    // 少し待って再試行（0.2s, 0.4s, 0.8s...）
+    await new Promise(r => setTimeout(r, 200 * Math.pow(2, i - 1)));
+  }
+  console.warn('attendance post failed', lastErr);
+  return false;
+}
+
+let satisfaction = 0;
+let customData = {};
+
+const growthViewpoints = {
+  'elementary': [
+    {l:'授業をつくる',d:'教材研究・授業構成'},
+    {l:'授業をする',d:'実践・対話'},
+    {l:'子どもを見る',d:'観察・評価'},
+    {l:'つながる',d:'同僚性・仲間づくり'},
+    {l:'深める',d:'研究・発信'}
+  ],
+  'junior_high': [
+    {l:'授業をつくる',d:'教材研究・授業構成'},
+    {l:'資料',d:'読み解く・提示する'},
+    {l:'対話',d:'意見を交わす・議論する'},
+    {l:'探究',d:'問いを立てる・追究する'},
+    {l:'生徒を見る',d:'観察・評価'},
+    {l:'つながる',d:'仲間・同僚性'},
+    {l:'深める',d:'研究・発信'}
+  ],
+  'admin_staff': [
+    {l:'校内支援',d:'校内の社会科の授業を支える'},
+    {l:'学校経営',d:'社会科をカリキュラムに活かす'},
+    {l:'会員支援',d:'実践に寄り添い、言葉にする手助け'},
+    {l:'後進育成',d:'次世代リーダーを育てる'},
+    {l:'運営貢献',d:'同好会の運営や大会調整'},
+    {l:'対外連携',d:'外部講師の紹介・知見の還元'}
+  ],
+};
+
+function escHtml(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+function renderEvent(data) {
+  const ev = data.event;
+  const qs = data.questions || [];
+  const hasSurvey = !!data.survey;
+  const userSchoolType = data.userSchoolType || '';
+  document.getElementById('loading').style.display='none';
+  const c = document.getElementById('content');
+  c.style.display='block';
+  let html = '<div class="success-box"><i class="fas fa-check-circle"></i><p>出席を記録しました！</p></div>';
+  html += '<div class="card"><h2>'+escHtml(ev.title)+'</h2><div class="date"><i class="fas fa-calendar"></i> '+escHtml(ev.event_date)+'</div>';
+  if (ev.description) html += '<div class="desc">'+escHtml(ev.description)+'</div>';
+  if (qs.length === 0) {
+    html += '</div>';
+    html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
+  } else if (hasSurvey) {
+    html += '<div class="already"><i class="fas fa-clipboard-check"></i> アンケートは回答済みです。ありがとうございました！</div></div>';
+    html += '<a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
+  } else {
+    html += '<hr style="border:none;border-top:2px dashed #eee;margin:16px 0">';
+    html += '<div style="background:#fff3e0;border:2px solid #ffb74d;border-radius:12px;padding:14px 16px;font-size:14px;color:#5d4037;line-height:1.7"><i class="fas fa-clipboard-list"></i> アンケート（振り返り）は<b>マイページ</b>の「参加した会・アンケート」から回答できます。</div>';
+    html += '</div>';
+    html += '<a href="/mypage" class="btn btn-primary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-pen"></i> マイページで回答する</a>';
+  }
+  c.innerHTML = html;
+  // Restore previous answers
+  if (data.survey) satisfaction = data.survey.satisfaction;
+  if (data.customAnswers) {
+    for (const ca of data.customAnswers) customData[ca.question_id] = ca.answer_text;
+  }
+}
+
+function setStar(v) { satisfaction=v; document.querySelectorAll('.stars .star').forEach((s,i)=>s.classList.toggle('active',i<v)); }
+function selectRadio(el, qid) {
+  el.parentElement.querySelectorAll('.radio-option').forEach(o=>o.classList.remove('selected'));
+  el.classList.add('selected'); customData[qid]=el.textContent;
+}
+function toggleCheckbox(el, qid) {
+  el.classList.toggle('selected');
+  const selected = Array.from(el.parentElement.querySelectorAll('.checkbox-option.selected')).map(o=>o.textContent);
+  customData[qid] = selected.join('、');
+}
+function setRating(qid, v) {
+  customData[qid]=String(v);
+  document.querySelectorAll('#cq_'+qid+' .rating-star').forEach((s,i)=>s.classList.toggle('active',i<v));
+}
+
+async function submitSurvey() {
+  const qs = document.querySelectorAll('[id^="cq_"]');
+  const custom_answers = [];
+  qs.forEach(el => {
+    const qid = parseInt(el.id.replace('cq_',''));
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') { customData[qid] = el.value; }
+    if (customData[qid]) custom_answers.push({ question_id: qid, answer_text: customData[qid] });
+  });
+  const res = await fetch('/api/events/'+CODE+'/survey', {
+    method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body: JSON.stringify({ satisfaction: satisfaction, comment: '', custom_answers })
+  });
+  if (res.ok) {
+    document.getElementById('content').innerHTML = '<div class="success-box"><i class="fas fa-heart"></i><p>回答ありがとうございました！</p></div><a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
+  } else { alert('送信に失敗しました'); }
+}
+</script>
+</body></html>`)
+})
+
+// --- Admin Groups Page ---
+app.get('/admin/groups', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>グループ別管理 - 社会科同好会</title>
+<style>
+body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
+.top-bar{background:#1a237e;color:#fff;padding:10px 24px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}
+.top-bar .logo{font-family:'Zen Maru Gothic',sans-serif;font-size:18px;font-weight:700}
+.top-bar .nav{display:flex;align-items:center;gap:10px}
+.btn-sm{padding:6px 14px;border-radius:8px;border:none;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;text-decoration:none}
+.btn-back{background:rgba(255,255,255,0.2);color:#fff}
+.container{max-width:1100px;margin:0 auto;padding:24px 16px}
+.page-title{font-size:20px;font-weight:700;color:#1a237e;margin-bottom:20px}
+.group-card{background:#fff;border-radius:14px;box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:28px;overflow:hidden}
+.group-header{color:#fff;padding:12px 20px;font-size:17px;font-weight:700;display:flex;align-items:center;gap:10px}
+.grp-print{margin-left:auto;background:rgba(255,255,255,0.22);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px}
+.grp-print:hover{background:rgba(255,255,255,0.35)}
+.group-count{font-size:13px;opacity:0.85;font-weight:400}
+.member-row{padding:14px 20px;border-bottom:1px solid #f0f0f0}
+.member-row:last-child{border-bottom:none}
+.member-name{font-size:15px;font-weight:700;color:#222;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.school-badge{font-size:11px;padding:1px 7px;border-radius:4px;font-weight:700}
+.elem-b{background:#e8f5e9;color:#2e7d32}
+.junior-b{background:#e3f2fd;color:#1565c0}
+.school-nm{font-size:12px;color:#888;font-weight:400}
+.steps-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.step-tag{font-size:11px;padding:3px 9px;border-radius:10px;font-weight:700;border:1px solid}
+.s1{background:#e8f5e9;color:#2e7d32;border-color:#a5d6a7}
+.s2{background:#e3f2fd;color:#1565c0;border-color:#90caf9}
+.s3{background:#fff3e0;color:#e65100;border-color:#ffcc80}
+.s4{background:#fce4ec;color:#b71c1c;border-color:#f48fb1}
+.info-row{font-size:13px;color:#555;margin-bottom:5px;line-height:1.6}
+.note-box{background:#fafafa;border-left:3px solid #e0e0e0;padding:6px 10px;border-radius:0 6px 6px 0;font-size:12px;color:#555;white-space:pre-wrap;margin-top:3px;max-height:72px;overflow:hidden}
+.no-val{color:#bbb;font-style:italic}
+.ev-toggle{background:#eef2ff;border:1px solid #c5cae9;color:#1a237e;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:6px}
+.ev-toggle:hover{background:#e3e7ff}
+.ev-caret{transition:transform .15s;font-size:10px}
+.ev-toggle.open .ev-caret{transform:rotate(180deg)}
+.ev-count{font-weight:400;color:#7986cb}
+.ev-detail{display:none;margin-top:6px}
+.ev-detail.show{display:block}
+.group-tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px}
+.group-tab{padding:9px 20px;border:none;border-radius:10px;color:#fff;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;opacity:0.5;transition:opacity .15s,box-shadow .15s;display:flex;align-items:center;gap:7px}
+.group-tab:hover{opacity:0.8}
+.group-tab.active{opacity:1;box-shadow:0 3px 10px rgba(0,0,0,0.18)}
+.group-panel{display:none}
+.group-panel.active{display:block}
+.step-tag[data-vp]{cursor:pointer}
+.step-tag[data-vp]:hover{text-decoration:underline;filter:brightness(0.97)}
+.step-pop{position:absolute;z-index:300;background:#fff;border:1px solid #e0e0e0;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,0.18);padding:12px 14px;display:none}
+.sp-head{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.sp-vp{font-weight:700;color:#1a237e;font-size:13px}
+.sp-step{font-size:11px;padding:2px 8px;border-radius:8px;font-weight:700;border:1px solid}
+.sp-key{font-weight:700;font-size:14px;color:#222;margin-bottom:5px}
+.sp-desc{font-size:12.5px;color:#555;line-height:1.65}
+.bulk-toggle{background:#fff;border:1px solid #c5cae9;color:#1a237e;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:16px}
+.bulk-toggle:hover{background:#eef2ff}
+.unset-section{margin-top:16px;background:#fff;border-radius:14px;box-shadow:0 2px 8px rgba(0,0,0,0.06);overflow:hidden}
+.unset-hdr{background:#9e9e9e;color:#fff;padding:10px 20px;font-size:15px;font-weight:700}
+.unset-list{padding:12px 20px;display:flex;flex-wrap:wrap;gap:8px}
+.unset-item{font-size:12px;background:#f5f5f5;border-radius:6px;padding:4px 10px;color:#555}
+.sub-hdr{background:#eceff1;color:#37474f;padding:8px 20px;font-size:13px;font-weight:700;border-top:1px solid #e0e0e0}
+.ai-copy-btn{margin-left:auto;background:#6a1b9a;color:#fff;border:none;border-radius:8px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap}
+.grp-ai{background:rgba(255,255,255,0.22);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap;margin-left:8px}
+.grp-ai:hover{background:rgba(255,255,255,0.35)}
+.grp-ai:disabled{opacity:.45}
+.sub-ai{background:#6a1b9a;color:#fff;border:none;border-radius:8px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;margin-left:8px}
+.sub-ai:hover{background:#4a148c}
+.sub-ai:disabled{opacity:.45}
+.ai-pick{width:17px;height:17px;margin:0 2px 0 0;cursor:pointer;flex-shrink:0;accent-color:#6a1b9a}
+.sub-hdr{display:flex;align-items:center;flex-wrap:wrap;gap:4px}
+.ai-copy-btn:hover{background:#4a148c}
+.ai-copy-btn:disabled{opacity:.5}
+.ai-paste-btn{background:#6a1b9a;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:16px;margin-left:8px}
+.ai-paste-btn:hover{background:#4a148c}
+.note-wrap{margin-top:6px}
+.note-toggle{background:#f3e5f5;border:1px solid #ce93d8;color:#6a1b9a;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:6px}
+.note-toggle:hover{background:#ead4f0}
+.note-body{display:none;margin-top:6px;background:#faf5fc;border-left:3px solid #ce93d8;border-radius:0 8px 8px 0;padding:8px 12px}
+.note-body.show{display:block}
+.note-item{font-size:12px;color:#444;margin-bottom:6px;line-height:1.6}
+.note-item b{color:#6a1b9a;display:block;font-size:11px;margin-bottom:1px}
+.note-meta{font-size:11px;color:#999;margin-top:6px;border-top:1px dashed #ddd;padding-top:5px}
+.ai-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:400;overflow-y:auto;padding:16px}
+.ai-modal.show{display:block}
+.ai-box{background:#fff;border-radius:14px;width:100%;max-width:700px;margin:0 auto;padding:18px}
+.ai-box h3{margin:0 0 4px;font-size:17px;color:#4a148c;font-family:'Zen Maru Gothic',sans-serif}
+.ai-box .sub{font-size:12px;color:#888;margin-bottom:14px}
+.ai-warn{background:#fff8e1;border:1px solid #ffca28;border-radius:10px;padding:10px 12px;font-size:12px;color:#6d4c00;line-height:1.7;margin-bottom:12px}
+.ai-warn b{color:#e65100}
+.ai-ok{background:#e8f5e9;border:1px solid #a5d6a7;border-radius:10px;padding:10px 12px;font-size:12px;color:#2e7d32;margin-bottom:12px}
+.ai-pre{background:#fafafa;border:1px solid #e0e0e0;border-radius:10px;padding:10px;font-size:11.5px;white-space:pre-wrap;max-height:260px;overflow-y:auto;line-height:1.65;color:#333;font-family:inherit}
+.ai-ta{width:100%;min-height:150px;padding:10px;border:2px solid #ce93d8;border-radius:10px;font-size:13px;font-family:inherit;line-height:1.6;resize:vertical;box-sizing:border-box}
+.ai-ta:focus{outline:none;border-color:#6a1b9a}
+.ai-sel{width:100%;padding:9px 10px;border:2px solid #ce93d8;border-radius:10px;font-size:13px;font-family:inherit;background:#fff;margin-bottom:12px;box-sizing:border-box}
+.ai-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.ai-primary{flex:1;min-width:140px;background:#6a1b9a;color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+.ai-primary:hover{background:#4a148c}
+.ai-primary:disabled{opacity:.5}
+.ai-cancel{background:#eee;color:#555;border:none;border-radius:10px;padding:12px 20px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+.ai-field{margin-bottom:10px}
+.ai-field label{display:block;font-size:12px;font-weight:700;color:#6a1b9a;margin-bottom:3px}
+.ai-field textarea{width:100%;padding:8px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:inherit;line-height:1.6;resize:vertical;min-height:44px;box-sizing:border-box}
+.ai-field textarea:focus{outline:none;border-color:#6a1b9a}
+.ai-entry{border:2px solid #e1bee7;border-radius:12px;padding:12px;margin-bottom:14px}
+.ai-entry h4{margin:0 0 10px;font-size:15px;color:#333}
+.ai-status{font-size:12px;margin-top:10px;line-height:1.6}
+@media(max-width:600px){.ai-modal{padding:0}.ai-box{border-radius:0;min-height:100vh}.ai-copy-btn{margin-left:0}}
+@media print{
+  .top-bar,.group-tabs,#bulkToggle,#printBtn,.no-print,.ai-copy-btn,.ai-paste-btn,.ai-modal{display:none!important}
+  .note-body{display:block!important}
+  .group-panel{display:none!important}
+  .group-panel.active{display:block!important}
+  .group-card{box-shadow:none;border:1px solid #ccc}
+  .ev-detail{display:block!important}
+  .ev-toggle{background:none!important;border:none!important;padding:0!important;color:#000!important}
+  .ev-caret{display:none!important}
+  .note-box{max-height:none!important;overflow:visible!important}
+  .member-row{page-break-inside:avoid}
+  .container{max-width:none;padding:0}
+  body{background:#fff}
+  .page-title{margin-top:8px}
+}
+@media(max-width:600px){.container{padding:12px 8px}.group-header{font-size:15px}}
+</style></head><body>
+<div class="top-bar">
+  <div class="logo"><i class="fas fa-users"></i> グループ別管理</div>
+  <div class="nav">
+    <a href="/admin" class="btn-sm btn-back" style="text-decoration:none"><i class="fas fa-arrow-left"></i> 管理画面</a>
+    <a href="/admin/events" class="btn-sm btn-back" style="text-decoration:none"><i class="fas fa-calendar-alt"></i> イベント</a>
+  </div>
+</div>
+<div class="container">
+  <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
+  <button type="button" id="bulkToggle" class="bulk-toggle" style="display:none"><i class="fas fa-expand"></i> すべて開く</button>
+  <button type="button" id="printBtn" class="bulk-toggle" style="display:none;margin-left:8px"><i class="fas fa-print"></i> このグループを印刷</button>
+  <button type="button" id="aiPasteBtn" class="ai-paste-btn no-print"><i class="fas fa-wand-magic-sparkles"></i> AI分析結果を貼り付け</button>
+  <div id="gList"><p style="color:#888;text-align:center;padding:40px">読み込み中...</p></div>
+</div>
+<div class="ai-modal no-print" id="aiModal"><div class="ai-box" id="aiBox"></div></div>
+<script>
+const token = localStorage.getItem('token');
+const user = JSON.parse(localStorage.getItem('user')||'null');
+if (!token || !user || user.role !== 'admin') { window.location.href = '/login'; throw new Error('redirect'); }
+const VP = {lesson_plan:'授業をつくる',lesson_practice:'授業をする',student_eval:'子どもを見る',connection:'つながる',research:'深める',j_lesson_plan:'授業をつくる',j_material:'資料',j_dialogue:'対話',j_inquiry:'探究',j_student_eval:'生徒を見る',j_connection:'つながる',j_research:'深める',a_school_support:'授業支援',a_school_mgmt:'学校運営',a_member_support:'会員支援',a_leader_dev:'人材育成',a_org_mgmt:'組織運営',a_outreach:'発信'};
+const STEP_INFO={"lesson_plan":[{"k":"基本型をまねる","d":"教科書や既存の資料を使って、基本的な授業を構成してみたい。まずはここから。"},{"k":"足でかせいでアレンジ","d":"先輩の基本型を参考にしながら、名古屋の身近な話題や地域を「足でかせいで」集めた教材で、目の前の子どもに合わせてアレンジしてみたい。"},{"k":"子どもの「なぜ？」をうむ","d":"子どもが「なぜ？」と思わず問いたくなる教材を仕掛け、社会的な見方・考え方を働かせる授業を構想してみたい。"},{"k":"単元を自分でつくる","d":"自分で足を使って教材や場所とつながりながら、オリジナルの単元を構想・提案してみたい。"}],"lesson_practice":[{"k":"楽しい授業をする","d":"まずは子どもが楽しめる授業をしてみたい。笑顔や「もっとやりたい！」が生まれたらOK！"},{"k":"子どもが動く活動へ","d":"調べ学習やグループワークなど、子どもが自ら動く「活動」を取り入れてみたい。"},{"k":"見方・考え方を働かせる","d":"単なる活動で終わらせず、社会的な見方・考え方を働かせる授業を意識してみたい。"},{"k":"対話で成り立つ授業を","d":"教師からの一方通行でなく、子ども同士の対話で成り立つ授業を展開してみたい。"}],"student_eval":[{"k":"まずザックリ観察する","d":"最初はザックリでOK！授業中の子どもの姿や声に目を向けてみたい。「楽しそう？」「困っている？」を感じ取るところから始めたい。"},{"k":"「わかった」を言葉にさせる","d":"ノートや発言から「この子はここまでわかっているかな？」とのぞいてみたい。「わかった」を自分の言葉で表現できる場を、気負わずに作ってみたい。"},{"k":"点数にならない良さを見つける","d":"正解・不正解だけでなく、粘り強く考えを表現しようとしている姿など、点数になりにくい良さをそっと認めてみたい。"},{"k":"子どもの姿で授業を問い直す","d":"「この子たちの反応は、自分の授業への答えだ」と捉え、子どもの姿を元に授業を再構成してみたい。"}],"connection":[{"k":"場に参加する","d":"同好会に入会し、イベントや例会に参加してみたい。同期や先輩と顔見知りになれたらOK！"},{"k":"横のつながりを作る","d":"同期など、横のつながりを作り、話しやすい関係を築いてみたい。"},{"k":"縦のつながりを作る","d":"先輩や役員など、縦のつながりを作り、授業実践について教えを請うてみたい。"},{"k":"仲間を支える側に回る","d":"悩みや本音を語り合える仲間を持ち、時には仲間を支える側に回ってみたい。"}],"research":[{"k":"参加してみる","d":"同好会の例会にとにかく参加してみたい。まずは足を運んで、どんな場かを感じるところから始めたい。"},{"k":"インプット・刺激を受ける","d":"先輩たちの実践記録を読んでインプットし、刺激を受けたい。"},{"k":"実践をアウトプット","d":"自分の実践を「体験記録」として書き、アウトプットしてみたい。"},{"k":"理論を磨き合う","d":"自分の実践を理論づけ、より良い実践になるように議論し、理論を磨き合いたい。"}],"j_lesson_plan":[{"k":"基本型をまねる","d":"教科書や既存の資料を参考にしながら、地理・歴史・公民の基本的な授業を構成してみたい。"},{"k":"生徒の「なぜ？」をうむ","d":"生徒が「なぜ？」と自然と問いを持てるような教材を仕掛け、社会的な見方・考え方を働かせる授業を構想してみたい。"},{"k":"足でかせいでアレンジ","d":"先輩の基本型を参考にしながら、身近な地域の事例や時事問題を「足でかせいで」仕入れ、生徒の実態に合わせてアレンジしてみたい。"},{"k":"単元を自分でつくる","d":"自分で足を使って教材を発掘し、ほかの分野の見方・考え方を生かしたオリジナルの単元を構想・提案してみたい。"}],"j_material":[{"k":"基本資料を読み解く","d":"教科書の図版や基本資料を読み解き、授業の基本の流れに組み込んでみたい。"},{"k":"複数資料を比較・関連付ける","d":"地図とグラフ、異なる立場の史料など複数の資料を比較・関連付けさせ、生徒の「なぜ？」を引き出してみたい。"},{"k":"多様な資料を足で集める","d":"新聞記事（NIE）や最新の統計データなど、多様な資料を足で稼いで集め、提示を工夫してみたい。"},{"k":"生徒が主体的に資料を読む","d":"生徒自身が目的に応じて資料を見つけ出し、多面的・多角的に読み解く力を育ててみたい。"}],"j_dialogue":[{"k":"つぶやきを拾って広げる","d":"生徒の些細なつぶやきや疑問を丁寧に拾い、学級全体に広げることから始めてみたい。"},{"k":"自分の考えを言葉にする場を作る","d":"ペアやグループワークを効果的に取り入れ、自分の考えを言葉にして伝え合う場を作ってみたい。"},{"k":"根拠を持って意見を出し合う","d":"異なる意見をもつ立場で話し合い、根拠を持って意見を出し合ってみたい。"},{"k":"合意形成に向かう対話を支援する","d":"生徒同士の対話から新たな価値観を生み出し、社会的な合意形成に向かう話し合いを支援してみたい。"}],"j_inquiry":[{"k":"調べる・まとめる時間を確保する","d":"授業の中で、基礎的な知識を「調べる」「まとめる」時間をしっかり確保することから始めたい。"},{"k":"自分事として調べる学習を仕掛ける","d":"ICTを活用したり、身近な地域の事象と結びつけたりして、生徒が自分事として調べる学習を仕掛けてみたい。"},{"k":"「大きな問い」で探究サイクルを作る","d":"単元を貫く「大きな問い」を設定し、生徒が主体的に探究し続けるサイクルを作ってみたい。"},{"k":"高度な探究をデザインする","d":"現代社会にみられる課題に対して、生徒が自ら問いを立てて解決策を模索する高度な探究をデザインしてみたい。"}],"j_student_eval":[{"k":"まずザックリ観察する","d":"最初はザックリでOK！授業中の生徒の表情や発言に目を向け、「理解できてる？」「関心がある？」を感じ取るところから始めたい。"},{"k":"「わかった」を言葉にさせる","d":"ノートや発言からの理解を確認しながら、「わかった」を自分の言葉で表現できる場を気負わずに作ってみたい。毎時間できなくてOK！"},{"k":"点数にならない良さを見つける","d":"正解・不正解だけでなく、粘り強く考えた過程や多面的な視点など、点数になりにくい良さをそっと認めてみたい。その気づきが、次の問いにつながる。"},{"k":"生徒の姿で授業を問い直す","d":"「この生徒たちの反応は、自分の授業への答えだ」と捉え、生徒を元に授業を再構成してみたい。"}],"j_connection":[{"k":"場に参加する","d":"同好会に入会し、イベントや会に参加してみたい。同期や先輩と顔見知りになれたらOK！"},{"k":"横のつながりを作る","d":"同期など、同校・近隣校の先生と横のつながりを作り、気軽に話しやすい関係を築いてみたい。"},{"k":"縦のつながりを作る","d":"先輩や役員など、縦のつながりを作り、授業実践について教えを請うてみたい。"},{"k":"仲間を支える側に回る","d":"悩みや本音を語り合える仲間を持ち、時には仲間を支える側に回ってみたい。"}],"j_research":[{"k":"参加を楽しむ","d":"同好会の雰囲気を知り、まずは参加を楽しんでみたい。「こんな世界があるんだ！」と感じることから始めたい。"},{"k":"インプット・刺激を受ける","d":"中学地理・歴史・公民に関する先輩たちの実践記録を読んでインプットし、刺激を受けたい。"},{"k":"実践をアウトプット","d":"自分の実践を「体験記録」として書き、アウトプットしてみたい。"},{"k":"理論を磨き合う","d":"自分の実践を理論づけ、部員に向けて議論し、理論を磨き合いたい。"}],"a_school_support":[{"k":"例会に顔を出す","d":"まずは例会やイベントに参加して、場の雰囲気づくりに協力するところから始めてみたい。"},{"k":"例会の学びを深める","d":"授業検討会などで、主幹・管理職としての経験を活かした助言や問いかけで学びを深めてみたい。"},{"k":"研究会の内容充実に関わる","d":"授業検討会やフィールドワークの企画に関わり、会の学びの質を高めることに貢献したい。"},{"k":"会の学びの文化を守る","d":"同好会が大切にしてきた「授業で語り合う」文化を次の世代にも伝え、学びの質を守りたい。"}],"a_school_mgmt":[{"k":"声をかける","d":"例会で一人でいる会員や新しい会員に声をかけ、「来てよかった」と思える安心感を生みたい。"},{"k":"世代をつなぐ","d":"ベテランと若手の橋渡し役として、会員同士が気軽に話せる関係づくりを促してみたい。"},{"k":"学び合いの場をつくる","d":"会員同士が実践を見合ったり、気軽に相談し合えるような関係性やグループをつくりたい。"},{"k":"会の一体感を育てる","d":"会員みんなが「ここが自分の居場所だ」と思える温かい雰囲気をつくり、会の一体感を育てたい。"}],"a_member_support":[{"k":"やってみたことを聞いて感想を伝える","d":"「授業でこうしてみた」という話を聞き、「それ面白いね」「子どもが変わったね」と伝えることから始めたい。"},{"k":"実践を言葉にする手助けをする","d":"やってみたことを記録や発表にまとめるきっかけづくり（「書いてみない？」の声かけ等）をしてみたい。"},{"k":"論文・記録の方向性を一緒に考える","d":"「何を書きたいか」を整理し、手立ての有効性や検証方法についても相談しながら、実践記録や論文の方向づけを手伝ってみたい。"},{"k":"書き上げるまで伴走し、書く文化を広げる","d":"構成から推敲まで粘り強く伴走し、「書いてみようかな」と思える雰囲気を会に広げたい。"}],"a_leader_dev":[{"k":"若手の話を聞く","d":"若手会員の悩みや思いに耳を傾け、「聞いてもらえる存在」になることから始めたい。"},{"k":"役割を任せてみる","d":"例会やイベントの一部を若手に任せ、経験を積ませる場をつくってみたい。"},{"k":"一緒に企画・運営する","d":"大きなイベントや研究大会の企画を若手と一緒に進め、運営のノウハウを伝えたい。"},{"k":"任せて見守る","d":"次世代のリーダーに中心を譲り、困ったときだけ支える「見守る」立場で関わりたい。"}],"a_org_mgmt":[{"k":"例会に参加して助言する","d":"例会や研究会に参加し、主幹・管理職の視点から率直な感想や助言を伝えてみたい。"},{"k":"会の方向性を一緒に考える","d":"役員会などで会の今後の方向性やテーマについて、自分の意見を積極的に出してみたい。"},{"k":"大会・イベントの運営を支える","d":"研究大会やフィールドワークの運営面で、主幹・管理職としての経験や人脈を活かして調整役を担ってみたい。"},{"k":"会の未来を描く","d":"5年後・10年後の会の姿を構想し、持続可能な組織づくりの道筋をつくりたい。"}],"a_outreach":[{"k":"他の研究会の情報を持ち帰る","d":"主幹・管理職の集まりや他教科の研究会で得た情報を、同好会に持ち帰って共有してみたい。"},{"k":"外部講師や連携先を紹介する","d":"大学の先生や他地区の優れた先生など、主幹・管理職のネットワークを活かして会に紹介してみたい。"},{"k":"自分の経験を語る","d":"自分がこれまで積み重ねた社会科の授業づくりの経験や学校経営の知見を、講演や寄稿で次世代に伝えてみたい。"},{"k":"社会科教育の価値を広める","d":"主幹・管理職の立場から社会科教育の重要性を周囲に発信し、名古屋の社会科の文化を守り育てたい。"}]};
+function showStepInfo(vp,step,anchorEl){var arr=STEP_INFO[vp];if(!arr)return;var info=arr[step-1];if(!info)return;var pop=document.getElementById('stepPop');if(!pop){pop=document.createElement('div');pop.id='stepPop';pop.className='step-pop';document.body.appendChild(pop);}pop.innerHTML='<div class="sp-head"><span class="sp-vp">'+esc(VP[vp]||vp)+'</span> <span class="sp-step s'+step+'">STEP'+step+'</span></div><div class="sp-key">'+esc(info.k)+'</div><div class="sp-desc">'+esc(info.d)+'</div>';var r=anchorEl.getBoundingClientRect();var pw=Math.min(320,window.innerWidth-20);pop.style.width=pw+'px';pop.style.display='block';var left=r.left+window.scrollX;if(left+pw>window.scrollX+window.innerWidth-10)left=window.scrollX+window.innerWidth-pw-10;if(left<window.scrollX+10)left=window.scrollX+10;pop.style.top=(r.bottom+window.scrollY+6)+'px';pop.style.left=left+'px';}
+document.addEventListener('click',function(e){var tag=e.target.closest&&e.target.closest('.step-tag[data-vp]');if(tag){e.stopPropagation();showStepInfo(tag.getAttribute('data-vp'),+tag.getAttribute('data-step'),tag);return;}var pop=document.getElementById('stepPop');if(pop&&!pop.contains(e.target))pop.style.display='none';});
+const COLORS=['#1565c0','#2e7d32','#e65100','#6a1b9a','#00695c','#b71c1c','#0277bd','#558b2f'];
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+async function load(){
+  try{
+    const res=await fetch('/api/admin/group-summary',{headers:{'Authorization':'Bearer '+token}});
+    if(res.status===401||res.status===403){localStorage.clear();window.location.href='/login';return;}
+    const d=await res.json();
+    await loadNotes();
+    render(d.groups,d.fiscal_year);
+  }catch(e){document.getElementById('gList').innerHTML='<p style="color:#c62828;text-align:center">読み込みに失敗しました</p>';}
+}
+function render(groups,fy){
+  const el=document.getElementById('gList');
+  const names=Object.keys(groups).sort(function(a,b){if(a==='未設定')return 1;if(b==='未設定')return -1;return a.localeCompare(b,'ja');});
+  const setNames=names.filter(function(n){return n!=='未設定';});
+  const unset=groups['未設定']||[];
+  if(!setNames.length&&!unset.length){el.innerHTML='<p style="color:#888;text-align:center;padding:40px">グループが設定されていません。管理画面でメンバーにグループを設定してください。</p>';return;}
+  var tabs=[];var panels='';
+  setNames.forEach(function(gname,gi){
+    var ms=groups[gname];var col=COLORS[gi%COLORS.length];var pid='gp_'+gi;
+    tabs.push({id:pid,label:'<i class="fas fa-layer-group"></i> '+esc(gname)+' ('+ms.length+')',col:col});
+    var setKey='g'+gi;
+    AI_SETS[setKey]={label:gname,ids:ms.map(function(x){return x.id;})};
+    var inner='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span>'
+      +'<button class="grp-ai no-print" data-ai-set="'+setKey+'">\u2728 全員をコピー</button>'
+      +'<button class="grp-ai no-print" data-ai-sel="'+setKey+'" disabled>\u2728 選択(0)</button>'
+      +'<button class="grp-print no-print" onclick="window.print()" title="このグループを印刷"><i class="fas fa-print"></i> 印刷</button></div>';
+    ms.forEach(function(m){inner+=mRow(m,fy);});
+    inner+='</div>';
+    panels+='<div class="group-panel" id="'+pid+'">'+inner+'</div>';
+  });
+  if(unset.length){
+    var pid='gp_unset';
+    tabs.push({id:pid,label:'<i class="fas fa-question-circle"></i> 未設定 ('+unset.length+')',col:'#9e9e9e'});
+    var secs=[['elementary','小学校'],['junior_high','中学校'],['admin_staff','主幹・管理職'],['','校種未設定']];
+    var u='<div class="group-card"><div class="group-header" style="background:#9e9e9e"><i class="fas fa-question-circle"></i> グループ未設定 <span class="group-count">('+unset.length+'名)</span><button class="grp-print no-print" onclick="window.print()" title="このグループを印刷"><i class="fas fa-print"></i> 印刷</button></div>';
+    secs.forEach(function(sec){
+      var list=unset.filter(function(m){return (m.school_type||'')===sec[0];});
+      if(!list.length)return;
+      var subKey='u'+esc(sec[0]||'none');
+      AI_SETS[subKey]={label:'グループ未設定・'+sec[1],ids:list.map(function(x){return x.id;})};
+      u+='<div class="sub-hdr">'+esc(sec[1])+'（'+list.length+'名）'
+        +'<button class="sub-ai no-print" data-ai-set="'+subKey+'">\u2728 全員をコピー</button>'
+        +'<button class="sub-ai no-print" data-ai-sel="'+subKey+'" disabled>\u2728 選択(0)</button></div>';
+      list.forEach(function(m){u+=mRow(m,fy);});
+    });
+    u+='</div>';
+    panels+='<div class="group-panel" id="'+pid+'">'+u+'</div>';
+  }
+  var tabBar='<div class="group-tabs">'+tabs.map(function(t,i){return '<button class="group-tab'+(i===0?' active':'')+'" data-target="'+t.id+'" style="background:'+t.col+'">'+t.label+'</button>';}).join('')+'</div>';
+  el.innerHTML=tabBar+panels;
+  aiUpdateSelCounts();
+  var firstPanel=el.querySelector('.group-panel');if(firstPanel)firstPanel.classList.add('active');
+  el.querySelectorAll('.group-tab').forEach(function(tb){tb.addEventListener('click',function(){el.querySelectorAll('.group-tab').forEach(function(x){x.classList.remove('active');});el.querySelectorAll('.group-panel').forEach(function(p){p.classList.remove('active');});tb.classList.add('active');var p=document.getElementById(tb.getAttribute('data-target'));if(p)p.classList.add('active');});});
+  var toggles=el.querySelectorAll('.ev-toggle');
+  toggles.forEach(function(btn){btn.addEventListener('click',function(){var t=document.getElementById(btn.getAttribute('data-target'));if(!t)return;var open=t.classList.toggle('show');btn.classList.toggle('open',open);});});
+  var bulk=document.getElementById('bulkToggle');
+  if(bulk){
+    if(toggles.length){bulk.style.display='inline-block';}else{bulk.style.display='none';}
+    bulk.onclick=function(){
+      var anyClosed=Array.prototype.some.call(toggles,function(b){var t=document.getElementById(b.getAttribute('data-target'));return t&&!t.classList.contains('show');});
+      toggles.forEach(function(b){var t=document.getElementById(b.getAttribute('data-target'));if(!t)return;t.classList.toggle('show',anyClosed);b.classList.toggle('open',anyClosed);});
+      bulk.innerHTML=anyClosed?'<i class="fas fa-compress"></i> すべて閉じる':'<i class="fas fa-expand"></i> すべて開く';
+    };
+    bulk.innerHTML='<i class="fas fa-expand"></i> すべて開く';
+  }
+  var printBtn=document.getElementById('printBtn');
+  if(printBtn){printBtn.style.display=toggles.length?'inline-block':'none';printBtn.onclick=function(){window.print();};}
+}
+function mRow(m,fy){
+  var sels=Object.keys(m.selections);
+  var stepsHtml=sels.length?sels.map(function(vp){var s=m.selections[vp];return '<span class="step-tag s'+s+'" data-vp="'+vp+'" data-step="'+s+'" title="クリックで内容表示">'+esc(VP[vp]||vp)+': STEP'+s+'</span>';}).join(''):'<span class="no-val">STEPが未選択</span>';
+  var ev=m.events.length;
+  var evHtml='';
+  if(ev>0){
+    evHtml='<div style="margin-top:4px">';
+    m.events.forEach(function(e){
+      var hasD=e.satisfaction||e.comment||(e.answers&&e.answers.length);
+      evHtml+='<div style="border-left:3px solid #e0e0e0;padding:6px 10px;margin-bottom:6px;border-radius:0 6px 6px 0;background:#fafafa">';
+      evHtml+='<div style="font-weight:700;color:#333;font-size:12px;margin-bottom:3px">📌 '+esc(e.title)+'<span style="font-weight:400;color:#999;font-size:11px"> ('+esc(e.date||'')+')</span></div>';
+      if(e.satisfaction){var s='★'.repeat(e.satisfaction)+'☆'.repeat(5-e.satisfaction);evHtml+='<div style="font-size:11px;color:#e65100">満足度: '+s+'</div>';}
+      if(e.comment)evHtml+='<div style="font-size:11px;color:#555;margin-top:2px"><span style="color:#888">感想:</span> '+esc(e.comment)+'</div>';
+      if(e.answers&&e.answers.length){e.answers.forEach(function(qa){if(!qa.a||!qa.a.trim())return;evHtml+='<div style="font-size:11px;margin-top:3px"><span style="color:#1565c0;font-weight:700">'+esc(qa.q)+'</span><br><span style="padding-left:8px">'+esc(qa.a)+'</span></div>';});}
+      if(!hasD)evHtml+='<div style="font-size:11px;color:#bbb;font-style:italic">回答なし</div>';
+      evHtml+='</div>';
+    });
+    evHtml+='<div style="color:#888;font-size:11px;margin-top:2px">計'+ev+'回参加</div></div>';
+  } else { evHtml='<span class="no-val">参加記録なし</span>'; }
+    var stC=m.school_type==='elementary'?'elem-b':m.school_type==='junior_high'?'junior-b':'';
+  var stL=m.school_type==='elementary'?'小学校':m.school_type==='junior_high'?'中学校':'';
+  var h='<div class="member-row">';
+  h+='<div class="member-name"><input type="checkbox" class="ai-pick no-print" data-pick="'+m.id+'" title="まとめてコピーする対象に含める">'+esc(m.name);
+  if(stL)h+=' <span class="school-badge '+stC+'">'+stL+'</span>';
+  if(m.school)h+=' <span class="school-nm">'+esc(m.school)+'</span>';
+  h+='<button type="button" class="ai-copy-btn no-print" data-ai-copy="'+m.id+'">\u2728 AI伴走用にコピー</button>';
+  h+='</div>';
+  h+='<div class="steps-row">'+stepsHtml+'</div>';
+  if(ev>0){
+    var eid='evd_'+m.id;
+    h+='<div class="info-row"><button type="button" class="ev-toggle" data-target="'+eid+'">📅 <strong>参加イベント</strong> <span class="ev-count">('+ev+'件)</span> <span class="ev-caret">▼</span></button>';
+    h+='<div class="ev-detail" id="'+eid+'">'+evHtml+'</div></div>';
+  } else {
+    h+='<div class="info-row">📅 <strong>参加イベント</strong>　'+evHtml+'</div>';
+  }
+  if(m.goal)h+='<div class="info-row">🎯 <strong>'+fy+'年度の目標</strong><div class="note-box">'+esc(m.goal)+'</div></div>';
+  if(m.reflection)h+='<div class="info-row">💭 <strong>振り返り</strong><div class="note-box">'+esc(m.reflection)+'</div></div>';
+  h+='<div class="note-wrap" id="noteWrap_'+m.id+'">'+noteBoxHtml(m.id)+'</div>';
+  h+='</div>';
+  return h;
+}
+
+// ===== 伴走メモ =====
+var NOTES={};
+var NOTE_FIELDS=[
+  ['important','大切にしていそうなこと'],
+  ['interest','最近の関心'],
+  ['change_note','変化'],
+  ['next_step','次の一歩'],
+  ['support','事務局の伴走'],
+  ['question','次に聞きたいこと'],
+  ['voice','声かけ例'],
+  ['connection','つながり候補']
+];
+function noteBoxHtml(uid){
+  var n=NOTES[uid];
+  if(!n)return '';
+  var body='';
+  for(var i=0;i<NOTE_FIELDS.length;i++){
+    var k=NOTE_FIELDS[i][0];var lab=NOTE_FIELDS[i][1];
+    if(!n[k]||!String(n[k]).trim())continue;
+    body+='<div class="note-item"><b>'+lab+'</b>'+esc(n[k]).replace(/\\n/g,'<br>')+'</div>';
+  }
+  if(!body)return '';
+  var meta='最終更新：'+esc(String(n.updated_at||'').replace('T',' ').slice(0,16));
+  if(n.updater_name)meta+='（'+esc(n.updater_name)+'）';
+  var bid='nb_'+uid;
+  return '<button type="button" class="note-toggle" data-note-target="'+bid+'">🤝 <strong>伴走メモ</strong> <span class="ev-caret">▼</span></button>'
+    +'<div class="note-body" id="'+bid+'">'+body+'<div class="note-meta">'+meta+'</div></div>';
+}
+
+// ===== AI伴走：コピー =====
+function aiModal(html){
+  var m=document.getElementById('aiModal');
+  document.getElementById('aiBox').innerHTML=html;
+  m.classList.add('show');
+  document.body.style.overflow='hidden';
+  m.scrollTop=0;
+}
+function aiClose(){
+  document.getElementById('aiModal').classList.remove('show');
+  document.body.style.overflow='';
+}
+function aiCopyText(text,statusEl){
+  function fallback(){
+    var ta=document.getElementById('aiHiddenTa');
+    if(ta){ta.focus();ta.select();
+      try{document.execCommand('copy');if(statusEl){statusEl.style.color='#2e7d32';statusEl.textContent='コピーしました。AIに貼り付けてください。';}return;}catch(e){}
+    }
+    if(statusEl){statusEl.style.color='#c62828';statusEl.innerHTML='自動コピーできませんでした。下の枠を長押しして「すべて選択」→「コピー」してください。';}
+    var pre=document.getElementById('aiPromptPre');if(pre)pre.style.display='block';
+  }
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(function(){
+      if(statusEl){statusEl.style.color='#2e7d32';statusEl.textContent='✅ コピーしました。ClaudeやChatGPTに貼り付けてください。';}
+    }).catch(fallback);
+  }else{fallback();}
+}
+var AI_SETS={};
+function aiUpdateSelCounts(){
+  Object.keys(AI_SETS).forEach(function(key){
+    var btn=document.querySelector('[data-ai-sel="'+key+'"]');
+    if(!btn)return;
+    var ids=AI_SETS[key].ids;
+    var n=0;
+    ids.forEach(function(id){
+      var cb=document.querySelector('.ai-pick[data-pick="'+id+'"]');
+      if(cb&&cb.checked)n++;
+    });
+    btn.textContent='\u2728 選択('+n+')';
+    btn.disabled=(n===0);
+  });
+}
+function aiPickedIds(key){
+  var out=[];
+  (AI_SETS[key].ids||[]).forEach(function(id){
+    var cb=document.querySelector('.ai-pick[data-pick="'+id+'"]');
+    if(cb&&cb.checked)out.push(id);
+  });
+  return out;
+}
+async function aiCopySet(key,onlySelected,btn){
+  var set=AI_SETS[key];
+  if(!set)return;
+  var ids=onlySelected?aiPickedIds(key):set.ids;
+  if(!ids.length){alert('対象がありません');return;}
+  await aiCopyRequest({user_ids:ids,label:set.label},btn,ids.length);
+}
+async function aiCopyMember(uid,btn){
+  await aiCopyRequest({user_id:uid},btn,1);
+}
+async function aiCopyRequest(payload,btn,expected){
+  var orig=btn?btn.innerHTML:'';
+  if(btn){btn.disabled=true;btn.textContent='準備中...';}
+  try{
+    var res=await fetch('/api/admin/ai-support/export',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    var d={};try{d=await res.json();}catch(e){}
+    if(!res.ok){alert(d.error||'準備に失敗しました');return;}
+    var n=d.count||1;
+    var warn='';
+    if(n>1&&d.chars>20000){
+      warn+='<div class="ai-warn"><b>内容がかなり長くなっています（約'+Math.round(d.chars/1000)+'千字）</b><br>'
+        +'AIによっては途中で切れることがあります。うまくいかない場合は、チェックで人数を分けてコピーしてください。</div>';
+    }
+    if(d.masked&&d.masked.length){
+      warn+='<div class="ai-warn"><b>自動で伏せ字にしました</b><br>';
+      warn+=d.masked.map(function(x){return '・'+esc(x.label)+' '+x.count+'か所';}).join('<br>');
+      warn+='</div>';
+    }
+    if(d.risks&&d.risks.length){
+      warn+='<div class="ai-warn"><b>念のためご確認ください</b><br>'+d.risks.map(function(r){return '・'+esc(r)+'が残っている可能性があります';}).join('<br>')+'</div>';
+    }
+    if(d.thin_names&&d.thin_names.length){
+      warn+='<div class="ai-warn"><b>記録がまだ少ない方が'+d.thin_names.length+'名います</b><br>'
+        +esc(d.thin_names.slice(0,8).join('、'))+(d.thin_names.length>8?' ほか':'')
+        +'<br>目標・参加記録がほとんどないため、その方の分析は限られたものになります。</div>';
+    }
+    if(!warn)warn='<div class="ai-ok">氏名・学校名にあたる語は見つかりませんでした。</div>';
+    var head=(n>1)
+      ? esc(d.label)+'　／　'+n+'名分をまとめて書き出しました（約'+Math.round(d.chars/1000)+'千字）'
+      : esc(d.label)+' さん　／　このまま外部AIに渡す内容です';
+    var html='<h3>✨ AI伴走用にコピー</h3>'
+      +'<div class="sub">'+head+'（氏名・学校名は含まれません）</div>'
+      +warn
+      +'<div class="ai-pre" id="aiPromptPre">'+esc(d.prompt)+'</div>'
+      +'<textarea id="aiHiddenTa" style="position:absolute;left:-9999px;top:0" readonly>'+esc(d.prompt)+'</textarea>'
+      +'<div class="ai-status" id="aiCopyStatus">内容を確認してから「コピーする」を押してください。</div>'
+      +'<div class="ai-actions"><button type="button" class="ai-primary" id="aiDoCopy">📋 コピーする</button>'
+      +'<button type="button" class="ai-cancel" onclick="aiClose()">閉じる</button></div>';
+    aiModal(html);
+    document.getElementById('aiDoCopy').addEventListener('click',function(){
+      aiCopyText(d.prompt,document.getElementById('aiCopyStatus'));
+    });
+  }catch(e){alert('通信エラーが発生しました');}
+  finally{if(btn){btn.disabled=false;btn.innerHTML=orig;aiUpdateSelCounts();}}
+}
+
+// ===== AI伴走：貼り付け =====
+var AI_PARSED=null;var AI_BATCH='';
+async function aiOpenPaste(){
+  var opts='';
+  try{
+    var res=await fetch('/api/admin/ai-support/batches',{headers:{'Authorization':'Bearer '+token}});
+    var d=await res.json();
+    var list=(d.batches||[]).filter(function(b){return !b.used;});
+    if(!list.length){
+      aiModal('<h3>✨ AI分析結果を貼り付け</h3><div class="ai-warn">まだコピーの履歴がありません。<br>先に会員の「✨ AI伴走用にコピー」を押して、AIに分析してもらってください。</div><div class="ai-actions"><button type="button" class="ai-cancel" onclick="aiClose()">閉じる</button></div>');
+      return;
+    }
+    opts=list.map(function(b){
+      var t=String(b.created_at||'').replace('T',' ').slice(5,16);
+      return '<option value="'+esc(b.batch_code)+'">'+esc(b.label||b.batch_code)+'（'+t+' にコピー）</option>';
+    }).join('');
+  }catch(e){alert('読み込みに失敗しました');return;}
+  aiModal('<h3>✨ AI分析結果を貼り付け</h3>'
+    +'<div class="sub">AIの回答を、そのまま丸ごと貼り付けてください</div>'
+    +'<div class="ai-field"><label>どのコピーに対する結果ですか？</label><select class="ai-sel" id="aiBatchSel">'+opts+'</select></div>'
+    +'<textarea class="ai-ta" id="aiPasteTa" placeholder="ここにAIの回答を貼り付け"></textarea>'
+    +'<div class="ai-status" id="aiParseStatus"></div>'
+    +'<div class="ai-actions"><button type="button" class="ai-primary" id="aiParseBtn">解析する</button>'
+    +'<button type="button" class="ai-cancel" onclick="aiClose()">閉じる</button></div>');
+  document.getElementById('aiParseBtn').addEventListener('click',aiParse);
+}
+async function aiParse(){
+  var st=document.getElementById('aiParseStatus');
+  var code=document.getElementById('aiBatchSel').value;
+  var text=document.getElementById('aiPasteTa').value;
+  if(!text.trim()){st.style.color='#c62828';st.textContent='AIの回答を貼り付けてください';return;}
+  var btn=document.getElementById('aiParseBtn');btn.disabled=true;
+  st.style.color='#888';st.textContent='解析中...';
+  try{
+    var res=await fetch('/api/admin/ai-support/parse',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({batch_code:code,text:text})});
+    var d={};try{d=await res.json();}catch(e){}
+    if(!res.ok){st.style.color='#c62828';st.textContent=d.error||'解析に失敗しました';btn.disabled=false;return;}
+    AI_PARSED=d.entries;AI_BATCH=d.batch_code;
+    aiShowPreview(d);
+  }catch(e){st.style.color='#c62828';st.textContent='通信エラーが発生しました';btn.disabled=false;}
+}
+function aiShowPreview(d){
+  var h='<h3>✨ AI分析 取り込みプレビュー</h3>'
+    +'<div class="sub">内容を確認・修正してから保存してください。保存するまでは記録されません。</div>';
+  if(d.unmatched&&d.unmatched.length){
+    h+='<div class="ai-warn"><b>対応づけできなかったID</b><br>'+d.unmatched.map(esc).join('、')+'</div>';
+  }
+  for(var i=0;i<AI_PARSED.length;i++){
+    var e=AI_PARSED[i];
+    h+='<div class="ai-entry"><h4>'+esc(e.name)+' さん</h4>';
+    if(e.existing){h+='<div class="ai-warn">この方には既に伴走メモがあります（'+esc(String(e.existing.updated_at||'').slice(0,10))+' 更新）。保存すると上書きされます。</div>';}
+    for(var j=0;j<NOTE_FIELDS.length;j++){
+      var k=NOTE_FIELDS[j][0];
+      h+='<div class="ai-field"><label>'+NOTE_FIELDS[j][1]+'</label>'
+        +'<textarea data-idx="'+i+'" data-key="'+k+'">'+esc(e[k]||'')+'</textarea></div>';
+    }
+    h+='</div>';
+  }
+  h+='<div class="ai-status" id="aiSaveStatus"></div>'
+    +'<div class="ai-actions"><button type="button" class="ai-primary" id="aiSaveBtn">この内容で保存</button>'
+    +'<button type="button" class="ai-cancel" onclick="aiClose()">キャンセル</button></div>';
+  aiModal(h);
+  document.getElementById('aiSaveBtn').addEventListener('click',aiSave);
+}
+async function aiSave(){
+  var st=document.getElementById('aiSaveStatus');
+  var btn=document.getElementById('aiSaveBtn');
+  document.querySelectorAll('#aiBox textarea[data-idx]').forEach(function(ta){
+    AI_PARSED[parseInt(ta.getAttribute('data-idx'),10)][ta.getAttribute('data-key')]=ta.value;
+  });
+  btn.disabled=true;st.style.color='#888';st.textContent='保存中...';
+  try{
+    var res=await fetch('/api/admin/ai-support/notes',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({batch_code:AI_BATCH,notes:AI_PARSED})});
+    var d={};try{d=await res.json();}catch(e){}
+    if(!res.ok){st.style.color='#c62828';st.textContent=d.error||'保存に失敗しました';btn.disabled=false;return;}
+    var ids=AI_PARSED.map(function(e){return e.user_id;});
+    await loadNotes();
+    ids.forEach(function(uid){
+      var w=document.getElementById('noteWrap_'+uid);
+      if(w)w.innerHTML=noteBoxHtml(uid);
+    });
+    aiClose();
+  }catch(e){st.style.color='#c62828';st.textContent='通信エラーが発生しました';btn.disabled=false;}
+}
+async function loadNotes(){
+  try{
+    var res=await fetch('/api/admin/ai-support/notes',{headers:{'Authorization':'Bearer '+token}});
+    if(!res.ok)return;
+    var d=await res.json();NOTES=d.notes||{};
+  }catch(e){}
+}
+document.addEventListener('change',function(e){
+  if(e.target&&e.target.classList&&e.target.classList.contains('ai-pick'))aiUpdateSelCounts();
+});
+document.addEventListener('click',function(e){
+  var cb=e.target.closest&&e.target.closest('[data-ai-copy]');
+  if(cb){aiCopyMember(parseInt(cb.getAttribute('data-ai-copy'),10),cb);return;}
+  var gs=e.target.closest&&e.target.closest('[data-ai-set]');
+  if(gs){aiCopySet(gs.getAttribute('data-ai-set'),false,gs);return;}
+  var gl=e.target.closest&&e.target.closest('[data-ai-sel]');
+  if(gl){aiCopySet(gl.getAttribute('data-ai-sel'),true,gl);return;}
+  var nt=e.target.closest&&e.target.closest('[data-note-target]');
+  if(nt){var b=document.getElementById(nt.getAttribute('data-note-target'));
+    if(b){var open=b.classList.toggle('show');nt.classList.toggle('open',open);}return;}
+  var md=document.getElementById('aiModal');
+  if(md&&e.target===md)aiClose();
+});
+document.getElementById('aiPasteBtn').addEventListener('click',aiOpenPaste);
+load();
+</script></body></html>`)
+})
+
+// --- Admin Events Page ---
+app.get('/admin/events', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<title>イベント管理 - 社会科同好会</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+<style>
+  .top-bar { background: #1a237e; color: #fff; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+  .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; font-weight: 700; }
+  .btn-sm { padding: 6px 14px; border-radius: 8px; border: none; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .btn-back { background: rgba(255,255,255,0.2); color: #fff; text-decoration: none; }
+  .main { max-width: 900px; margin: 20px auto; padding: 0 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); margin-bottom: 16px; }
+  .card h3 { font-family: 'Zen Maru Gothic', sans-serif; margin: 0 0 12px; color: #333; }
+  .form-row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .form-row input, .form-row textarea { flex: 1; padding: 8px 12px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 14px; font-family: inherit; min-width: 200px; }
+  .form-row input:focus, .form-row textarea:focus { outline: none; border-color: #1a237e; }
+  .btn-create { background: #1a237e; color: #fff; padding: 10px 24px; border: none; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .btn-create:hover { background: #0d1642; }
+  .btn-danger { background: #c62828; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
+  .btn-export2 { background: #2e7d32; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
+  .btn-qr { background: #ff6f00; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
+  .btn-edit { background: #455a64; color: #fff; font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; cursor: pointer; }
+  .btn-edit:hover { background: #37474f; }
+  .ev-rename-box { width: 100%; margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .ev-rename-box input { flex: 1; min-width: 200px; padding: 8px 12px; border: 2px solid #1a237e; border-radius: 8px; font-size: 14px; font-family: inherit; }
+  .ev-rename-box input:focus { outline: none; }
+  .ev-rename-save { background: #1a237e; color: #fff; font-size: 12px; font-weight: 700; padding: 7px 16px; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; }
+  .ev-rename-cancel { background: #eee; color: #555; font-size: 12px; font-weight: 700; padding: 7px 16px; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; }
+  .ev-rename-status { font-size: 12px; color: #c62828; width: 100%; }
+  .event-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #eee; flex-wrap: wrap; gap: 8px; }
+  .event-item:last-child { border-bottom: none; }
+  .event-info .title { font-weight: 700; font-size: 15px; }
+  .event-info .meta { font-size: 12px; color: #888; margin-top: 2px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 10px; font-weight: 700; cursor: pointer; transition: opacity 0.2s; }
+  .badge:hover { opacity: 0.7; }
+  .badge-att { background: #e3f2fd; color: #1565c0; }
+  .badge-sur { background: #f3e5f5; color: #7b1fa2; }
+  .event-detail { background: #fafafa; border-radius: 8px; padding: 14px 16px; margin-top: 8px; font-size: 13px; display: none; width: 100%; }
+  .event-detail.show { display: block; }
+  .event-detail h4 { font-size: 13px; font-weight: 700; margin: 0 0 8px; color: #333; }
+  .event-detail table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  .event-detail th, .event-detail td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; font-size: 12px; }
+  .event-detail th { background: #f0f0f0; font-weight: 700; }
+  .event-detail .no-data { color: #aaa; font-size: 12px; }
+  .detail-tabs { display: flex; gap: 0; margin-bottom: 10px; }
+  .detail-tab { padding: 6px 16px; font-size: 12px; font-weight: 700; cursor: pointer; border: 1px solid #ddd; background: #f5f5f5; color: #888; }
+  .detail-tab:first-child { border-radius: 6px 0 0 6px; }
+  .detail-tab:last-child { border-radius: 0 6px 6px 0; }
+  .detail-tab.active { background: #1a237e; color: #fff; border-color: #1a237e; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .qr-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200; align-items: center; justify-content: center; }
+  .qr-modal.show { display: flex; }
+  .qr-content { background: #fff; border-radius: 20px; padding: 36px; text-align: center; max-width: 420px; width: 90%; }
+  .qr-content h3 { font-family: 'Zen Maru Gothic', sans-serif; color: #1a237e; margin: 0 0 4px; }
+  .qr-content .date { color: #888; font-size: 13px; margin-bottom: 16px; }
+  .qr-content canvas { margin: 0 auto; }
+  .qr-content .code-text { margin-top: 12px; font-size: 20px; font-weight: 700; color: var(--header-line); letter-spacing: 4px; font-family: monospace; }
+  .qr-content .url-text { margin-top: 8px; font-size: 11px; color: #999; word-break: break-all; }
+  .custom-q-area { margin-top: 16px; padding-top: 16px; border-top: 2px dashed #eee; }
+  .q-card { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); padding: 14px 14px 10px; margin-bottom: 12px; }
+  .q-card-head { display: flex; align-items: flex-start; gap: 8px; }
+  .q-num { flex: none; font-size: 12px; font-weight: 700; color: #888; padding-top: 10px; }
+  .q-title-input { flex: 1; width: 100%; min-width: 0; border: none; border-bottom: 2px solid #e0e0e0; padding: 8px 4px; font-size: 14px; font-weight: 600; font-family: inherit; background: #fafafa; border-radius: 4px 4px 0 0; }
+  .q-title-input:focus { outline: none; border-bottom-color: #1a237e; background: #f5f7ff; }
+  .q-type-tag { flex: none; font-size: 11px; color: #666; background: #f0f0f0; border-radius: 12px; padding: 4px 10px; margin-top: 6px; white-space: nowrap; }
+  .q-opts-list { margin-top: 10px; }
+  .q-opt-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .q-opt-row > i { color: #999; font-size: 14px; width: 16px; text-align: center; flex: none; }
+  .q-opt-input { flex: 1; min-width: 0; border: 1px solid transparent; border-radius: 6px; padding: 8px; font-size: 13px; font-family: inherit; background: #f7f7f7; }
+  .q-opt-input:focus { outline: none; border-color: #1a237e; background: #fff; }
+  .q-opt-del { background: none; border: none; color: #bbb; cursor: pointer; font-size: 14px; padding: 6px 8px; flex: none; }
+  .q-opt-del:hover { color: #c62828; }
+  .q-add-opt-row { display: flex; gap: 14px; margin-top: 2px; padding-left: 24px; flex-wrap: wrap; }
+  .q-add-opt { background: none; border: none; color: #1565c0; cursor: pointer; font-size: 12px; font-weight: 600; font-family: inherit; padding: 6px 0; }
+  .q-text-preview { margin-top: 10px; color: #aaa; font-size: 13px; border-bottom: 1px dashed #ccc; padding: 6px 2px 8px; }
+  .q-rating-preview { margin-top: 10px; color: #f9a825; font-size: 20px; letter-spacing: 4px; }
+  .q-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #f0f0f0; flex-wrap: wrap; }
+  .q-actions { display: flex; gap: 2px; }
+  .q-act-btn { background: none; border: none; color: #777; cursor: pointer; font-size: 14px; padding: 8px 10px; border-radius: 6px; }
+  .q-act-btn:hover { background: #f0f0f0; color: #333; }
+  .q-act-btn:disabled { color: #ddd; cursor: default; background: none; }
+  .q-toggles { display: flex; gap: 14px; flex-wrap: wrap; }
+  .q-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #555; cursor: pointer; user-select: none; }
+  .q-toggle input { display: none; }
+  .q-tgl { width: 34px; height: 18px; background: #ccc; border-radius: 10px; position: relative; transition: background 0.15s; flex: none; display: inline-block; }
+  .q-tgl::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; background: #fff; border-radius: 50%; transition: left 0.15s; }
+  .q-toggle input:checked + .q-tgl { background: #1a237e; }
+  .q-toggle input:checked + .q-tgl::after { left: 18px; }
+  .btn-add-q { background: #f5f5f5; color: #555; border: 2px dashed #ccc; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; font-family: inherit; width: 100%; margin-top: 8px; }
+  .type-picker { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 8px; background: #fafafa; border: 1px solid #e0e0e0; border-radius: 12px; padding: 10px; }
+  .type-tile { display: flex; align-items: center; gap: 10px; background: #fff; border: 1px solid #e0e0e0; border-radius: 10px; padding: 12px; cursor: pointer; font-size: 13px; font-weight: 600; color: #444; font-family: inherit; }
+  .type-tile:hover { border-color: #1a237e; background: #f5f7ff; }
+  .type-tile i { font-size: 16px; color: #1565c0; width: 20px; text-align: center; flex: none; }
+  .preset-area { margin-bottom: 10px; }
+  .preset-label { font-size: 11px; color: #999; margin-bottom: 6px; }
+  .preset-btn { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; padding: 5px 12px; border-radius: 20px; cursor: pointer; font-size: 12px; font-family: inherit; margin-right: 6px; margin-bottom: 4px; }
+  .preset-btn:hover { background: #c8e6c9; }
+  .ev-filter-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  .ev-filter-sel { padding: 8px 12px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 13px; font-family: inherit; background: #fff; cursor: pointer; }
+  .ev-filter-sel:focus { outline: none; border-color: #1a237e; }
+  .ev-search-wrap { position: relative; flex: 1; min-width: 200px; display: flex; align-items: center; }
+  .ev-search-wrap > i { position: absolute; left: 12px; color: #aaa; font-size: 13px; pointer-events: none; }
+  .ev-search-input { width: 100%; padding: 8px 32px 8px 32px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 13px; font-family: inherit; }
+  .ev-search-input:focus { outline: none; border-color: #1a237e; }
+  .ev-search-clear { position: absolute; right: 10px; color: #999; font-size: 18px; cursor: pointer; line-height: 1; }
+  .ev-search-clear:hover { color: #555; }
+  .ev-group-head { margin: 18px 0 4px; font-size: 13px; font-weight: 700; color: #555; }
+  .ev-ended-toggle { display: inline-flex; align-items: center; gap: 8px; margin-top: 18px; padding: 8px 14px; background: #f5f5f5; border: 1px solid #e0e0e0; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 700; color: #666; font-family: inherit; }
+  .ev-ended-toggle:hover { background: #eee; }
+  .ev-ended-list { margin-top: 6px; }
+  .ev-item-ended .title { color: #999 !important; }
+  .ev-empty { color: #888; text-align: center; padding: 16px 0; }
+  @media print {
+    .top-bar, .main { display: none !important; }
+    .qr-modal { position: static !important; display: block !important; background: none !important; }
+    .qr-content { box-shadow: none !important; max-width: none !important; padding: 20px !important; }
+  }
+</style>
+</head><body>
+<div class="top-bar">
+  <div class="logo"><i class="fas fa-calendar-alt"></i> イベント管理</div>
+  <div style="display:flex;gap:8px">
+    <a href="/admin" class="btn-sm btn-back"><i class="fas fa-arrow-left"></i> ダッシュボード</a>
+  </div>
+</div>
+<div class="main">
+  <div class="card">
+    <h3><i class="fas fa-plus-circle"></i> 新しいイベントを作成</h3>
+    <div class="form-row">
+      <input type="text" id="evTitle" placeholder="イベント名（例：7月定例会）">
+      <input type="date" id="evDate">
+    </div>
+    <div class="form-row">
+      <textarea id="evDesc" rows="2" placeholder="説明（任意）" style="width:100%"></textarea>
+    </div>
+    <div class="custom-q-area">
+      <strong style="font-size:13px;color:#555"><i class="fas fa-question-circle"></i> カスタム質問（任意）</strong>
+      <div class="preset-area" style="margin-top:8px">
+        <div class="preset-label">プリセット：</div>
+        <button class="preset-btn" onclick="applyPreset('checkout')"><i class="fas fa-clipboard-check"></i> チェックアウト基本3問</button>
+        <button class="preset-btn" onclick="applyPreset('feedback')"><i class="fas fa-comment"></i> ご意見ご感想のみ</button>
+      </div>
+      <div id="customQuestions" style="margin-top:10px"></div>
+      <button class="btn-add-q" id="btnAddQ" onclick="toggleTypePicker()"><i class="fas fa-plus"></i> 新規追加</button>
+      <div class="type-picker" id="typePicker" style="display:none">
+        <button type="button" class="type-tile" onclick="pickType('radio')"><i class="far fa-dot-circle"></i> 選択式（1つ）</button>
+        <button type="button" class="type-tile" onclick="pickType('checkbox')"><i class="far fa-check-square"></i> 複数選択</button>
+        <button type="button" class="type-tile" onclick="pickType('text')"><i class="fas fa-font"></i> テキスト</button>
+        <button type="button" class="type-tile" onclick="pickType('rating')"><i class="far fa-star"></i> 評価（5段階）</button>
+      </div>
+    </div>
+    <div style="margin-top:16px"><button class="btn-create" onclick="submitCreateEvent()"><i class="fas fa-paper-plane"></i> 作成する</button></div>
+  </div>
+  <div class="card">
+    <h3><i class="fas fa-list"></i> イベント一覧</h3>
+    <div class="ev-filter-bar">
+      <select id="evFilterYear" class="ev-filter-sel"></select>
+      <div class="ev-search-wrap">
+        <i class="fas fa-search"></i>
+        <input type="text" id="evSearch" class="ev-search-input" placeholder="イベント名・グループで検索">
+        <span id="evSearchClear" class="ev-search-clear" style="display:none">&times;</span>
+      </div>
+    </div>
+    <div id="eventList"><p style="color:#888;text-align:center">読み込み中...</p></div>
+  </div>
+</div>
+<div class="qr-modal" id="qrModal" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="qr-content" id="qrContent"></div>
+</div>
+<script>
+const token = localStorage.getItem('token');
+const user = JSON.parse(localStorage.getItem('user')||'null');
+if (!token||!user||user.role!=='admin') { window.location.href='/login'; throw new Error('redirect'); }
+
+// ===== Forms風 カード型質問ビルダー =====
+let qList = [];
+const qTypeNames = { text: 'テキスト', radio: '選択式（1つ）', checkbox: '複数選択', rating: '評価（5段階）' };
+const qTypeIcons = { text: 'fas fa-font', radio: 'far fa-dot-circle', checkbox: 'far fa-check-square', rating: 'far fa-star' };
+
+function escAttr(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function toggleTypePicker() {
+  const p = document.getElementById('typePicker');
+  p.style.display = (p.style.display === 'none') ? 'grid' : 'none';
+}
+
+function pickType(type) {
+  document.getElementById('typePicker').style.display = 'none';
+  qList.push({ text: '', type: type, opts: (type === 'radio' || type === 'checkbox') ? ['', ''] : [], required: false });
+  renderQuestions(qList.length - 1);
+}
+
+function renderQuestions(focusIdx, focusOpt) {
+  const div = document.getElementById('customQuestions');
+  let html = '';
+  qList.forEach((q, i) => {
+    const isChoice = (q.type === 'radio' || q.type === 'checkbox');
+    html += '<div class="q-card">';
+    html += '<div class="q-card-head"><span class="q-num">' + (i + 1) + '.</span>';
+    html += '<input class="q-title-input" id="qTitle_' + i + '" type="text" placeholder="質問文を入力" value="' + escAttr(q.text) + '" oninput="qList[' + i + '].text=this.value">';
+    html += '<span class="q-type-tag"><i class="' + qTypeIcons[q.type] + '"></i> ' + qTypeNames[q.type] + '</span></div>';
+    if (isChoice) {
+      html += '<div class="q-opts-list">';
+      q.opts.forEach((o, j) => {
+        html += '<div class="q-opt-row"><i class="' + (q.type === 'radio' ? 'far fa-circle' : 'far fa-square') + '"></i>';
+        html += '<input class="q-opt-input" id="qOpt_' + i + '_' + j + '" type="text" placeholder="オプション' + (j + 1) + '" value="' + escAttr(o) + '" oninput="qList[' + i + '].opts[' + j + ']=this.value.split(String.fromCharCode(124)).join(String.fromCharCode(65372))">';
+        html += '<button type="button" class="q-opt-del" onclick="removeOpt(' + i + ',' + j + ')" title="削除"><i class="fas fa-times"></i></button></div>';
+      });
+      html += '</div>';
+      html += '<div class="q-add-opt-row"><button type="button" class="q-add-opt" onclick="addOpt(' + i + ')"><i class="fas fa-plus"></i> オプションを追加</button>';
+      html += '<button type="button" class="q-add-opt" onclick="addOtherOpt(' + i + ')">「その他」の追加</button></div>';
+    } else if (q.type === 'rating') {
+      html += '<div class="q-rating-preview">☆☆☆☆☆</div>';
+    } else {
+      html += '<div class="q-text-preview">回答者が自由にテキストを入力できます</div>';
+    }
+    html += '<div class="q-card-foot"><div class="q-actions">';
+    html += '<button type="button" class="q-act-btn" onclick="moveQ(' + i + ',-1)" title="上へ移動"' + (i === 0 ? ' disabled' : '') + '><i class="fas fa-arrow-up"></i></button>';
+    html += '<button type="button" class="q-act-btn" onclick="moveQ(' + i + ',1)" title="下へ移動"' + (i === qList.length - 1 ? ' disabled' : '') + '><i class="fas fa-arrow-down"></i></button>';
+    html += '<button type="button" class="q-act-btn" onclick="dupQ(' + i + ')" title="複製"><i class="far fa-copy"></i></button>';
+    html += '<button type="button" class="q-act-btn" onclick="delQ(' + i + ')" title="削除" style="color:#c62828"><i class="far fa-trash-alt"></i></button>';
+    html += '</div><div class="q-toggles">';
+    if (isChoice) {
+      html += '<label class="q-toggle"><input type="checkbox"' + (q.type === 'checkbox' ? ' checked' : '') + ' onchange="setQMulti(' + i + ',this.checked)"><span class="q-tgl"></span>複数回答</label>';
+    }
+    html += '<label class="q-toggle"><input type="checkbox"' + (q.required ? ' checked' : '') + ' onchange="qList[' + i + '].required=this.checked"><span class="q-tgl"></span>必須</label>';
+    html += '</div></div></div>';
+  });
+  div.innerHTML = html;
+  if (typeof focusIdx === 'number') {
+    const el = (typeof focusOpt === 'number') ? document.getElementById('qOpt_' + focusIdx + '_' + focusOpt) : document.getElementById('qTitle_' + focusIdx);
+    if (el) el.focus();
+  }
+}
+
+function setQMulti(i, multi) { qList[i].type = multi ? 'checkbox' : 'radio'; renderQuestions(); }
+function addOpt(i) { qList[i].opts.push(''); renderQuestions(i, qList[i].opts.length - 1); }
+function addOtherOpt(i) { if (qList[i].opts.indexOf('その他') < 0) qList[i].opts.push('その他'); renderQuestions(); }
+function removeOpt(i, j) { qList[i].opts.splice(j, 1); renderQuestions(); }
+function moveQ(i, d) { const t = i + d; if (t < 0 || t >= qList.length) return; const tmp = qList[i]; qList[i] = qList[t]; qList[t] = tmp; renderQuestions(); }
+function dupQ(i) { const q = qList[i]; qList.splice(i + 1, 0, { text: q.text, type: q.type, opts: q.opts.slice(), required: q.required }); renderQuestions(); }
+function delQ(i) { qList.splice(i, 1); renderQuestions(); }
+
+function applyPreset(type) {
+  if (qList.length > 0 && !confirm('現在の質問を置き換えてプリセットを挿入します。よろしいですか？')) return;
+  if (type === 'checkout') {
+    qList = [
+      { text: '今日刺激を受けた「成長の視点」はどれですか？（複数選択OK）', type: 'checkbox', opts: ['授業をつくる','授業をする・磨く','子どもを見る・評価する','仲間とつながる','研究・発信する'], required: false },
+      { text: 'それを選んだ理由は？（一言でOK）', type: 'text', opts: [], required: false },
+      { text: '明日以降、試してみたいことは？', type: 'text', opts: [], required: false },
+      { text: 'ご意見・ご感想（任意）', type: 'text', opts: [], required: false }
+    ];
+  } else if (type === 'feedback') {
+    qList = [ { text: 'ご意見・ご感想（任意）', type: 'text', opts: [], required: false } ];
+  }
+  renderQuestions();
+}
+
+
+async function submitCreateEvent() {
+  const title = document.getElementById('evTitle').value;
+  const event_date = document.getElementById('evDate').value;
+  const description = document.getElementById('evDesc').value;
+  if (!title||!event_date) { alert('タイトルと日付を入力してください'); return; }
+  const custom_questions = [];
+  for (const q of qList) {
+    const text = (q.text || '').trim();
+    if (!text) continue;
+    const opts = (q.opts || []).map(o => String(o).trim()).filter(o => o);
+    if ((q.type === 'radio' || q.type === 'checkbox') && opts.length === 0) {
+      alert('「' + text + '」に選択肢（オプション）を追加してください'); return;
+    }
+    custom_questions.push({ question_text: text, question_type: q.type, options: opts.join('|'), required: !!q.required });
+  }
+  const res = await fetch('/api/admin/events', {
+    method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body: JSON.stringify({ title, event_date, description, custom_questions })
+  });
+  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; qList=[]; renderQuestions(); document.getElementById('typePicker').style.display='none'; loadEvents(); }
+  else { const d = await res.json(); alert(d.error); }
+}
+
+let eventsData = [];
+
+var evFilterState = { year: 'current', q: '', showEnded: false };
+
+function fiscalYearOf(dateStr) {
+  // 'YYYY-MM-DD' → 年度(4月始まり)
+  var parts = String(dateStr || '').split('-');
+  var y = parseInt(parts[0], 10);
+  var m = parseInt(parts[1], 10);
+  if (!y || !m) return null;
+  return (m >= 4) ? y : (y - 1);
+}
+function currentFiscalYear() {
+  var now = new Date();
+  var y = now.getFullYear();
+  var m = now.getMonth() + 1;
+  return (m >= 4) ? y : (y - 1);
+}
+function todayStr() {
+  var n = new Date();
+  return n.getFullYear() + '-' + String(n.getMonth()+1).padStart(2,'0') + '-' + String(n.getDate()).padStart(2,'0');
+}
+
+function eventItemHtml(ev, ended) {
+  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-edit" data-action="rename-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-pen"></i></button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
+}
+
+function buildYearOptions() {
+  var sel = document.getElementById('evFilterYear');
+  if (!sel) return;
+  var years = {};
+  eventsData.forEach(function(ev) { var fy = fiscalYearOf(ev.event_date); if (fy !== null) years[fy] = true; });
+  var cur = currentFiscalYear();
+  var list = Object.keys(years).map(Number).sort(function(a,b){return b-a;});
+  var html = '<option value="current">' + cur + '年度（今年度）</option>';
+  list.forEach(function(y) { if (y !== cur) html += '<option value="'+y+'">'+y+'年度</option>'; });
+  html += '<option value="all">すべての年度</option>';
+  sel.innerHTML = html;
+  sel.value = evFilterState.year;
+}
+
+function renderEventList() {
+  var list = document.getElementById('eventList');
+  if (!list) return;
+  if (!eventsData.length) { list.innerHTML = '<p class="ev-empty">まだイベントがありません</p>'; return; }
+  var today = todayStr();
+  var cur = currentFiscalYear();
+  var q = (evFilterState.q || '').trim().toLowerCase();
+  var filtered = eventsData.filter(function(ev) {
+    if (evFilterState.year === 'all') { /* no year filter */ }
+    else {
+      var target = (evFilterState.year === 'current') ? cur : parseInt(evFilterState.year, 10);
+      if (fiscalYearOf(ev.event_date) !== target) return false;
+    }
+    if (q && String(ev.title).toLowerCase().indexOf(q) === -1) return false;
+    return true;
+  });
+  if (!filtered.length) {
+    list.innerHTML = '<p class="ev-empty">該当するイベントがありません</p>';
+    return;
+  }
+  var upcoming = [], ended = [];
+  filtered.forEach(function(ev) { if (ev.event_date >= today) upcoming.push(ev); else ended.push(ev); });
+  // 開催予定は日付昇順（近い順）、終了は新しい順
+  upcoming.sort(function(a,b){ return a.event_date < b.event_date ? -1 : (a.event_date > b.event_date ? 1 : 0); });
+  ended.sort(function(a,b){ return a.event_date > b.event_date ? -1 : (a.event_date < b.event_date ? 1 : 0); });
+
+  var html = '';
+  if (upcoming.length) {
+    html += '<div class="ev-group-head"><i class="fas fa-bullhorn" style="color:#1a237e"></i> 開催予定・本日（'+upcoming.length+'件）</div>';
+    html += upcoming.map(function(ev){ return eventItemHtml(ev, false); }).join('');
+  } else {
+    html += '<p class="ev-empty">開催予定の会はありません</p>';
+  }
+  if (ended.length) {
+    html += '<div class="ev-ended-toggle" id="evEndedToggle"><i class="fas fa-chevron-'+(evFilterState.showEnded?'down':'right')+'"></i> 終了した会（'+ended.length+'件）</div>';
+    html += '<div class="ev-ended-list" id="evEndedList" style="display:'+(evFilterState.showEnded?'block':'none')+'">';
+    html += ended.map(function(ev){ return eventItemHtml(ev, true); }).join('');
+    html += '</div>';
+  }
+  list.innerHTML = html;
+
+  var tg = document.getElementById('evEndedToggle');
+  if (tg) tg.addEventListener('click', function() {
+    evFilterState.showEnded = !evFilterState.showEnded;
+    renderEventList();
+  });
+}
+
+async function loadEvents() {
+  const res = await fetch('/api/admin/events', { headers:{'Authorization':'Bearer '+token} });
+  if (res.status === 401 || res.status === 403) { localStorage.clear(); window.location.href='/login'; return; }
+  const data = await res.json();
+  eventsData = data.events || [];
+  buildYearOptions();
+  renderEventList();
+}
+
+(function setupEventFilters() {
+  function bind() {
+    var sel = document.getElementById('evFilterYear');
+    var inp = document.getElementById('evSearch');
+    var clr = document.getElementById('evSearchClear');
+    if (sel) sel.addEventListener('change', function() { evFilterState.year = sel.value; evFilterState.showEnded = false; renderEventList(); });
+    if (inp) inp.addEventListener('input', function() { evFilterState.q = inp.value; if (clr) clr.style.display = inp.value ? 'block' : 'none'; renderEventList(); });
+    if (clr) clr.addEventListener('click', function() { if (inp) inp.value = ''; evFilterState.q = ''; clr.style.display = 'none'; renderEventList(); });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind);
+  else bind();
+})();
+
+function showQR(eventId) {
+  const ev = eventsData.find(function(e){ return e.id === eventId; });
+  if (!ev) return;
+  const url = location.origin + '/attend/' + ev.event_code;
+  const cont = document.getElementById('qrContent');
+  cont.innerHTML = '<h3>'+ev.title+'</h3><div class="date">'+ev.event_date+'</div><div id="qrCanvas" style="display:inline-block"></div><div class="code-text">'+ev.event_code+'</div><div class="url-text">'+url+'</div><div style="margin-top:16px"><button class="btn-sm" style="background:#1a237e;color:#fff;padding:8px 20px" onclick="window.print()"><i class="fas fa-print"></i> 印刷</button> <button class="btn-sm" id="closeQrBtn" style="background:#eee;color:#555;padding:8px 20px">閉じる</button></div>';
+  document.getElementById('qrModal').classList.add('show');
+  document.getElementById('closeQrBtn').addEventListener('click', function() { document.getElementById('qrModal').classList.remove('show'); });
+  setTimeout(function() {
+    var qrEl = document.getElementById('qrCanvas');
+    if (!qrEl) return;
+    qrEl.innerHTML = '';
+    if (typeof QRCode !== 'undefined') {
+      var canvas = document.createElement('canvas');
+      qrEl.appendChild(canvas);
+      QRCode.toCanvas(canvas, url, { width: 240, margin: 2 }, function(err) {
+        if (err) qrEl.innerHTML = '<p style="color:#c62828">QR生成エラー: ' + err.message + '<br>URL: ' + url + '</p>';
+      });
+    } else {
+      qrEl.innerHTML = '<p style="color:#c62828">QRコードライブラリの読み込みに失敗しました。<br>URL: '+url+'</p>';
+    }
+  }, 200);
+}
+
+async function exportEvent(id) {
+  const res = await fetch('/api/admin/events/'+id+'/export', { headers:{'Authorization':'Bearer '+token} });
+  if (!res.ok) { alert('エクスポート失敗'); return; }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='event_export.csv'; a.click(); URL.revokeObjectURL(url);
+}
+
+async function deleteEvent(id, title) {
+  if (!confirm(title+' を削除しますか？')) return;
+  await fetch('/api/admin/events/'+id, { method:'DELETE', headers:{'Authorization':'Bearer '+token} });
+  loadEvents();
+}
+
+function renameEvent(id, currentTitle) {
+  var wrap = document.getElementById('evWrap_'+id);
+  if (!wrap) return;
+  if (wrap.querySelector('.ev-rename-box')) return; // 既に編集中
+  var box = document.createElement('div');
+  box.className = 'ev-rename-box';
+  box.innerHTML = '<input type="text" class="ev-rename-input" maxlength="100">'
+    + '<button class="ev-rename-save"><i class="fas fa-check"></i> 保存</button>'
+    + '<button class="ev-rename-cancel">キャンセル</button>'
+    + '<div class="ev-rename-status"></div>';
+  var item = wrap.querySelector('.event-item');
+  item.parentNode.insertBefore(box, item.nextSibling);
+  var input = box.querySelector('.ev-rename-input');
+  input.value = currentTitle;
+  input.focus();
+  input.select();
+  var statusEl = box.querySelector('.ev-rename-status');
+  function close() { box.remove(); }
+  box.querySelector('.ev-rename-cancel').addEventListener('click', close);
+  async function save() {
+    var newTitle = (input.value || '').trim();
+    if (!newTitle) { statusEl.textContent = 'イベント名を入力してください'; return; }
+    if (newTitle === currentTitle) { close(); return; }
+    var saveBtn = box.querySelector('.ev-rename-save');
+    saveBtn.disabled = true;
+    statusEl.style.color = '#888'; statusEl.textContent = '保存中...';
+    try {
+      var res = await fetch('/api/admin/events/'+id, {
+        method: 'PUT',
+        headers: { 'Authorization': 'Bearer '+token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle })
+      });
+      var d = {};
+      try { d = await res.json(); } catch(e) {}
+      if (res.ok && d.success) { loadEvents(); return; }
+      statusEl.style.color = '#c62828'; statusEl.textContent = d.error || '保存に失敗しました';
+      saveBtn.disabled = false;
+    } catch(e) {
+      statusEl.style.color = '#c62828'; statusEl.textContent = '通信エラーが発生しました';
+      saveBtn.disabled = false;
+    }
+  }
+  box.querySelector('.ev-rename-save').addEventListener('click', save);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); save(); } else if (e.key === 'Escape') { close(); } });
+}
+
+async function showEventDetail(eventId, tab) {
+  const detail = document.getElementById('evDetail_'+eventId);
+  if (!detail) return;
+  // Toggle: if already showing same tab, close
+  if (detail.classList.contains('show') && detail.dataset.activeTab === tab) {
+    detail.classList.remove('show');
+    return;
+  }
+  detail.dataset.activeTab = tab;
+  detail.innerHTML = '<p style="color:#888">読み込み中...</p>';
+  detail.classList.add('show');
+  try {
+    const res = await fetch('/api/admin/events/'+eventId, { headers:{'Authorization':'Bearer '+token} });
+    if (!res.ok) { detail.innerHTML = '<p style="color:#c62828">読み込みに失敗しました</p>'; return; }
+    const d = await res.json();
+    renderDetail(detail, d, tab);
+  } catch(e) { detail.innerHTML = '<p style="color:#c62828">エラーが発生しました</p>'; }
+}
+
+function renderDetail(el, d, tab) {
+  var html = '<div class="detail-tabs">';
+  var gList = d.guests || [];
+  html += '<div class="detail-tab'+(tab==='att'?' active':'')+'" data-dtab="att" data-eid="'+d.event.id+'"><i class="fas fa-users"></i> 出席 ('+(d.attendances.length+gList.length)+')</div>';
+  html += '<div class="detail-tab'+(tab==='sur'?' active':'')+'" data-dtab="sur" data-eid="'+d.event.id+'"><i class="fas fa-clipboard"></i> 回答 ('+d.answers.length+')</div>';
+  html += '</div>';
+
+  if (tab === 'att') {
+    if (!d.attendances.length && !gList.length) { html += '<div class="no-data">まだ出席者がいません</div>'; }
+    else {
+      html += '<table><tr><th>#</th><th>名前</th><th>校種</th><th>学校名</th><th>出席時刻</th></tr>';
+      d.attendances.forEach(function(a, i) {
+        var t = a.attended_at ? new Date(a.attended_at.replace(' ','T')+'Z').toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-';
+        var st = a.school_type === 'elementary' ? '<span style="background:#e8f5e9;color:#2e7d32;border-radius:4px;padding:1px 6px;font-size:11px">小学校</span>' : a.school_type === 'junior_high' ? '<span style="background:#e3f2fd;color:#1565c0;border-radius:4px;padding:1px 6px;font-size:11px">中学校</span>' : '<span style="color:#999;font-size:11px">-</span>';
+        html += '<tr><td>'+(i+1)+'</td><td>'+escHtml(a.name)+'</td><td>'+st+'</td><td style="font-size:12px">'+escHtml(a.school||'-')+'</td><td>'+t+'</td></tr>';
+      });
+      gList.forEach(function(g, j) {
+        var t2 = g.attended_at ? new Date(g.attended_at.replace(' ','T')+'Z').toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-';
+        html += '<tr><td>'+(d.attendances.length+j+1)+'</td><td>'+escHtml(g.name)+' <span style="background:#fff3e0;color:#e65100;border-radius:4px;padding:1px 6px;font-size:11px">ゲスト</span></td><td><span style="color:#999;font-size:11px">-</span></td><td style="font-size:12px">'+escHtml(g.school||'-')+'</td><td>'+t2+'</td></tr>';
+      });
+      html += '</table>';
+    }
+  } else {
+    if (!d.answers.length && !d.customAnswers.length) { html += '<div class="no-data">まだ回答がありません</div>'; }
+    else {
+      // satisfaction answers
+      var ansMap = {};
+      d.answers.forEach(function(a) { ansMap[a.user_id] = a; });
+      // custom answers grouped by user
+      var caByUser = {};
+      d.customAnswers.forEach(function(ca) {
+        if (!caByUser[ca.user_id]) caByUser[ca.user_id] = [];
+        caByUser[ca.user_id].push(ca);
+      });
+      // question lookup
+      var qMap = {};
+      d.questions.forEach(function(q) { qMap[q.id] = q.question_text; });
+      // school_type lookup from answers or customAnswers
+      var schoolTypeMap = {};
+      d.answers.forEach(function(a) { schoolTypeMap[a.user_id] = { school_type: a.school_type, school: a.school }; });
+      d.customAnswers.forEach(function(ca) { if (!schoolTypeMap[ca.user_id]) schoolTypeMap[ca.user_id] = { school_type: ca.school_type, school: '' }; });
+
+      var userIds = Object.keys(ansMap);
+      Object.keys(caByUser).forEach(function(uid) { if (userIds.indexOf(uid) === -1) userIds.push(uid); });
+
+      var hasSat = d.answers.some(function(a) { return a.satisfaction; });
+      html += '<table><tr><th>校種</th><th>名前</th>';
+      if (hasSat) html += '<th>満足度</th><th>感想</th>';
+      if (d.questions.length) html += '<th>回答</th>';
+      html += '</tr>';
+      userIds.forEach(function(uid) {
+        var ans = ansMap[uid];
+        var name = ans ? escHtml(ans.name) : (caByUser[uid] && caByUser[uid][0] ? escHtml(caByUser[uid][0].name) : '?');
+        var si = schoolTypeMap[uid] || {};
+        var st = si.school_type === 'elementary' ? '<span style="background:#e8f5e9;color:#2e7d32;border-radius:4px;padding:1px 6px;font-size:11px">小</span>' : si.school_type === 'junior_high' ? '<span style="background:#e3f2fd;color:#1565c0;border-radius:4px;padding:1px 6px;font-size:11px">中</span>' : '<span style="color:#999;font-size:11px">-</span>';
+        html += '<tr><td>'+st+'</td><td>'+name+'</td>';
+        if (hasSat) {
+          var sat = ans && ans.satisfaction ? '★'.repeat(ans.satisfaction)+'☆'.repeat(5-ans.satisfaction) : '-';
+          var cmt = ans && ans.comment ? escHtml(ans.comment) : '-';
+          html += '<td style="white-space:nowrap;font-size:12px">'+sat+'</td><td style="font-size:11px;max-width:200px">'+cmt+'</td>';
+        }
+        if (d.questions.length) {
+          var parts = [];
+          (caByUser[uid]||[]).forEach(function(ca) {
+            var ql = qMap[ca.question_id] || '質問';
+            parts.push('<b>'+escHtml(ql)+'</b>: '+escHtml(ca.answer_text));
+          });
+          html += '<td style="font-size:11px;line-height:1.5">'+(parts.length ? parts.join('<br>') : '-')+'</td>';
+        }
+        html += '</tr>';
+      });
+      html += '</table>';
+    }
+  }
+  el.innerHTML = html;
+  el.dataset.eventData = JSON.stringify(d);
+
+  // Tab switching within detail
+  el.querySelectorAll('.detail-tab').forEach(function(t) {
+    t.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var newTab = t.dataset.dtab;
+      var cached = JSON.parse(el.dataset.eventData);
+      el.dataset.activeTab = newTab;
+      renderDetail(el, cached, newTab);
+    });
+  });
+}
+
+function escHtml(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// Event delegation for event list buttons
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const id = parseInt(btn.dataset.id);
+  if (action === 'qr') showQR(id);
+  else if (action === 'export') exportEvent(id);
+  else if (action === 'delete-ev') deleteEvent(id, btn.dataset.title);
+  else if (action === 'rename-ev') renameEvent(id, btn.dataset.title);
+  else if (action === 'detail') showEventDetail(id, btn.dataset.tab);
+});
+
+loadEvents();
+</script>
+</body></html>`)
+})
+
+// --- Root redirect ---
+app.get('/', (c) => {
+  return c.redirect('/login')
+})
+
+// --- Logout API (clean up session from D1) ---
+app.post('/api/auth/logout', async (c) => {
+  const authHeader = c.req.header('Authorization')
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.replace('Bearer ', '')
+    await c.env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run()
+  }
+  return c.json({ success: true })
+})
+
+export default app
