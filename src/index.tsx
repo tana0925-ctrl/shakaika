@@ -329,6 +329,8 @@ CONNECTION:
 この形式・項目名・MEMBER_IDを変更しないでください。
 MEMBER_IDには、下の記録に書かれている値をそのまま使ってください。`
 
+const AI_PAGE_SIZE = 12
+
 function aiBatchCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   let s = ''
@@ -1028,6 +1030,21 @@ app.get('/api/admin/group-summary', authMiddleware, adminMiddleware, async (c) =
 
 // ========== AI伴走支援 API（すべて管理者専用） ==========
 
+// 匿名ID（会員A、会員B…、27人目以降は会員AA…）
+function aiAnonId(i: number): string {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  let s = ''
+  let n = i
+  do { s = A[n % 26] + s; n = Math.floor(n / 26) - 1 } while (n >= 0)
+  return '会員' + s
+}
+
+const AI_MULTI_NOTE = `※この依頼には複数の会員の記録が含まれています。
+会員ごとに、それぞれ独立して①〜⑧を整理してください。
+他の会員と比べたり、順位をつけたりしないでください。
+最後の機械可読ブロックも、会員ごとに1つずつ（人数分）出力してください。
+MEMBER_IDには、各記録に書かれている値（会員A、会員B…）をそのまま使ってください。`
+
 // 匿名プロンプトを生成し、対応表をサーバー側に保存する
 app.post('/api/admin/ai-support/export', authMiddleware, adminMiddleware, async (c) => {
   const db = c.env.DB
@@ -1035,15 +1052,61 @@ app.post('/api/admin/ai-support/export', authMiddleware, adminMiddleware, async 
   await ensureSupportTables(db)
   let body: any = {}
   try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
-  const userId = parseInt(String(body.user_id || ''), 10)
-  if (!userId) return c.json({ error: '会員が指定されていません' }, 400)
+
   const fy = getCurrentFiscalYear()
 
+  // user_id（1名）／ user_ids（複数）／ scope='pending'（伴走メモ未作成の会員から順に）
+  let ids: number[] = []
+  let pendingRemaining = -1
+  if (body.scope === 'pending') {
+    const lim = Math.min(Math.max(parseInt(String(body.limit || AI_PAGE_SIZE), 10) || AI_PAGE_SIZE, 1), 30)
+    const { results: pend } = await db.prepare(
+      `SELECT u.id FROM users u
+       LEFT JOIN support_notes sn ON sn.user_id = u.id AND sn.fiscal_year = ?
+       WHERE u.role = 'member' AND sn.id IS NULL
+       ORDER BY (u.training_group IS NULL OR TRIM(u.training_group) = ''), u.training_group, u.name`
+    ).bind(fy).all() as any
+    const all = (pend || []).map((r: any) => r.id)
+    pendingRemaining = all.length
+    ids = all.slice(0, lim)
+    if (!ids.length) return c.json({ error: '未作成の会員はいません。全員ぶんの伴走メモができています', remaining: 0 }, 400)
+  } else {
+    if (Array.isArray(body.user_ids)) {
+      for (const v of body.user_ids) { const n = parseInt(String(v), 10); if (n && ids.indexOf(n) === -1) ids.push(n) }
+    }
+    const single = parseInt(String(body.user_id || ''), 10)
+    if (!ids.length && single) ids = [single]
+    if (!ids.length) return c.json({ error: '会員が指定されていません' }, 400)
+    if (ids.length > 60) return c.json({ error: '一度に書き出せるのは60名までです。分けてコピーしてください' }, 400)
+  }
   const nameTokens = await aiLoadNameTokens(db)
-  const block = await aiBuildMemberBlock(db, userId, fy, '会員A', nameTokens)
-  if (!block) return c.json({ error: '会員が見つかりません' }, 404)
 
-  const prompt = AI_INSTRUCTION + '\n\n===== 対象の会員の記録 =====\n' + block.text + '\n===== 記録ここまで ====='
+  const blocks: string[] = []
+  const mapping: Record<string, number> = {}
+  const hits: Record<string, number> = {}
+  const risks: string[] = []
+  const thinNames: string[] = []
+  const names: string[] = []
+  let idx = 0
+  for (const uid of ids) {
+    const b = await aiBuildMemberBlock(db, uid, fy, aiAnonId(idx), nameTokens)
+    if (!b) continue
+    mapping[aiAnonId(idx)] = uid
+    names.push(b.name)
+    if (b.thin) thinNames.push(b.name)
+    for (const k of Object.keys(b.hits)) hits[k] = (hits[k] || 0) + b.hits[k]
+    for (const w of b.risks) if (risks.indexOf(w) === -1) risks.push(w)
+    blocks.push(b.text)
+    idx++
+  }
+  if (!blocks.length) return c.json({ error: '対象の会員が見つかりません' }, 404)
+
+  const isMulti = blocks.length > 1
+  let prompt = AI_INSTRUCTION
+  if (isMulti) prompt += '\n\n' + AI_MULTI_NOTE
+  prompt += '\n\n===== 対象の会員の記録（' + blocks.length + '名） =====\n'
+  prompt += blocks.join('\n\n--------------------\n\n')
+  prompt += '\n===== 記録ここまで ====='
 
   // 念のための最終検査：実名・メールが混入していないか
   const leaked: string[] = []
@@ -1051,17 +1114,38 @@ app.post('/api/admin/ai-support/export', authMiddleware, adminMiddleware, async 
   if (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(prompt)) leaked.push('メールアドレス')
   if (leaked.length) return c.json({ error: '個人情報が残っている可能性があるため中止しました（' + leaked.slice(0, 3).join('・') + '）' }, 500)
 
+  const rawLabel = typeof body.label === 'string' ? body.label.trim().slice(0, 60)
+    : (body.scope === 'pending' ? '未作成の会員' : '')
+  const label = isMulti ? ((rawLabel || 'まとめて') + ' ' + blocks.length + '名') : names[0]
+
   const code = aiBatchCode()
   const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-  const mapping: Record<string, number> = { '会員A': userId }
   await db.prepare("INSERT INTO ai_export_batches (batch_code, scope, label, mapping, created_by, expires_at) VALUES (?,?,?,?,?,?)")
-    .bind(code, 'member', block.name, JSON.stringify(mapping), me.id, expires).run()
+    .bind(code, isMulti ? 'group' : 'member', label, JSON.stringify(mapping), me.id, expires).run()
 
-  const maskList = Object.keys(block.hits).map((k) => ({ label: k, count: block.hits[k] }))
+  const maskList = Object.keys(hits).map((k) => ({ label: k, count: hits[k] }))
   return c.json({
-    batch_code: code, prompt, label: block.name,
-    masked: maskList, risks: block.risks, thin: block.thin, attend_count: block.attendCount
+    batch_code: code, prompt, label,
+    count: blocks.length, chars: prompt.length,
+    masked: maskList, risks, thin_names: thinNames, thin: thinNames.length > 0,
+    remaining: pendingRemaining >= 0 ? pendingRemaining : undefined,
+    remaining_after: pendingRemaining >= 0 ? Math.max(pendingRemaining - blocks.length, 0) : undefined
   })
+})
+
+// 伴走メモの作成状況（全員分の進み具合）
+app.get('/api/admin/ai-support/pending', authMiddleware, adminMiddleware, async (c) => {
+  const db = c.env.DB
+  await ensureSupportTables(db)
+  const fy = getCurrentFiscalYear()
+  const row = await db.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM users WHERE role='member') AS total,
+       (SELECT COUNT(*) FROM users u JOIN support_notes sn ON sn.user_id=u.id AND sn.fiscal_year=? WHERE u.role='member') AS done`
+  ).bind(fy).first() as any
+  const total = (row && row.total) || 0
+  const done = (row && row.done) || 0
+  return c.json({ total, done, remaining: Math.max(total - done, 0), page_size: AI_PAGE_SIZE })
 })
 
 // 貼り付け画面で選ぶための、最近のコピー履歴
@@ -4388,6 +4472,14 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .unset-item{font-size:12px;background:#f5f5f5;border-radius:6px;padding:4px 10px;color:#555}
 .sub-hdr{background:#eceff1;color:#37474f;padding:8px 20px;font-size:13px;font-weight:700;border-top:1px solid #e0e0e0}
 .ai-copy-btn{margin-left:auto;background:#6a1b9a;color:#fff;border:none;border-radius:8px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap}
+.grp-ai{background:rgba(255,255,255,0.22);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap;margin-left:8px}
+.grp-ai:hover{background:rgba(255,255,255,0.35)}
+.grp-ai:disabled{opacity:.45}
+.sub-ai{background:#6a1b9a;color:#fff;border:none;border-radius:8px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;margin-left:8px}
+.sub-ai:hover{background:#4a148c}
+.sub-ai:disabled{opacity:.45}
+.ai-pick{width:17px;height:17px;margin:0 2px 0 0;cursor:pointer;flex-shrink:0;accent-color:#6a1b9a}
+.sub-hdr{display:flex;align-items:center;flex-wrap:wrap;gap:4px}
 .ai-copy-btn:hover{background:#4a148c}
 .ai-copy-btn:disabled{opacity:.5}
 .ai-paste-btn{background:#6a1b9a;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:16px;margin-left:8px}
@@ -4453,6 +4545,7 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
   <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
   <button type="button" id="bulkToggle" class="bulk-toggle" style="display:none"><i class="fas fa-expand"></i> すべて開く</button>
   <button type="button" id="printBtn" class="bulk-toggle" style="display:none;margin-left:8px"><i class="fas fa-print"></i> このグループを印刷</button>
+  <button type="button" id="aiAllBtn" class="ai-paste-btn no-print" style="background:#4a148c">\u2728 全員をまとめてコピー</button>
   <button type="button" id="aiPasteBtn" class="ai-paste-btn no-print"><i class="fas fa-wand-magic-sparkles"></i> AI分析結果を貼り付け</button>
   <div id="gList"><p style="color:#888;text-align:center;padding:40px">読み込み中...</p></div>
 </div>
@@ -4474,6 +4567,7 @@ async function load(){
     const d=await res.json();
     await loadNotes();
     render(d.groups,d.fiscal_year);
+    loadProgress();
   }catch(e){document.getElementById('gList').innerHTML='<p style="color:#c62828;text-align:center">読み込みに失敗しました</p>';}
 }
 function render(groups,fy){
@@ -4486,7 +4580,12 @@ function render(groups,fy){
   setNames.forEach(function(gname,gi){
     var ms=groups[gname];var col=COLORS[gi%COLORS.length];var pid='gp_'+gi;
     tabs.push({id:pid,label:'<i class="fas fa-layer-group"></i> '+esc(gname)+' ('+ms.length+')',col:col});
-    var inner='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span><button class="grp-print no-print" onclick="window.print()" title="このグループを印刷"><i class="fas fa-print"></i> 印刷</button></div>';
+    var setKey='g'+gi;
+    AI_SETS[setKey]={label:gname,ids:ms.map(function(x){return x.id;})};
+    var inner='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span>'
+      +'<button class="grp-ai no-print" data-ai-set="'+setKey+'">\u2728 全員をコピー</button>'
+      +'<button class="grp-ai no-print" data-ai-sel="'+setKey+'" disabled>\u2728 選択(0)</button>'
+      +'<button class="grp-print no-print" onclick="window.print()" title="このグループを印刷"><i class="fas fa-print"></i> 印刷</button></div>';
     ms.forEach(function(m){inner+=mRow(m,fy);});
     inner+='</div>';
     panels+='<div class="group-panel" id="'+pid+'">'+inner+'</div>';
@@ -4499,7 +4598,11 @@ function render(groups,fy){
     secs.forEach(function(sec){
       var list=unset.filter(function(m){return (m.school_type||'')===sec[0];});
       if(!list.length)return;
-      u+='<div class="sub-hdr">'+esc(sec[1])+'（'+list.length+'名）</div>';
+      var subKey='u'+esc(sec[0]||'none');
+      AI_SETS[subKey]={label:'グループ未設定・'+sec[1],ids:list.map(function(x){return x.id;})};
+      u+='<div class="sub-hdr">'+esc(sec[1])+'（'+list.length+'名）'
+        +'<button class="sub-ai no-print" data-ai-set="'+subKey+'">\u2728 全員をコピー</button>'
+        +'<button class="sub-ai no-print" data-ai-sel="'+subKey+'" disabled>\u2728 選択(0)</button></div>';
       list.forEach(function(m){u+=mRow(m,fy);});
     });
     u+='</div>';
@@ -4507,6 +4610,7 @@ function render(groups,fy){
   }
   var tabBar='<div class="group-tabs">'+tabs.map(function(t,i){return '<button class="group-tab'+(i===0?' active':'')+'" data-target="'+t.id+'" style="background:'+t.col+'">'+t.label+'</button>';}).join('')+'</div>';
   el.innerHTML=tabBar+panels;
+  aiUpdateSelCounts();
   var firstPanel=el.querySelector('.group-panel');if(firstPanel)firstPanel.classList.add('active');
   el.querySelectorAll('.group-tab').forEach(function(tb){tb.addEventListener('click',function(){el.querySelectorAll('.group-tab').forEach(function(x){x.classList.remove('active');});el.querySelectorAll('.group-panel').forEach(function(p){p.classList.remove('active');});tb.classList.add('active');var p=document.getElementById(tb.getAttribute('data-target'));if(p)p.classList.add('active');});});
   var toggles=el.querySelectorAll('.ev-toggle');
@@ -4546,7 +4650,7 @@ function mRow(m,fy){
     var stC=m.school_type==='elementary'?'elem-b':m.school_type==='junior_high'?'junior-b':'';
   var stL=m.school_type==='elementary'?'小学校':m.school_type==='junior_high'?'中学校':'';
   var h='<div class="member-row">';
-  h+='<div class="member-name">'+esc(m.name);
+  h+='<div class="member-name"><input type="checkbox" class="ai-pick no-print" data-pick="'+m.id+'" title="まとめてコピーする対象に含める">'+esc(m.name);
   if(stL)h+=' <span class="school-badge '+stC+'">'+stL+'</span>';
   if(m.school)h+=' <span class="school-nm">'+esc(m.school)+'</span>';
   h+='<button type="button" class="ai-copy-btn no-print" data-ai-copy="'+m.id+'">\u2728 AI伴走用にコピー</button>';
@@ -4622,13 +4726,52 @@ function aiCopyText(text,statusEl){
     }).catch(fallback);
   }else{fallback();}
 }
+var AI_SETS={};
+function aiUpdateSelCounts(){
+  Object.keys(AI_SETS).forEach(function(key){
+    var btn=document.querySelector('[data-ai-sel="'+key+'"]');
+    if(!btn)return;
+    var ids=AI_SETS[key].ids;
+    var n=0;
+    ids.forEach(function(id){
+      var cb=document.querySelector('.ai-pick[data-pick="'+id+'"]');
+      if(cb&&cb.checked)n++;
+    });
+    btn.textContent='\u2728 選択('+n+')';
+    btn.disabled=(n===0);
+  });
+}
+function aiPickedIds(key){
+  var out=[];
+  (AI_SETS[key].ids||[]).forEach(function(id){
+    var cb=document.querySelector('.ai-pick[data-pick="'+id+'"]');
+    if(cb&&cb.checked)out.push(id);
+  });
+  return out;
+}
+async function aiCopySet(key,onlySelected,btn){
+  var set=AI_SETS[key];
+  if(!set)return;
+  var ids=onlySelected?aiPickedIds(key):set.ids;
+  if(!ids.length){alert('対象がありません');return;}
+  await aiCopyRequest({user_ids:ids,label:set.label},btn,ids.length);
+}
 async function aiCopyMember(uid,btn){
+  await aiCopyRequest({user_id:uid},btn,1);
+}
+async function aiCopyRequest(payload,btn,expected){
+  var orig=btn?btn.innerHTML:'';
   if(btn){btn.disabled=true;btn.textContent='準備中...';}
   try{
-    var res=await fetch('/api/admin/ai-support/export',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({user_id:uid})});
+    var res=await fetch('/api/admin/ai-support/export',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(payload)});
     var d={};try{d=await res.json();}catch(e){}
     if(!res.ok){alert(d.error||'準備に失敗しました');return;}
+    var n=d.count||1;
     var warn='';
+    if(n>1&&d.chars>20000){
+      warn+='<div class="ai-warn"><b>内容がかなり長くなっています（約'+Math.round(d.chars/1000)+'千字）</b><br>'
+        +'AIによっては途中で切れることがあります。うまくいかない場合は、チェックで人数を分けてコピーしてください。</div>';
+    }
     if(d.masked&&d.masked.length){
       warn+='<div class="ai-warn"><b>自動で伏せ字にしました</b><br>';
       warn+=d.masked.map(function(x){return '・'+esc(x.label)+' '+x.count+'か所';}).join('<br>');
@@ -4637,12 +4780,26 @@ async function aiCopyMember(uid,btn){
     if(d.risks&&d.risks.length){
       warn+='<div class="ai-warn"><b>念のためご確認ください</b><br>'+d.risks.map(function(r){return '・'+esc(r)+'が残っている可能性があります';}).join('<br>')+'</div>';
     }
-    if(d.thin){
-      warn+='<div class="ai-warn"><b>記録がまだ少ない方です</b><br>目標・参加記録がほとんどないため、AIの分析も限られたものになります。</div>';
+    if(d.thin_names&&d.thin_names.length){
+      warn+='<div class="ai-warn"><b>記録がまだ少ない方が'+d.thin_names.length+'名います</b><br>'
+        +esc(d.thin_names.slice(0,8).join('、'))+(d.thin_names.length>8?' ほか':'')
+        +'<br>目標・参加記録がほとんどないため、その方の分析は限られたものになります。</div>';
     }
     if(!warn)warn='<div class="ai-ok">氏名・学校名にあたる語は見つかりませんでした。</div>';
+    var head=(n>1)
+      ? esc(d.label)+'　／　'+n+'名分をまとめて書き出しました（約'+Math.round(d.chars/1000)+'千字）'
+      : esc(d.label)+' さん　／　このまま外部AIに渡す内容です';
+    if(typeof d.remaining==='number'){
+      var doneAfter=(AI_PROGRESS.total||0)-(d.remaining_after||0);
+      head='未作成の会員 '+n+'名（約'+Math.round(d.chars/1000)+'千字）　／　これを保存すると '+doneAfter+' / '+(AI_PROGRESS.total||0)+' 名';
+      if(d.remaining_after>0){
+        warn='<div class="ai-ok">この分を貼り戻して保存したら、もう一度「全員をまとめてコピー」を押すと<b>次の'+Math.min(d.remaining_after,AI_PROGRESS.page_size||12)+'名</b>が出ます（残り'+d.remaining_after+'名）。</div>'+warn;
+      }else{
+        warn='<div class="ai-ok">これが<b>最後の分</b>です。保存すれば全員ぶんの伴走メモがそろいます。</div>'+warn;
+      }
+    }
     var html='<h3>✨ AI伴走用にコピー</h3>'
-      +'<div class="sub">'+esc(d.label)+' さん　／　このまま外部AIに渡す内容です（氏名・学校名は含まれません）</div>'
+      +'<div class="sub">'+head+'（氏名・学校名は含まれません）</div>'
       +warn
       +'<div class="ai-pre" id="aiPromptPre">'+esc(d.prompt)+'</div>'
       +'<textarea id="aiHiddenTa" style="position:absolute;left:-9999px;top:0" readonly>'+esc(d.prompt)+'</textarea>'
@@ -4654,7 +4811,7 @@ async function aiCopyMember(uid,btn){
       aiCopyText(d.prompt,document.getElementById('aiCopyStatus'));
     });
   }catch(e){alert('通信エラーが発生しました');}
-  finally{if(btn){btn.disabled=false;btn.innerHTML='\u2728 AI伴走用にコピー';}}
+  finally{if(btn){btn.disabled=false;btn.innerHTML=orig;aiUpdateSelCounts();}}
 }
 
 // ===== AI伴走：貼り付け =====
@@ -4734,6 +4891,7 @@ async function aiSave(){
     if(!res.ok){st.style.color='#c62828';st.textContent=d.error||'保存に失敗しました';btn.disabled=false;return;}
     var ids=AI_PARSED.map(function(e){return e.user_id;});
     await loadNotes();
+    await loadProgress();
     ids.forEach(function(uid){
       var w=document.getElementById('noteWrap_'+uid);
       if(w)w.innerHTML=noteBoxHtml(uid);
@@ -4748,9 +4906,38 @@ async function loadNotes(){
     var d=await res.json();NOTES=d.notes||{};
   }catch(e){}
 }
+
+// 全員分の進み具合
+var AI_PROGRESS={total:0,done:0,remaining:0,page_size:12};
+async function loadProgress(){
+  try{
+    var res=await fetch('/api/admin/ai-support/pending',{headers:{'Authorization':'Bearer '+token}});
+    if(!res.ok)return;
+    AI_PROGRESS=await res.json();
+  }catch(e){}
+  var b=document.getElementById('aiAllBtn');
+  if(!b)return;
+  if(AI_PROGRESS.remaining>0){
+    b.disabled=false;
+    b.innerHTML='\u2728 全員をまとめてコピー（残り'+AI_PROGRESS.remaining+'名）';
+  }else{
+    b.disabled=true;
+    b.innerHTML='\u2728 全員ぶん作成済み（'+AI_PROGRESS.done+'名）';
+  }
+}
+async function aiCopyPending(btn){
+  await aiCopyRequest({scope:'pending',limit:AI_PROGRESS.page_size||12},btn,0);
+}
+document.addEventListener('change',function(e){
+  if(e.target&&e.target.classList&&e.target.classList.contains('ai-pick'))aiUpdateSelCounts();
+});
 document.addEventListener('click',function(e){
   var cb=e.target.closest&&e.target.closest('[data-ai-copy]');
   if(cb){aiCopyMember(parseInt(cb.getAttribute('data-ai-copy'),10),cb);return;}
+  var gs=e.target.closest&&e.target.closest('[data-ai-set]');
+  if(gs){aiCopySet(gs.getAttribute('data-ai-set'),false,gs);return;}
+  var gl=e.target.closest&&e.target.closest('[data-ai-sel]');
+  if(gl){aiCopySet(gl.getAttribute('data-ai-sel'),true,gl);return;}
   var nt=e.target.closest&&e.target.closest('[data-note-target]');
   if(nt){var b=document.getElementById(nt.getAttribute('data-note-target'));
     if(b){var open=b.classList.toggle('show');nt.classList.toggle('open',open);}return;}
@@ -4758,6 +4945,7 @@ document.addEventListener('click',function(e){
   if(md&&e.target===md)aiClose();
 });
 document.getElementById('aiPasteBtn').addEventListener('click',aiOpenPaste);
+document.getElementById('aiAllBtn').addEventListener('click',function(){aiCopyPending(this);});
 load();
 </script></body></html>`)
 })
