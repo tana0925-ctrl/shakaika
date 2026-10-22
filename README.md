@@ -55,3 +55,6 @@
 - **Status**: 開発中（ローカル動作確認済み）
 - **Tech Stack**: Hono + TypeScript + D1 + Vite + Wrangler
 - **Last Updated**: 2026-02-16
+
+## 前回の学びカード（2026-10-22 追加）
+会員が受付QRで出席すると、前回の「明日以降、試してみたいこと」をカードで表示。任意で「やってみた／ちょっとだけ／まだ／考えが変わった」と一言を残せる（recall_reflections テーブル、migration 0006）。本人と管理者のみ閲覧可。
