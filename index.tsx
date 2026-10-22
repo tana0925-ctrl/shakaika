@@ -1062,6 +1062,7 @@ app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) 
   if (user.id === id) {
     return c.json({ error: '自分自身は削除できません' }, 400)
   }
+  try { await c.env.DB.prepare('DELETE FROM recall_reflections WHERE user_id = ?').bind(id).run() } catch (e) { /* ignore */ }
   await c.env.DB.prepare('DELETE FROM selections WHERE user_id = ?').bind(id).run()
   await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id).run()
   return c.json({ success: true })
@@ -1585,7 +1586,14 @@ app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
     'SELECT * FROM guest_attendances WHERE event_id = ? ORDER BY attended_at'
   ).bind(id).all()
   const guests = (guestsRaw || []).map((g: any) => { const o: any = { ...g }; delete o.token; delete o.edit_token_hash; return o })
-  return c.json({ event, questions, attendances, answers, customAnswers, guests })
+  let recalls: any[] = []
+  try {
+    const r = await db.prepare(
+      'SELECT r.user_id, r.status, r.note, r.source_answer_text, r.updated_at, u.name, u.school_type, se.title AS source_title, se.event_date AS source_date FROM recall_reflections r JOIN users u ON u.id = r.user_id LEFT JOIN events se ON se.id = r.source_event_id WHERE r.event_id = ? ORDER BY r.updated_at'
+    ).bind(id).all()
+    recalls = r.results || []
+  } catch (e) { recalls = [] }
+  return c.json({ event, questions, attendances, answers, customAnswers, guests, recalls })
 })
 
 app.put('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
@@ -1607,6 +1615,7 @@ app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) =
   const id = parseInt(c.req.param('id'))
   if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
   const db = c.env.DB
+  try { await db.prepare('DELETE FROM recall_reflections WHERE event_id = ?').bind(id).run() } catch (e) { /* ignore */ }
   await db.prepare('DELETE FROM custom_answers WHERE event_id = ?').bind(id).run()
   await db.prepare('DELETE FROM survey_answers WHERE event_id = ?').bind(id).run()
   await db.prepare('DELETE FROM survey_questions WHERE event_id = ?').bind(id).run()
@@ -1828,6 +1837,62 @@ app.post('/api/events/:code/survey', authMiddleware, async (c) => {
     'INSERT OR IGNORE INTO points (user_id, event_id, points, reason, fiscal_year) VALUES (?, ?, 1, ?, ?)'
   ).bind(user.id, event.id, 'event_survey', fy).run()
   return c.json({ success: true })
+})
+
+// ========== 前回の学びを思い出すカード（会員のみ・本人と管理者だけが見られる） ==========
+const RECALL_STATUSES = ['tried', 'a_little', 'not_yet', 'changed']
+const RECALL_NOTE_MAX = 100
+// 対象の質問：「明日以降、…試してみたい…」（回によって言い回しが少し違うため部分一致）
+const RECALL_Q_SQL = "q.question_text LIKE '%明日以降%' AND q.question_text LIKE '%試してみたい%'"
+
+async function findRecallSource(db: D1Database, userId: number, cur: any): Promise<any> {
+  return await db.prepare(
+    'SELECT ca.answer_text, ca.question_id, e.id AS source_event_id, e.title, e.event_date ' +
+    'FROM custom_answers ca JOIN survey_questions q ON q.id = ca.question_id JOIN events e ON e.id = ca.event_id ' +
+    "WHERE ca.user_id = ? AND trim(ca.answer_text) <> '' AND " + RECALL_Q_SQL + ' ' +
+    'AND ca.event_id <> ? AND (e.event_date < ? OR (e.event_date = ? AND e.id < ?)) ' +
+    'ORDER BY e.event_date DESC, e.id DESC LIMIT 1'
+  ).bind(userId, cur.id, cur.event_date, cur.event_date, cur.id).first() as any
+}
+
+// 本人：今回の研修会で表示する「前回のカード」（無ければ recall: null）
+app.get('/api/events/:code/recall', authMiddleware, async (c) => {
+  try {
+    const db = c.env.DB
+    const user = c.get('user')
+    const cur = await db.prepare('SELECT id, event_date FROM events WHERE event_code = ?').bind(c.req.param('code')).first() as any
+    if (!cur) return c.json({ recall: null })
+    const src = await findRecallSource(db, user.id, cur)
+    if (!src) return c.json({ recall: null })
+    const mine = await db.prepare('SELECT status, note FROM recall_reflections WHERE user_id = ? AND event_id = ?').bind(user.id, cur.id).first() as any
+    return c.json({ recall: {
+      event_title: src.title, event_date: src.event_date, answer_text: String(src.answer_text || '').slice(0, 2000),
+      status: mine ? mine.status : null, note: mine ? (mine.note || '') : ''
+    } })
+  } catch (e) {
+    return c.json({ recall: null })
+  }
+})
+
+// 本人：押した／書いた内容を保存（今回の出席が記録済みの会員のみ）
+app.post('/api/events/:code/recall', authMiddleware, async (c) => {
+  const db = c.env.DB
+  const user = c.get('user')
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const status = (typeof body.status === 'string' && RECALL_STATUSES.indexOf(body.status) >= 0) ? body.status : null
+  const note = typeof body.note === 'string' ? body.note.trim().slice(0, RECALL_NOTE_MAX) : ''
+  const cur = await db.prepare('SELECT id, event_date FROM events WHERE event_code = ?').bind(c.req.param('code')).first() as any
+  if (!cur) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const att = await db.prepare('SELECT id FROM attendances WHERE event_id = ? AND user_id = ?').bind(cur.id, user.id).first()
+  if (!att) return c.json({ error: 'このイベントの出席記録がありません' }, 403)
+  const src = await findRecallSource(db, user.id, cur)
+  if (!src) return c.json({ error: '前回の回答が見つかりません' }, 404)
+  await db.prepare(
+    "INSERT INTO recall_reflections (user_id, event_id, source_event_id, source_question_id, source_answer_text, status, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now')) " +
+    "ON CONFLICT(user_id, event_id) DO UPDATE SET source_event_id=excluded.source_event_id, source_question_id=excluded.source_question_id, source_answer_text=excluded.source_answer_text, status=excluded.status, note=excluded.note, updated_at=datetime('now')"
+  ).bind(user.id, cur.id, src.source_event_id, src.question_id, String(src.answer_text || '').slice(0, 2000), status, note).run()
+  return c.json({ success: true, status, note })
 })
 
 // ========== Health ==========
@@ -4124,6 +4189,26 @@ app.get('/attend/:code', (c) => {
   .login-prompt { text-align: center; padding: 40px 20px; }
   .login-prompt a { color: var(--header-line); font-weight: 700; }
   #loading { text-align: center; padding: 60px; color: #888; }
+  .recall-card { position: relative; background: #fffaf0; border: 2px solid #f0e6d2; border-left: 6px solid var(--header-line); border-radius: 16px; padding: 18px 16px 14px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
+  .recall-card .rc-close { position: absolute; top: 6px; right: 6px; width: 36px; height: 36px; border: none; background: transparent; color: #aaa; font-size: 20px; cursor: pointer; border-radius: 50%; }
+  .recall-card .rc-close:hover { background: #f5ede0; color: #666; }
+  .recall-card .rc-head { font-family: 'Zen Maru Gothic', sans-serif; font-weight: 700; font-size: 15px; color: #5d4037; padding-right: 30px; line-height: 1.5; }
+  .recall-card .rc-head i { color: var(--header-line); margin-right: 4px; }
+  .recall-card .rc-meta { font-size: 11px; color: #999; margin: 4px 0 10px; }
+  .recall-card .rc-quote { background: #fff; border: 1px dashed #e0d6c8; border-radius: 10px; padding: 12px 14px; font-size: 15px; color: #333; line-height: 1.7; white-space: pre-wrap; word-break: break-word; max-height: 12em; overflow-y: auto; }
+  .recall-card .rc-ask { font-size: 13px; font-weight: 700; color: #5d4037; margin: 14px 0 8px; }
+  .recall-card .rc-ask span { font-weight: 400; color: #999; font-size: 11px; margin-left: 4px; }
+  .recall-card .rc-chips { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .recall-card .rc-chip { padding: 11px 6px; border: 2px solid #e0d6c8; background: #fff; border-radius: 10px; font-size: 14px; font-weight: 700; color: #6d4c41; cursor: pointer; font-family: inherit; line-height: 1.3; }
+  .recall-card .rc-chip i { margin-right: 4px; color: #bcaaa4; }
+  .recall-card .rc-chip.selected { border-color: var(--header-line); background: #fff3e0; color: var(--header-line); }
+  .recall-card .rc-chip.selected i { color: var(--header-line); }
+  .recall-card .rc-hint { font-size: 11px; color: #8d6e63; margin: 8px 0 10px; line-height: 1.6; }
+  .recall-card .rc-note-row { display: flex; gap: 8px; }
+  .recall-card .rc-note-row input { flex: 1; min-width: 0; font-size: 16px; padding: 9px 10px; }
+  .recall-card .rc-send { flex: none; padding: 0 16px; border: none; border-radius: 8px; background: #8d6e63; color: #fff; font-weight: 700; font-size: 14px; cursor: pointer; font-family: inherit; }
+  .recall-card .rc-send:disabled { opacity: 0.6; }
+  .recall-card .rc-status { font-size: 12px; min-height: 18px; margin-top: 6px; text-align: right; }
 </style>
 </head><body>
 <div class="attend-container">
@@ -4409,10 +4494,13 @@ async function loadEvent() {
     }
     var data = await res.json();
     // Auto attend（落ちにくくするため軽いリトライ付き）
+    var attendedOk = !!data.attendance;
     if (!data.attendance) {
-      await postAttendWithRetry(3);
+      attendedOk = await postAttendWithRetry(3);
     }
     renderEvent(data);
+    // 出席の表示が済んでから、前回のカードを後から読み込む（失敗しても出席には影響しない）
+    if (attendedOk) { try { loadRecall(); } catch(eRc) {} }
 
   } catch(e) {
     console.error('loadEvent error', e);
@@ -4471,6 +4559,92 @@ const growthViewpoints = {
     {l:'対外連携',d:'外部講師の紹介・知見の還元'}
   ],
 };
+
+
+// ===== 前回の学びを思い出すカード（会員のみ。失敗しても出席には影響しない） =====
+var RC_LABELS = { tried: 'やってみた', a_little: 'ちょっとだけ', not_yet: 'まだ', changed: '考えが変わった' };
+var RC_ICONS = { tried: 'fa-seedling', a_little: 'fa-shoe-prints', not_yet: 'fa-hourglass-half', changed: 'fa-lightbulb' };
+var RC_ORDER = ['tried', 'a_little', 'not_yet', 'changed'];
+var rcState = { status: null, note: '' };
+var RC_CLOSED_KEY = 'rc_closed_' + CODE;
+
+async function loadRecall() {
+  try {
+    try { if (localStorage.getItem(RC_CLOSED_KEY)) return; } catch(e0) {}
+    var r = await fetchWithTimeout('/api/events/' + CODE + '/recall', { headers: { 'Authorization': 'Bearer ' + token } }, 6000);
+    if (!r.ok) return;
+    var d = await r.json();
+    if (!d || !d.recall) return;
+    renderRecall(d.recall);
+  } catch(e) { /* カードは出さないだけ */ }
+}
+
+function renderRecall(rc) {
+  var c = document.getElementById('content');
+  if (!c || document.getElementById('recallCard')) return;
+  rcState = { status: rc.status || null, note: rc.note || '' };
+  var h = '<button type="button" class="rc-close" id="rcClose" aria-label="閉じる">&times;</button>';
+  h += '<div class="rc-head"><i class="fas fa-bookmark"></i>前回のあなたが書いた<br>「明日以降、試してみたいこと」</div>';
+  h += '<div class="rc-meta">' + escHtml(rc.event_date || '') + '　' + escHtml(rc.event_title || '') + '</div>';
+  h += '<div class="rc-quote">' + escHtml(rc.answer_text || '') + '</div>';
+  h += '<div class="rc-ask">あれから、どうでしたか？<span>（押さなくても大丈夫です）</span></div>';
+  h += '<div class="rc-chips">';
+  RC_ORDER.forEach(function(k) {
+    h += '<button type="button" class="rc-chip' + (rcState.status === k ? ' selected' : '') + '" data-rc="' + k + '"><i class="fas ' + RC_ICONS[k] + '"></i>' + RC_LABELS[k] + '</button>';
+  });
+  h += '</div>';
+  h += '<div class="rc-hint">「まだ」も「考えが変わった」も、どれも大切なふり返りです。</div>';
+  h += '<div class="rc-note-row"><input type="text" id="rcNote" maxlength="100" placeholder="ひとこと（任意）" enterkeyhint="done"><button type="button" class="rc-send" id="rcSend">残す</button></div>';
+  h += '<div class="rc-status" id="rcStatus"></div>';
+  var box = document.createElement('div');
+  box.className = 'recall-card';
+  box.id = 'recallCard';
+  box.innerHTML = h;
+  var sb = c.querySelector('.success-box');
+  if (sb && sb.nextSibling) c.insertBefore(box, sb.nextSibling); else c.appendChild(box);
+  var noteEl = document.getElementById('rcNote');
+  if (noteEl) noteEl.value = rcState.note;
+  box.querySelectorAll('.rc-chip').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var k = btn.getAttribute('data-rc');
+      rcState.status = (rcState.status === k) ? null : k;
+      box.querySelectorAll('.rc-chip').forEach(function(b) { b.classList.toggle('selected', b.getAttribute('data-rc') === rcState.status); });
+      saveRecall();
+    });
+  });
+  var sendBtn = document.getElementById('rcSend');
+  if (sendBtn) sendBtn.addEventListener('click', function() { saveRecall(); });
+  if (noteEl) noteEl.addEventListener('keydown', function(ev) { if (ev.key === 'Enter') { ev.preventDefault(); saveRecall(); } });
+  var cl = document.getElementById('rcClose');
+  if (cl) cl.addEventListener('click', function() {
+    try { localStorage.setItem(RC_CLOSED_KEY, '1'); } catch(e) {}
+    box.remove();
+  });
+}
+
+var rcSaving = false, rcPending = false;
+async function saveRecall() {
+  var st = document.getElementById('rcStatus');
+  var noteEl = document.getElementById('rcNote');
+  rcState.note = noteEl ? String(noteEl.value || '').trim().slice(0, 100) : '';
+  if (rcSaving) { rcPending = true; return; }
+  rcSaving = true;
+  var sendBtn = document.getElementById('rcSend');
+  if (sendBtn) sendBtn.disabled = true;
+  if (st) { st.style.color = '#999'; st.textContent = '保存中...'; }
+  var ok = false;
+  try {
+    var r = await fetchWithTimeout('/api/events/' + CODE + '/recall', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ status: rcState.status, note: rcState.note }) }, 8000);
+    ok = r.ok;
+  } catch(e) { ok = false; }
+  rcSaving = false;
+  if (sendBtn) sendBtn.disabled = false;
+  if (rcPending) { rcPending = false; return saveRecall(); }
+  if (st) {
+    if (ok) { st.style.color = '#2e7d32'; st.innerHTML = '<i class="fas fa-check"></i> 残しました（あなたと運営だけが見られます）'; }
+    else { st.style.color = '#c62828'; st.textContent = 'うまく残せませんでした。もう一度押してみてください。'; }
+  }
+}
 
 function escHtml(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 function renderEvent(data) {
@@ -5604,9 +5778,22 @@ function renderDetail(el, d, tab) {
   var gList = d.guests || [];
   html += '<div class="detail-tab'+(tab==='att'?' active':'')+'" data-dtab="att" data-eid="'+d.event.id+'"><i class="fas fa-users"></i> 出席 ('+(d.attendances.length+gList.length)+')</div>';
   html += '<div class="detail-tab'+(tab==='sur'?' active':'')+'" data-dtab="sur" data-eid="'+d.event.id+'"><i class="fas fa-clipboard"></i> 回答 ('+d.answers.length+')</div>';
+  var rList = d.recalls || [];
+  html += '<div class="detail-tab'+(tab==='rc'?' active':'')+'" data-dtab="rc" data-eid="'+d.event.id+'"><i class="fas fa-bookmark"></i> 前回のふり返り ('+rList.length+')</div>';
   html += '</div>';
 
-  if (tab === 'att') {
+  if (tab === 'rc') {
+    var rcLabel = { tried: 'やってみた', a_little: 'ちょっとだけ', not_yet: 'まだ', changed: '考えが変わった' };
+    if (!rList.length) { html += '<div class="no-data">まだありません（会員が出席時に「前回のカード」で押した／書いた内容がここに出ます）</div>'; }
+    else {
+      html += '<table><tr><th>名前</th><th>前回の「試してみたいこと」</th><th>その後</th><th>ひとこと</th></tr>';
+      rList.forEach(function(r) {
+        var src = '<div style="font-size:10px;color:#999">'+escHtml(r.source_date||'')+' '+escHtml(r.source_title||'')+'</div>'+escHtml(r.source_answer_text||'');
+        html += '<tr><td>'+escHtml(r.name)+'</td><td style="font-size:11px;line-height:1.5;max-width:260px">'+src+'</td><td style="white-space:nowrap;font-size:12px">'+(r.status ? escHtml(rcLabel[r.status]||r.status) : '-')+'</td><td style="font-size:11px;max-width:200px">'+(r.note ? escHtml(r.note) : '-')+'</td></tr>';
+      });
+      html += '</table>';
+    }
+  } else if (tab === 'att') {
     if (!d.attendances.length && !gList.length) { html += '<div class="no-data">まだ出席者がいません</div>'; }
     else {
       html += '<table><tr><th>#</th><th>名前</th><th>校種</th><th>学校名</th><th>出席時刻</th></tr>';
