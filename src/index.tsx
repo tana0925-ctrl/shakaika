@@ -975,6 +975,10 @@ app.get('/api/me/history', authMiddleware, async (c) => {
     })
   }
 
+  try {
+    const { results: scRows } = await db.prepare('SELECT event_id, consent FROM share_consents WHERE respondent_type = ? AND respondent_id = ?').bind('member', user.id).all() as any
+    for (const r of (scRows || [])) { const ev = map.get(r.event_id); if (ev) ev.share_consent = r.consent }
+  } catch (e) { /* 表示だけなので無視 */ }
   return c.json({ fiscal_year: fiscalYear, events: Array.from(map.values()) })
 })
 
@@ -1063,6 +1067,8 @@ app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) 
     return c.json({ error: '自分自身は削除できません' }, 400)
   }
   try { await c.env.DB.prepare('DELETE FROM recall_reflections WHERE user_id = ?').bind(id).run() } catch (e) { /* ignore */ }
+  try { await c.env.DB.prepare("DELETE FROM shared_insights WHERE respondent_type = 'member' AND respondent_id = ?").bind(id).run() } catch (e) { /* ignore */ }
+  try { await c.env.DB.prepare("DELETE FROM share_consents WHERE respondent_type = 'member' AND respondent_id = ?").bind(id).run() } catch (e) { /* ignore */ }
   await c.env.DB.prepare('DELETE FROM selections WHERE user_id = ?').bind(id).run()
   await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id).run()
   return c.json({ success: true })
@@ -1616,6 +1622,8 @@ app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) =
   if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
   const db = c.env.DB
   try { await db.prepare('DELETE FROM recall_reflections WHERE event_id = ?').bind(id).run() } catch (e) { /* ignore */ }
+  try { await db.prepare('DELETE FROM shared_insights WHERE event_id = ?').bind(id).run() } catch (e) { /* ignore */ }
+  try { await db.prepare('DELETE FROM share_consents WHERE event_id = ?').bind(id).run() } catch (e) { /* ignore */ }
   await db.prepare('DELETE FROM custom_answers WHERE event_id = ?').bind(id).run()
   await db.prepare('DELETE FROM survey_answers WHERE event_id = ?').bind(id).run()
   await db.prepare('DELETE FROM survey_questions WHERE event_id = ?').bind(id).run()
@@ -1744,7 +1752,8 @@ app.post('/api/events/:code/guest-status', async (c) => {
   await ensureRequiredColumn(db)
   const { results: questions } = await db.prepare('SELECT id, question_text, question_type, options, sort_order' + (_reqColOk ? ', required' : '') + ' FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
   const { results: answers } = await db.prepare('SELECT question_id, answer_text FROM guest_answers WHERE guest_id = ? AND event_id = ?').bind(guest.id, event.id).all()
-  return c.json({ event: { title: event.title, event_date: event.event_date }, guest: { id: guest.id, name: guest.name }, guest_token: cred.tok, questions, answers })
+  const shareConsent = await getShareConsent(db, event.id, 'guest', guest.id)
+  return c.json({ event: { title: event.title, event_date: event.event_date }, guest: { id: guest.id, name: guest.name }, guest_token: cred.tok, questions, answers, share_consent: shareConsent })
 })
 
 // （廃止）名前・学校名での照合：他人が回答を見たり書き換えたりできたため削除
@@ -1771,6 +1780,10 @@ app.post('/api/events/:code/guest-survey', async (c) => {
     if (!qid || !validIds.has(qid)) continue
     const text = (a && typeof a.answer_text === 'string') ? a.answer_text.slice(0, 2000) : ''
     await db.prepare("INSERT INTO guest_answers (guest_id, event_id, question_id, answer_text, answered_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(guest_id, question_id) DO UPDATE SET answer_text=excluded.answer_text, answered_at=datetime('now')").bind(guest.id, event.id, qid, text).run()
+  }
+  // 紹介の同意（同意欄つきのフォームから送られたときだけ。失敗しても回答は成立）
+  if (Object.prototype.hasOwnProperty.call(body, 'share_consent')) {
+    try { const sc = parseShareConsent(body.share_consent); if (sc) await saveShareConsent(db, event.id, 'guest', guest.id, sc) } catch (e) { /* ignore */ }
   }
   return c.json({ success: true })
 })
@@ -1823,7 +1836,8 @@ app.post('/api/events/:code/survey', authMiddleware, async (c) => {
   const user = c.get('user')
   const att = await db.prepare('SELECT id FROM attendances WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
   if (!att) return c.json({ error: 'このイベントの出席記録がありません' }, 403)
-  const { satisfaction, comment, custom_answers } = await c.req.json()
+  const reqBody: any = await c.req.json()
+  const { satisfaction, comment, custom_answers } = reqBody
   await db.prepare(`INSERT INTO survey_answers (event_id, user_id, satisfaction, comment, answered_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(event_id, user_id) DO UPDATE SET satisfaction=excluded.satisfaction, comment=excluded.comment, answered_at=datetime('now')`).bind(event.id, user.id, satisfaction || null, comment || '').run()
   if (custom_answers && Array.isArray(custom_answers)) {
     for (const ca of custom_answers) {
@@ -1836,6 +1850,10 @@ app.post('/api/events/:code/survey', authMiddleware, async (c) => {
   await db.prepare(
     'INSERT OR IGNORE INTO points (user_id, event_id, points, reason, fiscal_year) VALUES (?, ?, 1, ?, ?)'
   ).bind(user.id, event.id, 'event_survey', fy).run()
+  // 紹介の同意（同意欄つきのフォームから送られたときだけ。失敗しても回答は成立）
+  if (reqBody && Object.prototype.hasOwnProperty.call(reqBody, 'share_consent')) {
+    try { const sc = parseShareConsent(reqBody.share_consent); if (sc) await saveShareConsent(db, event.id, 'member', user.id, sc) } catch (e) { /* ignore */ }
+  }
   return c.json({ success: true })
 })
 
@@ -1895,6 +1913,176 @@ app.post('/api/events/:code/recall', authMiddleware, async (c) => {
   return c.json({ success: true, status, note })
 })
 
+// ========== みんなの気づき（振り返りの紹介） ==========
+// 回答フォームの最後の任意の同意欄（anon=名前なし / named=名前あり / none=選ばなかった）。
+// 同意の行が無い回答（この機能より前の回答）は紹介の対象外。表示は毎回、今の同意を確認する。
+const SHARE_CONSENTS = ['anon', 'named', 'none']
+const INSIGHT_BODY_MAX = 1000
+
+function parseShareConsent(v: any): string | null {
+  if (v === null || v === undefined || v === '') return 'none'
+  if (typeof v !== 'string') return null
+  return SHARE_CONSENTS.indexOf(v) >= 0 ? v : null
+}
+async function saveShareConsent(db: D1Database, eventId: number, rtype: string, rid: number, consent: string) {
+  await db.prepare(
+    "INSERT INTO share_consents (event_id, respondent_type, respondent_id, consent, created_at, updated_at) VALUES (?,?,?,?,datetime('now'),datetime('now')) " +
+    "ON CONFLICT(event_id, respondent_type, respondent_id) DO UPDATE SET consent=excluded.consent, updated_at=datetime('now')"
+  ).bind(eventId, rtype, rid, consent).run()
+}
+async function getShareConsent(db: D1Database, eventId: number, rtype: string, rid: number): Promise<string | null> {
+  try {
+    const r = await db.prepare('SELECT consent FROM share_consents WHERE event_id = ? AND respondent_type = ? AND respondent_id = ?').bind(eventId, rtype, rid).first() as any
+    return r ? String(r.consent) : null
+  } catch (e) { return null }
+}
+
+// 表示用：採用済みで、今も同意がある紹介文（名前あり同意のときだけ名前。学校名は出さない）
+const INSIGHT_VIEW_SQL =
+  'SELECT si.id, si.event_id, si.body, si.created_at, sc.consent, q.question_text, q.sort_order, ' +
+  "CASE WHEN sc.consent = 'named' THEN (CASE WHEN si.respondent_type = 'member' THEN u.name ELSE g.name END) ELSE NULL END AS name " +
+  'FROM shared_insights si ' +
+  'JOIN share_consents sc ON sc.event_id = si.event_id AND sc.respondent_type = si.respondent_type AND sc.respondent_id = si.respondent_id ' +
+  "LEFT JOIN users u ON si.respondent_type = 'member' AND u.id = si.respondent_id " +
+  "LEFT JOIN guest_attendances g ON si.respondent_type = 'guest' AND g.id = si.respondent_id " +
+  'LEFT JOIN survey_questions q ON q.id = si.question_id ' +
+  "WHERE sc.consent IN ('anon','named') "
+function insightOut(r: any) {
+  return { body: String(r.body || ''), name: r.consent === 'named' && r.name ? String(r.name) : null, question_text: r.question_text ? String(r.question_text) : '' }
+}
+
+// 会員：前回の研修会の「みんなの気づき」（受付QRで出席したときの画面用）。無ければ null
+app.get('/api/events/:code/insights-prev', authMiddleware, async (c) => {
+  try {
+    const db = c.env.DB
+    const cur = await db.prepare('SELECT id, event_date FROM events WHERE event_code = ?').bind(c.req.param('code')).first() as any
+    if (!cur) return c.json({ prev: null })
+    const prev = await db.prepare(
+      'SELECT e.id, e.title, e.event_date FROM events e WHERE (e.event_date < ? OR (e.event_date = ? AND e.id < ?)) AND e.id <> ? ' +
+      "AND EXISTS (SELECT 1 FROM shared_insights si JOIN share_consents sc ON sc.event_id = si.event_id AND sc.respondent_type = si.respondent_type AND sc.respondent_id = si.respondent_id WHERE si.event_id = e.id AND sc.consent IN ('anon','named')) " +
+      'ORDER BY e.event_date DESC, e.id DESC LIMIT 1'
+    ).bind(cur.event_date, cur.event_date, cur.id, cur.id).first() as any
+    if (!prev) return c.json({ prev: null })
+    const { results } = await db.prepare(INSIGHT_VIEW_SQL + 'AND si.event_id = ? ORDER BY q.sort_order, si.id').bind(prev.id).all() as any
+    return c.json({ prev: { title: prev.title, event_date: prev.event_date, items: (results || []).map(insightOut) } })
+  } catch (e) {
+    return c.json({ prev: null })
+  }
+})
+
+// 会員：マイページ「みんなの気づき」（研修会ごと・新しい順）
+app.get('/api/insights', authMiddleware, async (c) => {
+  try {
+    const db = c.env.DB
+    const { results } = await db.prepare(
+      'SELECT x.*, e.title AS event_title, e.event_date FROM (' + INSIGHT_VIEW_SQL + ') x JOIN events e ON e.id = x.event_id ORDER BY e.event_date DESC, e.id DESC, x.sort_order, x.id'
+    ).all() as any
+    const map = new Map<number, any>()
+    for (const r of (results || [])) {
+      if (!map.has(r.event_id)) map.set(r.event_id, { title: r.event_title, event_date: r.event_date, items: [] as any[] })
+      map.get(r.event_id).items.push(insightOut(r))
+    }
+    return c.json({ events: Array.from(map.values()) })
+  } catch (e) {
+    return c.json({ events: [], error: '読み込めませんでした' })
+  }
+})
+
+// 会員本人：回答済みの会の「紹介の同意」を変更（同意欄つきで回答した会のみ）
+app.post('/api/events/:code/share-consent', authMiddleware, async (c) => {
+  const db = c.env.DB
+  const user = c.get('user')
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const consent = parseShareConsent(body.share_consent)
+  if (!consent) return c.json({ error: '入力が不正です' }, 400)
+  const ev = await db.prepare('SELECT id FROM events WHERE event_code = ?').bind(c.req.param('code')).first() as any
+  if (!ev) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const cur = await getShareConsent(db, ev.id, 'member', user.id)
+  if (!cur) return c.json({ error: 'この会の回答には紹介の同意欄がありません' }, 404)
+  await saveShareConsent(db, ev.id, 'member', user.id, consent)
+  return c.json({ success: true, share_consent: consent })
+})
+
+// 管理者：各回の「同意した人の振り返り」と採用状況（同意していない回答は返さない）
+app.get('/api/admin/events/:id/insights', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const db = c.env.DB
+  const { results: qs } = await db.prepare("SELECT id, question_text, sort_order FROM survey_questions WHERE event_id = ? AND question_type = 'text' ORDER BY sort_order").bind(id).all() as any
+  const { results: cons } = await db.prepare(
+    'SELECT sc.respondent_type, sc.respondent_id, sc.consent, ' +
+    "CASE WHEN sc.respondent_type = 'member' THEN u.name ELSE g.name END AS name " +
+    'FROM share_consents sc ' +
+    "LEFT JOIN users u ON sc.respondent_type = 'member' AND u.id = sc.respondent_id " +
+    "LEFT JOIN guest_attendances g ON sc.respondent_type = 'guest' AND g.id = sc.respondent_id AND g.event_id = sc.event_id " +
+    "WHERE sc.event_id = ? AND sc.consent IN ('anon','named') ORDER BY sc.updated_at"
+  ).bind(id).all() as any
+  const { results: mAns } = await db.prepare(
+    "SELECT ca.user_id AS rid, ca.question_id, ca.answer_text FROM custom_answers ca JOIN share_consents sc ON sc.event_id = ca.event_id AND sc.respondent_type = 'member' AND sc.respondent_id = ca.user_id " +
+    "JOIN survey_questions q ON q.id = ca.question_id AND q.question_type = 'text' WHERE ca.event_id = ? AND sc.consent IN ('anon','named') AND trim(ca.answer_text) <> ''"
+  ).bind(id).all() as any
+  const { results: gAns } = await db.prepare(
+    "SELECT ga.guest_id AS rid, ga.question_id, ga.answer_text FROM guest_answers ga JOIN share_consents sc ON sc.event_id = ga.event_id AND sc.respondent_type = 'guest' AND sc.respondent_id = ga.guest_id " +
+    "JOIN survey_questions q ON q.id = ga.question_id AND q.question_type = 'text' WHERE ga.event_id = ? AND sc.consent IN ('anon','named') AND trim(ga.answer_text) <> ''"
+  ).bind(id).all() as any
+  const { results: ad } = await db.prepare('SELECT id, respondent_type, respondent_id, question_id, body, updated_at FROM shared_insights WHERE event_id = ?').bind(id).all() as any
+  const key = (t: string, r: number) => t + ':' + r
+  const ansMap = new Map<string, any[]>()
+  for (const a of (mAns || [])) { const k = key('member', a.rid); if (!ansMap.has(k)) ansMap.set(k, []); ansMap.get(k)!.push(a) }
+  for (const a of (gAns || [])) { const k = key('guest', a.rid); if (!ansMap.has(k)) ansMap.set(k, []); ansMap.get(k)!.push(a) }
+  const adMap = new Map<string, any>()
+  for (const a of (ad || [])) adMap.set(key(a.respondent_type, a.respondent_id) + ':' + a.question_id, a)
+  const people: any[] = []
+  for (const p of (cons || [])) {
+    const k = key(p.respondent_type, p.respondent_id)
+    const answers: any[] = []
+    for (const q of (qs || [])) {
+      const a = (ansMap.get(k) || []).find((x: any) => x.question_id === q.id)
+      if (!a) continue
+      const adopted = adMap.get(k + ':' + q.id)
+      answers.push({ question_id: q.id, question_text: q.question_text, answer_text: a.answer_text, adopted: adopted ? { id: adopted.id, body: adopted.body } : null })
+    }
+    if (answers.length) people.push({ respondent_type: p.respondent_type, respondent_id: p.respondent_id, name: p.name || '', consent: p.consent, answers })
+  }
+  return c.json({ people, adopted_count: people.reduce((n, p) => n + p.answers.filter((a: any) => a.adopted).length, 0) })
+})
+
+// 管理者：採用（新規）・文面の更新
+app.post('/api/admin/events/:id/insights', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const rtype = body.respondent_type === 'guest' ? 'guest' : (body.respondent_type === 'member' ? 'member' : '')
+  const rid = parseInt(String(body.respondent_id || ''), 10) || 0
+  const qid = parseInt(String(body.question_id || ''), 10) || 0
+  const text = typeof body.body === 'string' ? body.body.trim() : ''
+  if (!rtype || !rid || !qid) return c.json({ error: '入力が不正です' }, 400)
+  if (!text) return c.json({ error: '紹介する文面が空です' }, 400)
+  if (text.length > INSIGHT_BODY_MAX) return c.json({ error: '文面が長すぎます（' + INSIGHT_BODY_MAX + '字まで）' }, 400)
+  const db = c.env.DB
+  const consent = await getShareConsent(db, id, rtype, rid)
+  if (consent !== 'anon' && consent !== 'named') return c.json({ error: 'この方は紹介に同意していません' }, 403)
+  const q = await db.prepare("SELECT id FROM survey_questions WHERE id = ? AND event_id = ? AND question_type = 'text'").bind(qid, id).first()
+  if (!q) return c.json({ error: '質問が見つかりません' }, 404)
+  const user = c.get('user')
+  await db.prepare(
+    "INSERT INTO shared_insights (event_id, respondent_type, respondent_id, question_id, body, adopted_by, created_at, updated_at) VALUES (?,?,?,?,?,?,datetime('now'),datetime('now')) " +
+    "ON CONFLICT(event_id, respondent_type, respondent_id, question_id) DO UPDATE SET body=excluded.body, adopted_by=excluded.adopted_by, updated_at=datetime('now')"
+  ).bind(id, rtype, rid, qid, text, user.id).run()
+  const row = await db.prepare('SELECT id FROM shared_insights WHERE event_id = ? AND respondent_type = ? AND respondent_id = ? AND question_id = ?').bind(id, rtype, rid, qid).first() as any
+  return c.json({ success: true, id: row ? row.id : null })
+})
+
+// 管理者：採用の取り消し（紹介文だけを消す。元の回答はそのまま）
+app.delete('/api/admin/insights/:iid', authMiddleware, adminMiddleware, async (c) => {
+  const iid = parseInt(c.req.param('iid'))
+  if (isNaN(iid)) return c.json({ error: '不正なIDです' }, 400)
+  await c.env.DB.prepare('DELETE FROM shared_insights WHERE id = ?').bind(iid).run()
+  return c.json({ success: true })
+})
+
 // ========== Health ==========
 app.get('/api/health', (c) => c.json({ status: 'ok' }))
 
@@ -1918,6 +2106,50 @@ const commonHead = `
   * { box-sizing: border-box; }
   body { font-family: 'Noto Sans JP', sans-serif; color: var(--text-main); background-color: var(--bg-color); padding: 0; margin: 0; line-height: 1.5; }
 </style>`
+
+
+// ===== みんなの気づき：同意欄（回答フォームの最後）の見た目と動き（会員・ゲスト共通） =====
+const SHARE_CONSENT_CSS = `
+  .sc-box { margin: 18px 0 14px; padding: 12px 14px; background: #fffaf0; border: 1px dashed #e0d6c8; border-radius: 12px; text-align: left; }
+  .sc-lead { font-size: 11px; color: #999; margin-bottom: 8px; line-height: 1.5; }
+  .sc-opt { display: flex !important; align-items: center; gap: 10px; padding: 10px 12px; border: 2px solid #e0d6c8; border-radius: 10px; background: #fff; margin: 0 0 8px !important; cursor: pointer; font-size: 14px !important; font-weight: 700; color: #6d4c41 !important; line-height: 1.4; user-select: none; }
+  .sc-opt input { width: 20px; height: 20px; accent-color: #d84315; flex: none; margin: 0; }
+  .sc-opt.on { border-color: #d84315; background: #fff3e0; color: #d84315 !important; }
+  .sc-note { font-size: 11px; color: #8d6e63; line-height: 1.6; }
+  .sc-status { font-size: 11px; min-height: 16px; text-align: right; }
+`
+const SHARE_CONSENT_JS = `
+function scBlockHtml(prefix, cur) {
+  function opt(v, label) {
+    var on = cur === v;
+    return '<label class="sc-opt' + (on ? ' on' : '') + '"><input type="checkbox" class="sc-cb" data-sc="' + prefix + '" value="' + v + '"' + (on ? ' checked' : '') + '>' + label + '</label>';
+  }
+  return '<div class="sc-box" id="' + prefix + '_box">'
+    + '<div class="sc-lead">紹介してもよい場合だけ、どちらかを選んでください（任意）</div>'
+    + opt('anon', '名前なしで紹介してもよい')
+    + opt('named', '名前ありで紹介してもよい')
+    + '<div class="sc-note">※ いただいた振り返りの中から、一部をご紹介させていただきます。</div>'
+    + '</div>';
+}
+function scBind(root, prefix, onChange) {
+  var box = root ? root.querySelector('#' + prefix + '_box') : null;
+  if (!box) return;
+  var cbs = box.querySelectorAll('.sc-cb');
+  cbs.forEach(function(cb) {
+    cb.addEventListener('change', function() {
+      if (cb.checked) cbs.forEach(function(o) { if (o !== cb) o.checked = false; });
+      cbs.forEach(function(o) { o.parentElement.classList.toggle('on', o.checked); });
+      if (onChange) onChange(scValue(root, prefix));
+    });
+  });
+}
+function scValue(root, prefix) {
+  var box = root ? root.querySelector('#' + prefix + '_box') : null;
+  if (!box) return null;
+  var on = box.querySelector('.sc-cb:checked');
+  return on ? on.value : '';
+}
+`
 
 // --- Login / Register Page ---
 // --- Forgot Password Page ---
@@ -2266,6 +2498,13 @@ app.get('/mypage', (c) => {
   .notes-meta { font-size: 12px; color: #888; margin-top: 6px; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 
   .history-card { background: #fff; border: 2px solid #f0e6d2; border-radius: 12px; padding: 16px; margin-top: 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+  .insights-link { display: flex; align-items: center; gap: 12px; background: #fff; border: 2px solid #c8e6c9; border-left: 6px solid #66bb6a; border-radius: 12px; padding: 14px 16px; margin-top: 18px; text-decoration: none; color: #444; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+  .insights-link:hover { background: #f9fbf6; }
+  .insights-link .il-icon { font-size: 22px; color: #66bb6a; flex: none; }
+  .insights-link .il-title { font-family: 'Zen Maru Gothic', sans-serif; font-weight: 700; color: #2e7d32; font-size: 16px; }
+  .insights-link .il-sub { font-size: 12px; color: #888; margin-top: 2px; }
+  .insights-link .il-arrow { margin-left: auto; color: #a5d6a7; }
+${SHARE_CONSENT_CSS}
   .history-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .history-header h2 { margin: 0; font-family: 'Zen Maru Gothic', sans-serif; color: #2e7d32; font-size: 16px; display: flex; align-items: center; gap: 8px; }
   .fy-select { padding: 6px 10px; border: 2px solid #ddd; border-radius: 8px; font-family: inherit; font-size: 13px; }
@@ -2706,6 +2945,12 @@ app.get('/mypage', (c) => {
     <div class="save-status" id="saveStatus"></div>
   </div>
 
+  <a class="insights-link" href="/mypage/insights">
+    <i class="fas fa-comments il-icon"></i>
+    <div><div class="il-title">みんなの気づき</div><div class="il-sub">研修会の振り返りから、紹介に同意いただいた声を集めています</div></div>
+    <i class="fas fa-chevron-right il-arrow"></i>
+  </a>
+
   <div class="history-card">
     <div class="history-header">
       <h2><i class="fas fa-calendar-check"></i> 参加した会・アンケート（自分用）</h2>
@@ -2718,6 +2963,7 @@ app.get('/mypage', (c) => {
 </div>
 
 <script>
+${SHARE_CONSENT_JS}
 const token = localStorage.getItem('token');
 let user = JSON.parse(localStorage.getItem('user') || 'null');
 
@@ -3023,11 +3269,32 @@ function renderHistory(events) {
       +   '<div class="event-detail" id="' + esc(detailId) + '">'
       +     (comment ? '<div style="color:#555;white-space:pre-wrap">' + comment + '</div>' : '')
       +     qaHtml
+      +     (ev.share_consent ? '<div style="margin-top:10px;font-weight:700;color:#555;font-size:12px">紹介について（あとから変えられます）</div>' + scBlockHtml('hsc_' + ev.event_id, ev.share_consent) + '<div class="sc-status" id="hscStatus_' + ev.event_id + '"></div>' : '')
       +   '</div>'
       + '</div>';
   }
 
   root.innerHTML = html;
+
+  // 紹介の同意の変更（その場で保存）
+  for (const ev0 of events) {
+    const ev = ev0 || {};
+    if (!ev.share_consent) continue;
+    try {
+      scBind(root, 'hsc_' + ev.event_id, async (v) => {
+        const stEl = document.getElementById('hscStatus_' + ev.event_id);
+        if (stEl) { stEl.style.color = '#999'; stEl.textContent = '保存中...'; }
+        try {
+          const r = await fetchWithTimeout('/api/events/' + encodeURIComponent(ev.event_code) + '/share-consent', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ share_consent: v || 'none' }) }, 8000);
+          if (!r.ok) throw new Error('ng');
+          ev.share_consent = v || 'none';
+          if (stEl) { stEl.style.color = '#2e7d32'; stEl.textContent = '保存しました'; }
+        } catch (e) {
+          if (stEl) { stEl.style.color = '#c62828'; stEl.textContent = '保存できませんでした。もう一度お試しください。'; }
+        }
+      });
+    } catch (e) {}
+  }
 
   // Attach toggle handlers
   root.querySelectorAll('.toggle-btn').forEach((btn) => {
@@ -3113,6 +3380,7 @@ function openAnswerForm(eventId) {
     }
     html += '</div>';
   }
+  html += scBlockHtml('msc_' + eventId, null);
   html += '<button type="button" class="answer-btn" id="mpSubmit_' + eventId + '" style="padding:10px 24px;font-size:13px"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
   html += '<div id="mpStatus_' + eventId + '" style="font-size:12px;margin-top:8px;color:#c62828"></div>';
   det.innerHTML = html;
@@ -3138,10 +3406,16 @@ function openAnswerForm(eventId) {
       det.querySelectorAll('#mq_' + qid + ' .mp-star').forEach((s, i) => s.classList.toggle('active', i < v));
     });
   });
+  try { scBind(det, 'msc_' + eventId); } catch (eSc) {}
   const sb = document.getElementById('mpSubmit_' + eventId);
   if (sb) sb.addEventListener('click', () => submitMypageSurvey(eventId));
 }
 
+function mpSurveyPayload(eventId, custom_answers) {
+  const p = { satisfaction: null, comment: '', custom_answers: custom_answers };
+  try { const v = scValue(document.getElementById('detail_' + eventId), 'msc_' + eventId); if (v !== null) p.share_consent = v; } catch (e) {}
+  return p;
+}
 async function submitMypageSurvey(eventId) {
   const ev = historyEventsById[eventId];
   if (!ev) return;
@@ -3161,7 +3435,7 @@ async function submitMypageSurvey(eventId) {
     const res = await fetchWithTimeout('/api/events/' + encodeURIComponent(ev.event_code) + '/survey', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ satisfaction: null, comment: '', custom_answers: custom_answers })
+      body: JSON.stringify(mpSurveyPayload(eventId, custom_answers))
     }, 12000);
     if (res.ok) { await loadHistory(); return; }
     let d = {};
@@ -4209,6 +4483,18 @@ app.get('/attend/:code', (c) => {
   .recall-card .rc-send { flex: none; padding: 0 16px; border: none; border-radius: 8px; background: #8d6e63; color: #fff; font-weight: 700; font-size: 14px; cursor: pointer; font-family: inherit; }
   .recall-card .rc-send:disabled { opacity: 0.6; }
   .recall-card .rc-status { font-size: 12px; min-height: 18px; margin-top: 6px; text-align: right; }
+  .insight-card { background: #fff; border: 2px solid #f0e6d2; border-left: 6px solid #66bb6a; border-radius: 16px; padding: 16px 16px 12px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
+  .insight-card .ic-head { font-family: 'Zen Maru Gothic', sans-serif; font-weight: 700; font-size: 15px; color: #2e7d32; }
+  .insight-card .ic-head i { margin-right: 4px; }
+  .insight-card .ic-meta { font-size: 11px; color: #999; margin: 2px 0 10px; }
+  .insight-card .ic-item { background: #f9fbf6; border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+  .insight-card .ic-q { font-size: 10px; color: #9e9e9e; margin-bottom: 2px; }
+  .insight-card .ic-body { font-size: 14px; color: #333; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+  .insight-card .ic-name { font-size: 12px; color: #6d4c41; text-align: right; margin-top: 4px; }
+  .insight-card .ic-more { width: 100%; padding: 9px; border: 1px dashed #c8e6c9; background: #fff; color: #2e7d32; border-radius: 10px; font-size: 13px; font-weight: 700; font-family: inherit; cursor: pointer; }
+  .insight-card .ic-link { display: block; text-align: right; font-size: 12px; color: #2e7d32; margin-top: 8px; text-decoration: none; font-weight: 700; }
+  .insight-card .ic-foot { font-size: 10px; color: #aaa; margin-top: 6px; }
+${SHARE_CONSENT_CSS}
 </style>
 </head><body>
 <div class="attend-container">
@@ -4234,6 +4520,7 @@ app.get('/attend/:code', (c) => {
   <div id="content" style="display:none"></div>
 </div>
 <script>
+${SHARE_CONSENT_JS}
 const CODE = '${code}';
 const token = localStorage.getItem('token');
 let user = JSON.parse(localStorage.getItem('user') || 'null');
@@ -4402,6 +4689,7 @@ function renderGuestSurveyForm(d) {
     }
     html += '</div>';
   }
+  html += scBlockHtml('gsc', d.share_consent || null);
   html += '<button type="button" class="btn btn-primary" id="gSurveyBtn"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
   html += '<div id="gSurveyStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>';
   html += '</div>';
@@ -4427,10 +4715,16 @@ function renderGuestSurveyForm(d) {
       lp.querySelectorAll('#gq_' + qid + ' .g-star').forEach(function(st, idx) { st.classList.toggle('active', idx < v); });
     });
   });
+  try { scBind(lp, 'gsc'); } catch(eSc) {}
   var gb = document.getElementById('gSurveyBtn');
   if (gb) gb.addEventListener('click', function() { submitGuestSurvey(d); });
 }
 
+function gSurveyPayload(saved, answers) {
+  var p = { guest_id: saved.gid, guest_token: saved.gtoken, answers: answers };
+  try { var v = scValue(document.getElementById('loginPrompt'), 'gsc'); if (v !== null) p.share_consent = v; } catch(e) {}
+  return p;
+}
 async function submitGuestSurvey(d) {
   var saved = gSaved() || {};
   var st = document.getElementById('gSurveyStatus');
@@ -4446,7 +4740,7 @@ async function submitGuestSurvey(d) {
   if (gb) gb.disabled = true;
   if (st) { st.style.color = '#888'; st.textContent = '送信中...'; }
   try {
-    var res = await fetch('/api/events/' + CODE + '/guest-survey', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: saved.gid, guest_token: saved.gtoken, answers: answers }) });
+    var res = await fetch('/api/events/' + CODE + '/guest-survey', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(gSurveyPayload(saved, answers)) });
     var d2 = {};
     try { d2 = await res.json(); } catch(e) {}
     if (res.ok && d2.success) {
@@ -4501,6 +4795,8 @@ async function loadEvent() {
     renderEvent(data);
     // 出席の表示が済んでから、前回のカードを後から読み込む（失敗しても出席には影響しない）
     if (attendedOk) { try { loadRecall(); } catch(eRc) {} }
+    // 前回のみんなの気づき（会員のみ・失敗しても出席には影響しない）
+    if (attendedOk) { try { loadPrevInsights(); } catch(eIn) {} }
 
   } catch(e) {
     console.error('loadEvent error', e);
@@ -4644,6 +4940,42 @@ async function saveRecall() {
   }
 }
 
+// ===== 前回のみんなの気づき（ログインした会員だけ。失敗しても出席には影響しない） =====
+async function loadPrevInsights() {
+  try {
+    var r = await fetchWithTimeout('/api/events/' + CODE + '/insights-prev', { headers: { 'Authorization': 'Bearer ' + token } }, 6000);
+    if (!r.ok) return;
+    var d = await r.json();
+    if (!d || !d.prev || !d.prev.items || !d.prev.items.length) return;
+    renderPrevInsights(d.prev);
+  } catch(e) { /* 出さないだけ */ }
+}
+function renderPrevInsights(pv) {
+  var c = document.getElementById('content');
+  if (!c || document.getElementById('insightCard')) return;
+  var SHOW = 3;
+  var h = '<div class="ic-head"><i class="fas fa-comments"></i>前回のみんなの気づき</div>';
+  h += '<div class="ic-meta">' + escHtml(pv.event_date || '') + '　' + escHtml(pv.title || '') + '</div>';
+  pv.items.forEach(function(it, i) {
+    h += '<div class="ic-item"' + (i >= SHOW ? ' data-more="1" style="display:none"' : '') + '>'
+      + (it.question_text ? '<div class="ic-q">' + escHtml(it.question_text) + '</div>' : '')
+      + '<div class="ic-body">' + escHtml(it.body || '') + '</div>'
+      + (it.name ? '<div class="ic-name">― ' + escHtml(it.name) + ' さん</div>' : '')
+      + '</div>';
+  });
+  if (pv.items.length > SHOW) h += '<button type="button" class="ic-more" id="icMore">ほかの気づきも見る（あと' + (pv.items.length - SHOW) + '件）</button>';
+  h += '<a class="ic-link" href="/mypage/insights">これまでの「みんなの気づき」 <i class="fas fa-chevron-right"></i></a>';
+  h += '<div class="ic-foot">会員の方だけが見られます</div>';
+  var box = document.createElement('div');
+  box.className = 'insight-card';
+  box.id = 'insightCard';
+  box.innerHTML = h;
+  var after = document.getElementById('recallCard') || c.querySelector('.success-box');
+  if (after && after.nextSibling) c.insertBefore(box, after.nextSibling); else c.appendChild(box);
+  var mb = document.getElementById('icMore');
+  if (mb) mb.addEventListener('click', function() { box.querySelectorAll('[data-more]').forEach(function(x) { x.style.display = ''; }); mb.remove(); });
+}
+
 function escHtml(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 function renderEvent(data) {
   const ev = data.event;
@@ -4707,6 +5039,70 @@ async function submitSurvey() {
     document.getElementById('content').innerHTML = '<div class="success-box"><i class="fas fa-heart"></i><p>回答ありがとうございました！</p></div><a href="/mypage" class="btn btn-secondary" style="display:block;text-align:center;text-decoration:none"><i class="fas fa-home"></i> マイページへ</a>';
   } else { alert('送信に失敗しました'); }
 }
+</script>
+</body></html>`)
+})
+
+// --- 会員：みんなの気づき（ログインした会員だけが読める） ---
+app.get('/mypage/insights', (c) => {
+  return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
+<meta name="robots" content="noindex, nofollow">
+<title>みんなの気づき - 社会科同好会</title>
+<style>
+  .top-bar { background: #fff; border-bottom: 3px solid var(--header-line); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; gap: 8px; }
+  .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); font-size: 17px; font-weight: 700; }
+  .back { padding: 7px 14px; border-radius: 8px; background: #fff3e0; color: #e65100; font-size: 13px; font-weight: 700; text-decoration: none; white-space: nowrap; }
+  .wrap { max-width: 680px; margin: 16px auto 40px; padding: 0 14px; }
+  .lead { background: #f1f8e9; border-left: 4px solid #66bb6a; border-radius: 0 10px 10px 0; padding: 10px 14px; font-size: 13px; color: #33691e; line-height: 1.7; margin-bottom: 16px; }
+  .ev { background: #fff; border: 2px solid #f0e6d2; border-radius: 14px; padding: 14px 14px 8px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+  .ev-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; border-bottom: 2px dashed #e8f5e9; padding-bottom: 6px; margin-bottom: 10px; }
+  .ev-title { font-family: 'Zen Maru Gothic', sans-serif; font-weight: 700; color: #2e7d32; font-size: 16px; }
+  .ev-date { font-size: 12px; color: #999; }
+  .item { background: #f9fbf6; border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+  .q { font-size: 10px; color: #9e9e9e; margin-bottom: 2px; }
+  .body { font-size: 15px; color: #333; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
+  .name { font-size: 12px; color: #6d4c41; text-align: right; margin-top: 4px; }
+  .yr { font-family: 'Zen Maru Gothic', sans-serif; font-size: 13px; color: #8d6e63; font-weight: 700; margin: 22px 2px 8px; }
+  .empty, .msg { text-align: center; color: #888; padding: 40px 10px; font-size: 14px; line-height: 1.8; }
+</style>
+</head><body>
+<div class="top-bar">
+  <div class="logo"><i class="fas fa-comments"></i> みんなの気づき</div>
+  <a class="back" href="/mypage"><i class="fas fa-arrow-left"></i> マイページ</a>
+</div>
+<div class="wrap">
+  <div class="lead">研修会の振り返りから、紹介に同意いただいた声を運営が選んでいます。<br>会員の方だけが見られるページです。</div>
+  <div id="list"><div class="msg"><i class="fas fa-spinner fa-spin"></i> 読み込み中...</div></div>
+</div>
+<script>
+const token = localStorage.getItem('token');
+if (!token) { window.location.href = '/login?redirect=/mypage/insights'; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+function fyOf(ds) { const m = /^(\\d{4})-(\\d{2})/.exec(ds || ''); if (!m) return null; const y = +m[1], mo = +m[2]; return mo >= 4 ? y : y - 1; }
+async function load() {
+  const list = document.getElementById('list');
+  try {
+    const r = await fetch('/api/insights', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (r.status === 401) { localStorage.removeItem('token'); window.location.href = '/login?redirect=/mypage/insights'; return; }
+    const d = await r.json();
+    const evs = (d && d.events) || [];
+    if (!evs.length) { list.innerHTML = '<div class="empty"><i class="far fa-comment-dots fa-2x" style="color:#c8e6c9"></i><br>まだありません。<br>研修会のあと、紹介された気づきがここにたまっていきます。</div>'; return; }
+    let h = '', lastFy = null;
+    evs.forEach(function(ev) {
+      const fy = fyOf(ev.event_date);
+      if (fy !== lastFy) { h += '<div class="yr">' + (fy ? fy + '年度' : '') + '</div>'; lastFy = fy; }
+      h += '<div class="ev"><div class="ev-head"><span class="ev-title">' + esc(ev.title) + '</span><span class="ev-date"><i class="fas fa-calendar-day"></i> ' + esc(ev.event_date) + '</span></div>';
+      (ev.items || []).forEach(function(it) {
+        h += '<div class="item">' + (it.question_text ? '<div class="q">' + esc(it.question_text) + '</div>' : '') + '<div class="body">' + esc(it.body) + '</div>' + (it.name ? '<div class="name">― ' + esc(it.name) + ' さん</div>' : '') + '</div>';
+      });
+      h += '</div>';
+    });
+    list.innerHTML = h;
+  } catch (e) {
+    list.innerHTML = '<div class="msg" style="color:#c62828">読み込めませんでした。通信の良いところで、もう一度開いてください。</div>';
+  }
+}
+if (token) load();
 </script>
 </body></html>`)
 })
@@ -5296,7 +5692,29 @@ app.get('/admin/events', (c) => {
   .event-detail th, .event-detail td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; font-size: 12px; }
   .event-detail th { background: #f0f0f0; font-weight: 700; }
   .event-detail .no-data { color: #aaa; font-size: 12px; }
-  .detail-tabs { display: flex; gap: 0; margin-bottom: 10px; }
+  .detail-tabs { display: flex; gap: 0; margin-bottom: 10px; flex-wrap: wrap; }
+  .ins-lead { background: #f1f8e9; border-left: 4px solid #66bb6a; padding: 8px 12px; border-radius: 0 8px 8px 0; font-size: 12px; color: #33691e; line-height: 1.7; margin-bottom: 10px; }
+  .ins-person { background: #fff; border: 1px solid #e0e0e0; border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+  .ins-who { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  .ins-badge { display: inline-block; border-radius: 10px; padding: 2px 10px; font-size: 11px; font-weight: 700; }
+  .ins-badge.anon { background: #eceff1; color: #455a64; border: 1px solid #b0bec5; }
+  .ins-badge.named { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+  .ins-badge.guest { background: #fff3e0; color: #e65100; }
+  .ins-ans { border-top: 1px dashed #eee; padding-top: 8px; margin-top: 8px; }
+  .ins-ans .q { font-size: 11px; color: #888; margin-bottom: 4px; }
+  .ins-ans .orig { font-size: 12px; color: #555; background: #fafafa; border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; margin-bottom: 6px; }
+  .ins-ans textarea { width: 100%; min-height: 64px; padding: 8px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 14px; font-family: inherit; resize: vertical; }
+  .ins-ans textarea:focus { outline: none; border-color: #66bb6a; }
+  .ins-ans.adopted { background: #f9fbf6; border-radius: 8px; padding: 8px; border-top: 2px solid #a5d6a7; }
+  .ins-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+  .ins-btn { border: none; border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .ins-btn.adopt { background: #2e7d32; color: #fff; }
+  .ins-btn.cancel { background: #fff; color: #c62828; border: 1px solid #ef9a9a; }
+  .ins-btn.reset { background: #f5f5f5; color: #666; }
+  .ins-btn:disabled { opacity: 0.6; }
+  .ins-tag { font-size: 11px; color: #2e7d32; font-weight: 700; }
+  .ins-st { font-size: 11px; }
+  .q-card.fixed { background: #fffaf0; border-style: dashed; border-color: #e0d6c8; box-shadow: none; }
   .detail-tab { padding: 6px 16px; font-size: 12px; font-weight: 700; cursor: pointer; border: 1px solid #ddd; background: #f5f5f5; color: #888; }
   .detail-tab:first-child { border-radius: 6px 0 0 6px; }
   .detail-tab:last-child { border-radius: 0 6px 6px 0; }
@@ -5402,6 +5820,11 @@ app.get('/admin/events', (c) => {
       </div>
       <div id="customQuestions" style="margin-top:10px"></div>
       <button class="btn-add-q" id="btnAddQ" onclick="toggleTypePicker()"><i class="fas fa-plus"></i> 新規追加</button>
+      <div class="q-card fixed" style="margin-top:12px">
+        <div style="font-size:12px;font-weight:700;color:#8d6e63"><i class="fas fa-lock"></i> 最後に自動で付きます：紹介の同意欄（任意）</div>
+        <div style="font-size:11px;color:#999;margin:4px 0 8px;line-height:1.6">質問があるすべての回に、会員・ゲストどちらのフォームにも付きます。質問の数やCSVには入りません。選ばれた回答は、各回の「みんなの気づき」タブで選んで紹介できます。</div>
+        <div style="font-size:12px;color:#666;line-height:1.9">□ 名前なしで紹介してもよい<br>□ 名前ありで紹介してもよい<br><span style="font-size:11px;color:#8d6e63">※ いただいた振り返りの中から、一部をご紹介させていただきます。</span></div>
+      </div>
       <div class="type-picker" id="typePicker" style="display:none">
         <button type="button" class="type-tile" onclick="pickType('radio')"><i class="far fa-dot-circle"></i> 選択式（1つ）</button>
         <button type="button" class="type-tile" onclick="pickType('checkbox')"><i class="far fa-check-square"></i> 複数選択</button>
@@ -5778,7 +6201,17 @@ function renderDetail(el, d, tab) {
   html += '<div class="detail-tab'+(tab==='sur'?' active':'')+'" data-dtab="sur" data-eid="'+d.event.id+'"><i class="fas fa-clipboard"></i> 回答 ('+d.answers.length+')</div>';
   var rList = d.recalls || [];
   html += '<div class="detail-tab'+(tab==='rc'?' active':'')+'" data-dtab="rc" data-eid="'+d.event.id+'"><i class="fas fa-bookmark"></i> 前回のふり返り ('+rList.length+')</div>';
+  html += '<div class="detail-tab'+(tab==='ins'?' active':'')+'" data-dtab="ins" data-eid="'+d.event.id+'"><i class="fas fa-comments"></i> みんなの気づき</div>';
   html += '</div>';
+
+  if (tab === 'ins') {
+    html += '<div id="insPane_'+d.event.id+'"><p style="color:#888">読み込み中...</p></div>';
+    el.innerHTML = html;
+    el.dataset.eventData = JSON.stringify(d);
+    bindDetailTabs(el);
+    loadInsightsPane(d.event.id);
+    return;
+  }
 
   if (tab === 'rc') {
     var rcLabel = { tried: 'やってみた', a_little: 'ちょっとだけ', not_yet: 'まだ', changed: '考えが変わった' };
@@ -5860,7 +6293,10 @@ function renderDetail(el, d, tab) {
   }
   el.innerHTML = html;
   el.dataset.eventData = JSON.stringify(d);
+  bindDetailTabs(el);
+}
 
+function bindDetailTabs(el) {
   // Tab switching within detail
   el.querySelectorAll('.detail-tab').forEach(function(t) {
     t.addEventListener('click', function(e) {
@@ -5871,6 +6307,81 @@ function renderDetail(el, d, tab) {
       renderDetail(el, cached, newTab);
     });
   });
+}
+
+// ===== みんなの気づき：同意した人の振り返りから選んで紹介（同意していない回答はサーバーが返さない） =====
+var insCache = {};
+async function loadInsightsPane(eventId) {
+  var pane = document.getElementById('insPane_' + eventId);
+  if (!pane) return;
+  try {
+    var r = await fetch('/api/admin/events/' + eventId + '/insights', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!r.ok) { pane.innerHTML = '<p style="color:#c62828">読み込みに失敗しました</p>'; return; }
+    var d = await r.json();
+    insCache[eventId] = d;
+    renderInsightsPane(eventId, d);
+  } catch (e) { pane.innerHTML = '<p style="color:#c62828">エラーが発生しました</p>'; }
+}
+function renderInsightsPane(eventId, d) {
+  var pane = document.getElementById('insPane_' + eventId);
+  if (!pane) return;
+  var people = d.people || [];
+  var h = '<div class="ins-lead">紹介に同意した人の振り返り（文章の回答）だけを表示しています。<b>学校名・子どもの名前など</b>は消してから「採用」してください。元の回答は書き換わりません。<br>採用したものは、次の回の受付画面（会員のみ）とマイページ「みんなの気づき」に出ます。名前あり同意でも、出るのは名前だけです。</div>';
+  h += '<div style="font-size:12px;color:#555;margin-bottom:8px">同意した人 <b>' + people.length + '</b> 人 ／ 採用 <b>' + (d.adopted_count || 0) + '</b> 件</div>';
+  if (!people.length) { h += '<div class="no-data">まだありません（回答フォームの最後で「紹介してもよい」を選んだ人の回答だけがここに出ます）</div>'; pane.innerHTML = h; return; }
+  people.forEach(function(p, pi) {
+    h += '<div class="ins-person"><div class="ins-who">' + escHtml(p.name || '（名前不明）')
+      + (p.respondent_type === 'guest' ? ' <span class="ins-badge guest">ゲスト</span>' : '')
+      + (p.consent === 'named' ? ' <span class="ins-badge named"><i class="fas fa-user"></i> 名前ありで紹介OK</span>' : ' <span class="ins-badge anon"><i class="fas fa-user-secret"></i> 名前なしで紹介OK</span>')
+      + '</div>';
+    p.answers.forEach(function(a, ai) {
+      var k = eventId + '_' + pi + '_' + ai;
+      var ad = a.adopted;
+      h += '<div class="ins-ans' + (ad ? ' adopted' : '') + '">';
+      h += '<div class="q">Q. ' + escHtml(a.question_text) + '</div>';
+      h += '<div class="orig">' + escHtml(a.answer_text) + '</div>';
+      h += '<div style="font-size:11px;color:#888;margin-bottom:3px">' + (ad ? '<span class="ins-tag"><i class="fas fa-check-circle"></i> 採用中</span>（紹介する文面）' : '紹介する文面（必要なら直してから採用）') + '</div>';
+      h += '<textarea id="insTx_' + k + '" maxlength="1000">' + escHtml(ad ? ad.body : a.answer_text) + '</textarea>';
+      h += '<div class="ins-row">';
+      h += '<button type="button" class="ins-btn adopt" data-ins="adopt" data-k="' + k + '" data-eid="' + eventId + '" data-pi="' + pi + '" data-ai="' + ai + '"><i class="fas fa-check"></i> ' + (ad ? '文面を更新' : '採用') + '</button>';
+      if (ad) h += '<button type="button" class="ins-btn cancel" data-ins="cancel" data-k="' + k + '" data-eid="' + eventId + '" data-pi="' + pi + '" data-ai="' + ai + '"><i class="fas fa-undo"></i> 採用を取り消す</button>';
+      h += '<button type="button" class="ins-btn reset" data-ins="reset" data-k="' + k + '" data-eid="' + eventId + '" data-pi="' + pi + '" data-ai="' + ai + '">元の文に戻す</button>';
+      h += '<span class="ins-st" id="insSt_' + k + '"></span></div>';
+      h += '</div>';
+    });
+    h += '</div>';
+  });
+  pane.innerHTML = h;
+  pane.querySelectorAll('[data-ins]').forEach(function(b) {
+    b.addEventListener('click', function(ev) { ev.stopPropagation(); insAction(b); });
+  });
+}
+async function insAction(b) {
+  var eventId = parseInt(b.dataset.eid, 10), pi = parseInt(b.dataset.pi, 10), ai = parseInt(b.dataset.ai, 10), k = b.dataset.k;
+  var d = insCache[eventId]; if (!d) return;
+  var p = d.people[pi], a = p && p.answers[ai]; if (!a) return;
+  var tx = document.getElementById('insTx_' + k), st = document.getElementById('insSt_' + k);
+  var act = b.dataset.ins;
+  if (act === 'reset') { if (tx) tx.value = a.answer_text; return; }
+  b.disabled = true;
+  if (st) { st.style.color = '#888'; st.textContent = '保存中...'; }
+  try {
+    var r;
+    if (act === 'cancel') {
+      if (!confirm('この気づきの採用を取り消しますか？（元の回答は消えません）')) { b.disabled = false; if (st) st.textContent = ''; return; }
+      r = await fetch('/api/admin/insights/' + a.adopted.id, { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } });
+    } else {
+      var body = tx ? String(tx.value || '').trim() : '';
+      if (!body) { b.disabled = false; if (st) { st.style.color = '#c62828'; st.textContent = '文面が空です'; } return; }
+      r = await fetch('/api/admin/events/' + eventId + '/insights', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ respondent_type: p.respondent_type, respondent_id: p.respondent_id, question_id: a.question_id, body: body }) });
+    }
+    var j = {}; try { j = await r.json(); } catch (e2) {}
+    if (!r.ok) { b.disabled = false; if (st) { st.style.color = '#c62828'; st.textContent = j.error || '保存できませんでした'; } return; }
+    await loadInsightsPane(eventId);
+  } catch (e) {
+    b.disabled = false;
+    if (st) { st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました'; }
+  }
 }
 
 function escHtml(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
