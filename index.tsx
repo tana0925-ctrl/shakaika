@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { getCookie, setCookie } from 'hono/cookie'
 
 type Bindings = {
   DB: D1Database
@@ -36,7 +37,112 @@ async function ensureGuestTable(db: any) {
   )`).run()
 }
 
+// ========== 安全対策の設定（必要ならここの数字だけ変える） ==========
+const RECEPTION_CLOSE_DAYS = 7      // 研修会の日から何日たったら受付（出席・ゲスト回答）を締め切るか
+const LOGIN_MAX_FAILS = 5           // 同じメールアドレスで何回続けて失敗したらロックするか
+const LOGIN_LOCK_MINUTES = 15       // ロックする時間（分）
+const PBKDF2_ITERATIONS = 50000     // パスワード保存の強さ（Cloudflare Workersの上限は100000）
+const LOCK_MESSAGE = '続けて失敗したため、しばらく受け付けできません。' + LOGIN_LOCK_MINUTES + '分ほど待ってから、もう一度お試しください。'
+const CLOSED_MESSAGE = 'この研修会の受付は終了しました'
+
+// 受付中かどうか（SQLの式）。既存の is_active=1 で、かつ「研修会の日＋日数」以内 か「管理者が再開した期限」以内
+function receptionOpenSql(t: string): string {
+  return `(${t}.is_active = 1 AND (date('now','+9 hours') <= date(${t}.event_date, '+${RECEPTION_CLOSE_DAYS} days') OR (${t}.reopen_until IS NOT NULL AND date('now','+9 hours') <= ${t}.reopen_until)))`
+}
+const OPEN_SQL = receptionOpenSql('events')
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+  a = String(a || ''); b = String(b || '')
+  if (a.length !== b.length || a.length === 0) return false
+  let r = 0
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return r === 0
+}
+function bytesToB64(buf: ArrayBuffer | Uint8Array): string {
+  const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
+  let bin = ''
+  for (let i = 0; i < u.length; i++) bin += String.fromCharCode(u[i])
+  return btoa(bin)
+}
+function b64ToBytes(s: string): Uint8Array {
+  const bin = atob(s)
+  const u = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i)
+  return u
+}
+async function sha256Hex(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+async function pbkdf2(password: string, salt: Uint8Array, iterations: number): Promise<string> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256)
+  return bytesToB64(bits)
+}
+// 新方式：pbkdf2_sha256$反復回数$ソルト$ハッシュ
+async function hashPasswordStrong(password: string): Promise<string> {
+  const salt = new Uint8Array(16)
+  crypto.getRandomValues(salt)
+  const h = await pbkdf2(password, salt, PBKDF2_ITERATIONS)
+  return 'pbkdf2_sha256$' + PBKDF2_ITERATIONS + '$' + bytesToB64(salt) + '$' + h
+}
+// 照合：新方式・旧方式の両方に対応。legacy=true なら旧方式で一致（ログイン時に置き換える）
+async function verifyPassword(password: string, stored: string): Promise<{ ok: boolean; legacy: boolean }> {
+  stored = String(stored || '')
+  if (stored.startsWith('pbkdf2_sha256$')) {
+    const parts = stored.split('$')
+    if (parts.length !== 4) return { ok: false, legacy: false }
+    const iter = parseInt(parts[1], 10)
+    if (!(iter > 0 && iter <= 100000)) return { ok: false, legacy: false }
+    try {
+      const h = await pbkdf2(password, b64ToBytes(parts[2]), iter)
+      return { ok: timingSafeEqualStr(h, parts[3]), legacy: false }
+    } catch (e) { return { ok: false, legacy: false } }
+  }
+  const old = await hashPassword(password)
+  return { ok: timingSafeEqualStr(old, stored), legacy: true }
+}
+
+// ログイン等の試しすぎ防止（1行だけ読む・書く軽い処理）
+async function isLocked(db: D1Database, key: string): Promise<{ locked: boolean; exists: boolean }> {
+  const row = await db.prepare("SELECT (locked_until IS NOT NULL AND locked_until > datetime('now')) AS locked FROM login_attempts WHERE key = ?").bind(key).first() as any
+  return { locked: !!(row && row.locked), exists: !!row }
+}
+async function recordFailure(db: D1Database, key: string): Promise<boolean> {
+  const row = await db.prepare(
+    `INSERT INTO login_attempts (key, fail_count, locked_until, updated_at) VALUES (?1, 1, NULL, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET
+       fail_count = CASE WHEN login_attempts.fail_count + 1 >= ?2 THEN 0 ELSE login_attempts.fail_count + 1 END,
+       locked_until = CASE WHEN login_attempts.fail_count + 1 >= ?2 THEN datetime('now', ?3) ELSE login_attempts.locked_until END,
+       updated_at = datetime('now')
+     RETURNING (locked_until IS NOT NULL AND locked_until > datetime('now')) AS locked`
+  ).bind(key, LOGIN_MAX_FAILS, '+' + LOGIN_LOCK_MINUTES + ' minutes').first() as any
+  return !!(row && row.locked)
+}
+async function clearFailures(db: D1Database, key: string) {
+  await db.prepare('DELETE FROM login_attempts WHERE key = ?').bind(key).run()
+}
+
+// ゲストの編集用合言葉（端末に保存）の照合
+async function guestTokenOk(guest: any, tok: string): Promise<boolean> {
+  if (!guest || !tok || typeof tok !== 'string' || tok.length > 200) return false
+  if (guest.edit_token_hash) return timingSafeEqualStr(String(guest.edit_token_hash), await sha256Hex(tok))
+  // この改修より前に受付した方：その端末に保存済みの合言葉のみ（名前・学校名での照合は廃止）
+  return !!guest.token && timingSafeEqualStr(String(guest.token), tok)
+}
+function guestCredential(c: any, body: any, eventId: number): { gid: number; tok: string } {
+  let gid = parseInt(String((body && body.guest_id) || ''), 10) || 0
+  let tok = (body && typeof body.guest_token === 'string') ? body.guest_token : ''
+  if (!gid || !tok) {
+    const ck = getCookie(c, 'sg_' + eventId) || ''
+    const m = ck.match(/^(\d+)\.([0-9a-f]{64})$/)
+    if (m) { gid = parseInt(m[1], 10); tok = m[2] }
+  }
+  return { gid, tok }
+}
+
 // ========== Utility ==========
+// 旧方式（照合と秘密の質問の答えにだけ使う）
 async function hashPassword(password: string): Promise<string> {
   const encoder = new TextEncoder()
   const data = encoder.encode(password + '_shakaika_salt_2026')
@@ -391,6 +497,11 @@ async function adminMiddleware(c: any, next: any) {
 // ========== DB Init ==========
 app.get('/api/init', async (c) => {
   const db = c.env.DB
+  // 管理者が既にいる場合は、初期設定の入口は存在しないものとして扱う
+  try {
+    const anyAdmin = await db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").first()
+    if (anyAdmin) return c.text('404 Not Found', 404)
+  } catch (e) { /* users テーブルが無い＝まっさらな環境のみ続行 */ }
 
   // Always run column migrations first (safe to run repeatedly)
   await db.prepare(`CREATE TABLE IF NOT EXISTS users (
@@ -526,7 +637,7 @@ app.get('/api/init', async (c) => {
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_points_user_fy ON points(user_id, fiscal_year)').run()
 
   // Create default admin if not exists
-  const adminHash = await hashPassword('admin123')
+  const adminHash = await hashPasswordStrong('admin123')
   await db.prepare(
     'INSERT OR IGNORE INTO users (name, email, school, password_hash, role) VALUES (?, ?, ?, ?, ?)'
   ).bind('管理者', 'admin@example.com', '（管理者）', adminHash, 'admin').run()
@@ -547,7 +658,7 @@ app.post('/api/auth/register', async (c) => {
   if (existing) {
     return c.json({ error: 'このメールアドレスは既に登録されています' }, 400)
   }
-  const passwordHash = await hashPassword(password)
+  const passwordHash = await hashPasswordStrong(password)
   const result = await c.env.DB.prepare(
     'INSERT INTO users (name, email, school, school_type, district, experience_years, grade, password_hash, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ).bind(name, email, school || '', school_type || '', district || '', experience_years || null, grade || '', passwordHash, 'member').run()
@@ -564,12 +675,26 @@ app.post('/api/auth/login', async (c) => {
   if (!email || !password) {
     return c.json({ error: 'メールアドレスとパスワードを入力してください' }, 400)
   }
-  const passwordHash = await hashPassword(password)
-  const user = await c.env.DB.prepare(
-    'SELECT id, name, email, school, school_type, role, district, experience_years, grade, position FROM users WHERE email = ? AND password_hash = ?'
-  ).bind(email, passwordHash).first()
-  if (!user) {
+  const db = c.env.DB
+  const lockKey = 'login:' + String(email).trim().toLowerCase()
+  const lk = await isLocked(db, lockKey)
+  if (lk.locked) return c.json({ error: LOCK_MESSAGE }, 429)
+  const user = await db.prepare(
+    'SELECT id, name, email, school, school_type, role, district, experience_years, grade, position, password_hash FROM users WHERE email = ?'
+  ).bind(email).first() as any
+  const v = user ? await verifyPassword(String(password), user.password_hash) : { ok: false, legacy: false }
+  if (!user || !v.ok) {
+    const nowLocked = await recordFailure(db, lockKey)
+    if (nowLocked) return c.json({ error: LOCK_MESSAGE }, 429)
     return c.json({ error: 'メールアドレスまたはパスワードが正しくありません' }, 401)
+  }
+  if (lk.exists) await clearFailures(db, lockKey)
+  if (v.legacy) {
+    // 旧方式で一致したら、その場で新方式に置き換える（失敗してもログインは続行）
+    try {
+      const strong = await hashPasswordStrong(String(password))
+      await db.prepare('UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?').bind(strong, user.id, user.password_hash).run()
+    } catch (e) { console.error('password upgrade failed', e) }
   }
   const token = generateToken()
   await setToken(c.env.DB, token, user.id as number)
@@ -596,11 +721,18 @@ app.post('/api/auth/reset-by-question', async (c) => {
   const { email, answer, newPassword } = await c.req.json() as any
   if (!email || !answer || !newPassword) return c.json({ error: '入力が不足しています' }, 400)
   if (newPassword.length < 4) return c.json({ error: 'パスワードは4文字以上にしてください' }, 400)
+  const resetKey = 'reset:' + String(email).trim().toLowerCase()
+  const rlk = await isLocked(c.env.DB, resetKey)
+  if (rlk.locked) return c.json({ error: LOCK_MESSAGE }, 429)
   const user = await c.env.DB.prepare('SELECT id, secret_answer_hash FROM users WHERE email = ?').bind(email).first() as any
   if (!user) return c.json({ error: 'このメールアドレスは登録されていません' }, 404)
   const answerHash = await hashPassword(answer)
-  if (user.secret_answer_hash !== answerHash) return c.json({ error: '答えが正しくありません' }, 400)
-  const newHash = await hashPassword(newPassword)
+  if (!user.secret_answer_hash || !timingSafeEqualStr(user.secret_answer_hash, answerHash)) {
+    if (await recordFailure(c.env.DB, resetKey)) return c.json({ error: LOCK_MESSAGE }, 429)
+    return c.json({ error: '答えが正しくありません' }, 400)
+  }
+  if (rlk.exists) await clearFailures(c.env.DB, resetKey)
+  const newHash = await hashPasswordStrong(newPassword)
   await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(newHash, user.id).run()
   await c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id).run()
   return c.json({ success: true })
@@ -944,7 +1076,7 @@ app.post('/api/admin/members/:id/reset-password', authMiddleware, adminMiddlewar
   if (!newPassword || newPassword.length < 4) {
     return c.json({ error: 'パスワードは4文字以上にしてください' }, 400)
   }
-  const hash = await hashPassword(newPassword)
+  const hash = await hashPasswordStrong(newPassword)
   await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(hash, id).run()
   await c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id).run()
   return c.json({ success: true })
@@ -1407,9 +1539,27 @@ app.get('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
   const db = c.env.DB
   await ensureGuestTable(db)
   const { results: events } = await db.prepare(
-    'SELECT e.*, (SELECT COUNT(*) FROM attendances a WHERE a.event_id = e.id) + (SELECT COUNT(*) FROM guest_attendances g WHERE g.event_id = e.id) as attendance_count, (SELECT COUNT(*) FROM survey_answers sa WHERE sa.event_id = e.id) as survey_count FROM events e ORDER BY e.event_date DESC'
+    'SELECT e.*, ' + receptionOpenSql('e') + " as reception_open, date(e.event_date, '+" + RECEPTION_CLOSE_DAYS + " days') as reception_close_date, (SELECT COUNT(*) FROM attendances a WHERE a.event_id = e.id) + (SELECT COUNT(*) FROM guest_attendances g WHERE g.event_id = e.id) as attendance_count, (SELECT COUNT(*) FROM survey_answers sa WHERE sa.event_id = e.id) as survey_count FROM events e ORDER BY e.event_date DESC"
   ).all()
-  return c.json({ events })
+  return c.json({ events, reception_close_days: RECEPTION_CLOSE_DAYS })
+})
+
+// 管理者：受付を再開（今日から RECEPTION_CLOSE_DAYS 日間）／再開の取り消し
+app.post('/api/admin/events/:id/reopen', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  const db = c.env.DB
+  const ev = await db.prepare('SELECT id FROM events WHERE id = ?').bind(id).first()
+  if (!ev) return c.json({ error: 'イベントが見つかりません' }, 404)
+  await db.prepare("UPDATE events SET is_active = 1, reopen_until = date('now','+9 hours', ?) WHERE id = ?").bind('+' + RECEPTION_CLOSE_DAYS + ' days', id).run()
+  const row = await db.prepare('SELECT reopen_until FROM events WHERE id = ?').bind(id).first() as any
+  return c.json({ success: true, reopen_until: row ? row.reopen_until : null })
+})
+app.post('/api/admin/events/:id/reopen-cancel', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  await c.env.DB.prepare('UPDATE events SET reopen_until = NULL WHERE id = ?').bind(id).run()
+  return c.json({ success: true })
 })
 
 app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
@@ -1431,9 +1581,10 @@ app.get('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
     'SELECT ca.*, u.name, u.school_type FROM custom_answers ca JOIN users u ON ca.user_id = u.id WHERE ca.event_id = ?'
   ).bind(id).all()
   await ensureGuestTable(db)
-  const { results: guests } = await db.prepare(
+  const { results: guestsRaw } = await db.prepare(
     'SELECT * FROM guest_attendances WHERE event_id = ? ORDER BY attended_at'
   ).bind(id).all()
+  const guests = (guestsRaw || []).map((g: any) => { const o: any = { ...g }; delete o.token; delete o.edit_token_hash; return o })
   return c.json({ event, questions, attendances, answers, customAnswers, guests })
 })
 
@@ -1516,17 +1667,25 @@ app.get('/api/admin/events/:id/export', authMiddleware, adminMiddleware, async (
 // 公開：イベント情報（ゲスト出席用）
 app.get('/api/events/:code/info', async (c) => {
   const code = c.req.param('code')
-  const event = await c.env.DB.prepare('SELECT title, description, event_date FROM events WHERE event_code = ? AND is_active = 1').bind(code).first()
-  if (!event) return c.json({ error: 'イベントが見つからないか、受付が終了しています' }, 404)
-  return c.json({ event })
+  const event = await c.env.DB.prepare('SELECT title, description, event_date, ' + OPEN_SQL + ' AS open FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  if (!event.open) return c.json({ error: CLOSED_MESSAGE, closed: true }, 410)
+  return c.json({ event: { title: event.title, description: event.description, event_date: event.event_date } })
 })
+
+function setGuestCookie(c: any, code: string, eventId: number, gid: number, tok: string) {
+  try {
+    setCookie(c, 'sg_' + eventId, gid + '.' + tok, { path: '/api/events/' + code, httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 60 * 60 * 24 * 60 })
+  } catch (e) { /* ignore */ }
+}
 
 // 公開：ゲスト出席（未登録の方）
 app.post('/api/events/:code/guest-attend', async (c) => {
   const code = c.req.param('code')
   const db = c.env.DB
-  const event = await db.prepare('SELECT id FROM events WHERE event_code = ? AND is_active = 1').bind(code).first() as any
-  if (!event) return c.json({ error: 'イベントが見つからないか、受付が終了しています' }, 404)
+  const event = await db.prepare('SELECT id, ' + OPEN_SQL + ' AS open FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  if (!event.open) return c.json({ error: CLOSED_MESSAGE, closed: true }, 410)
   let body: any = {}
   try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
   const name = typeof body.name === 'string' ? body.name.trim() : ''
@@ -1542,78 +1701,65 @@ app.post('/api/events/:code/guest-attend', async (c) => {
   await ensureGuestTable(db)
   const qn = await db.prepare('SELECT COUNT(*) as n FROM survey_questions WHERE event_id = ?').bind(event.id).first() as any
   const hasQuestions = !!(qn && qn.n > 0)
-  const dup = await db.prepare('SELECT id, token FROM guest_attendances WHERE event_id = ? AND name = ? AND school = ?').bind(event.id, name, school).first() as any
+  const dup = await db.prepare('SELECT id, token, edit_token_hash FROM guest_attendances WHERE event_id = ? AND name = ? AND school = ?').bind(event.id, name, school).first() as any
   if (dup) {
-    let gtok = dup.token || ''
-    if (!gtok) {
-      gtok = crypto.randomUUID()
-      await db.prepare('UPDATE guest_attendances SET token = ? WHERE id = ?').bind(gtok, dup.id).run()
+    // 同じ端末（合言葉が一致）なら続きから。別の端末には合言葉を渡さない
+    const cred = guestCredential(c, body, event.id)
+    if (cred.gid === dup.id && await guestTokenOk(dup, cred.tok)) {
+      return c.json({ success: true, attended: false, message: '既に出席を記録済みです', guest_id: dup.id, guest_token: cred.tok, has_questions: hasQuestions })
     }
-    return c.json({ success: true, attended: false, message: '既に出席を記録済みです', guest_id: dup.id, guest_token: gtok, has_questions: hasQuestions })
+    return c.json({ success: true, attended: false, other_device: true, message: 'このお名前の出席は既に記録されています。アンケートは、最初に受付をした端末から回答できます。', has_questions: hasQuestions })
   }
-  const gtok = crypto.randomUUID()
-  const ins = await db.prepare("INSERT INTO guest_attendances (event_id, name, school, district, experience_years, token, attended_at) VALUES (?,?,?,?,?,?,datetime('now'))").bind(event.id, name, school, district, exp, gtok).run()
-  return c.json({ success: true, attended: true, guest_id: ins.meta.last_row_id, guest_token: gtok, has_questions: hasQuestions })
+  const gtok = generateToken()
+  const gHash = await sha256Hex(gtok)
+  const ins = await db.prepare("INSERT INTO guest_attendances (event_id, name, school, district, experience_years, token, edit_token_hash, attended_at) VALUES (?,?,?,?,?,'',?,datetime('now'))").bind(event.id, name, school, district, exp, gHash).run()
+  const gid = ins.meta.last_row_id as number
+  setGuestCookie(c, code, event.id, gid, gtok)
+  return c.json({ success: true, attended: true, guest_id: gid, guest_token: gtok, has_questions: hasQuestions })
 })
 
-// 公開：ゲスト出席状況・アンケート取得（再訪用）
+// 公開：ゲスト出席状況・アンケート取得（同じ端末で再訪したとき）
 app.post('/api/events/:code/guest-status', async (c) => {
   const code = c.req.param('code')
   const db = c.env.DB
-  const event = await db.prepare('SELECT * FROM events WHERE event_code = ?').bind(code).first() as any
-  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
   let body: any = {}
-  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
-  const gid = parseInt(String(body.guest_id || ''), 10)
-  const gtok = typeof body.guest_token === 'string' ? body.guest_token : ''
+  try { body = await c.req.json() } catch (e) { body = {} }
+  const event = await db.prepare('SELECT id, title, event_date, ' + OPEN_SQL + ' AS open FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const cred = guestCredential(c, body, event.id)
+  if (!cred.gid || !cred.tok) return c.json({ error: '出席記録が見つかりません' }, 404)
   await ensureGuestTable(db)
-  const guest = await db.prepare('SELECT * FROM guest_attendances WHERE id = ? AND event_id = ?').bind(gid || 0, event.id).first() as any
-  if (!guest || !gtok || guest.token !== gtok) return c.json({ error: '出席記録が見つかりません' }, 404)
+  const guest = await db.prepare('SELECT id, name, token, edit_token_hash FROM guest_attendances WHERE id = ? AND event_id = ?').bind(cred.gid, event.id).first() as any
+  if (!guest || !(await guestTokenOk(guest, cred.tok))) return c.json({ error: '出席記録が見つかりません' }, 404)
+  if (!event.open) return c.json({ error: CLOSED_MESSAGE, closed: true, guest: { name: guest.name }, event: { title: event.title, event_date: event.event_date } }, 410)
   await ensureRequiredColumn(db)
   const { results: questions } = await db.prepare('SELECT id, question_text, question_type, options, sort_order' + (_reqColOk ? ', required' : '') + ' FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
   const { results: answers } = await db.prepare('SELECT question_id, answer_text FROM guest_answers WHERE guest_id = ? AND event_id = ?').bind(guest.id, event.id).all()
-  return c.json({ event: { title: event.title, event_date: event.event_date }, guest: { id: guest.id, name: guest.name }, questions, answers })
+  return c.json({ event: { title: event.title, event_date: event.event_date }, guest: { id: guest.id, name: guest.name }, guest_token: cred.tok, questions, answers })
 })
 
-// 公開：ゲスト出席記録の照合（別端末用）
-app.post('/api/events/:code/guest-find', async (c) => {
-  const code = c.req.param('code')
-  const db = c.env.DB
-  const event = await db.prepare('SELECT id FROM events WHERE event_code = ?').bind(code).first() as any
-  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
-  let body: any = {}
-  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
-  const name = typeof body.name === 'string' ? body.name.trim() : ''
-  const school = typeof body.school === 'string' ? body.school.trim() : ''
-  if (!name) return c.json({ error: 'お名前を入力してください' }, 400)
-  await ensureGuestTable(db)
-  const guest = await db.prepare('SELECT id, token, name FROM guest_attendances WHERE event_id = ? AND name = ? AND school = ?').bind(event.id, name, school).first() as any
-  if (!guest) return c.json({ error: '出席記録が見つかりません。受付時と同じお名前・学校名を入力してください' }, 404)
-  let gtok = guest.token || ''
-  if (!gtok) {
-    gtok = crypto.randomUUID()
-    await db.prepare('UPDATE guest_attendances SET token = ? WHERE id = ?').bind(gtok, guest.id).run()
-  }
-  return c.json({ guest_id: guest.id, guest_token: gtok, name: guest.name })
-})
+// （廃止）名前・学校名での照合：他人が回答を見たり書き換えたりできたため削除
+app.post('/api/events/:code/guest-find', (c) => c.json({ error: 'この機能は終了しました。アンケートは、最初に受付をした端末から回答できます。' }, 410))
 
-// 公開：ゲストのアンケート回答
+// 公開：ゲストのアンケート回答（受付をした端末から・締め切りまで）
 app.post('/api/events/:code/guest-survey', async (c) => {
   const code = c.req.param('code')
   const db = c.env.DB
-  const event = await db.prepare('SELECT id FROM events WHERE event_code = ?').bind(code).first() as any
+  const event = await db.prepare('SELECT id, ' + OPEN_SQL + ' AS open FROM events WHERE event_code = ?').bind(code).first() as any
   if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
   let body: any = {}
   try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
-  const gid = parseInt(String(body.guest_id || ''), 10)
-  const gtok = typeof body.guest_token === 'string' ? body.guest_token : ''
+  const cred = guestCredential(c, body, event.id)
   await ensureGuestTable(db)
-  const guest = await db.prepare('SELECT id, token FROM guest_attendances WHERE id = ? AND event_id = ?').bind(gid || 0, event.id).first() as any
-  if (!guest || !gtok || guest.token !== gtok) return c.json({ error: '出席記録が見つかりません' }, 404)
-  const answers = Array.isArray(body.answers) ? body.answers : []
+  const guest = await db.prepare('SELECT id, token, edit_token_hash FROM guest_attendances WHERE id = ? AND event_id = ?').bind(cred.gid || 0, event.id).first() as any
+  if (!guest || !(await guestTokenOk(guest, cred.tok))) return c.json({ error: '出席記録が見つかりません' }, 404)
+  if (!event.open) return c.json({ error: CLOSED_MESSAGE, closed: true }, 410)
+  const valid = await db.prepare('SELECT id FROM survey_questions WHERE event_id = ?').bind(event.id).all() as any
+  const validIds = new Set((valid.results || []).map((r: any) => r.id))
+  const answers = Array.isArray(body.answers) ? body.answers.slice(0, 100) : []
   for (const a of answers) {
     const qid = parseInt(String((a && a.question_id) || ''), 10)
-    if (!qid) continue
+    if (!qid || !validIds.has(qid)) continue
     const text = (a && typeof a.answer_text === 'string') ? a.answer_text.slice(0, 2000) : ''
     await db.prepare("INSERT INTO guest_answers (guest_id, event_id, question_id, answer_text, answered_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(guest_id, question_id) DO UPDATE SET answer_text=excluded.answer_text, answered_at=datetime('now')").bind(guest.id, event.id, qid, text).run()
   }
@@ -1623,8 +1769,10 @@ app.post('/api/events/:code/guest-survey', async (c) => {
 app.get('/api/events/:code', authMiddleware, async (c) => {
   const code = c.req.param('code')
   const db = c.env.DB
-  const event = await db.prepare('SELECT * FROM events WHERE event_code = ? AND is_active = 1').bind(code).first()
-  if (!event) return c.json({ error: 'イベントが見つからないか、受付が終了しています' }, 404)
+  const event = await db.prepare('SELECT * FROM events WHERE event_code = ?').bind(code).first() as any
+  if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  const openRow = await db.prepare('SELECT ' + OPEN_SQL + ' AS open FROM events WHERE id = ?').bind(event.id).first() as any
+  if (!openRow || !openRow.open) return c.json({ error: CLOSED_MESSAGE, closed: true }, 410)
   const { results: questions } = await db.prepare('SELECT * FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
   const user = c.get('user')
   const attendance = await db.prepare('SELECT * FROM attendances WHERE event_id = ? AND user_id = ?').bind(event.id, user.id).first()
@@ -1637,10 +1785,11 @@ app.post('/api/events/:code/attend', authMiddleware, async (c) => {
   const code = c.req.param('code')
   const db = c.env.DB
   const event = await db
-    .prepare('SELECT id FROM events WHERE event_code = ? AND is_active = 1')
+    .prepare('SELECT id, ' + OPEN_SQL + ' AS open FROM events WHERE event_code = ?')
     .bind(code)
     .first() as any
   if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
+  if (!event.open) return c.json({ error: CLOSED_MESSAGE, closed: true }, 410)
 
   const user = c.get('user')
 
@@ -3996,15 +4145,6 @@ app.get('/attend/:code', (c) => {
       <button type="button" class="btn btn-primary" id="guestSubmitBtn"><i class="fas fa-check"></i> 出席を記録する</button>
       <div id="guestStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>
     </div>
-    <div style="margin-top:18px">
-      <a href="#" id="guestFindLink" style="font-size:12px;color:#888;text-decoration:underline">受付済みのゲストの方：振り返り（アンケート）に回答する</a>
-    </div>
-    <div id="guestFindForm" style="display:none;text-align:left;margin-top:14px">
-      <div class="form-group"><label>お名前（受付時と同じ） <span style="color:#c62828">*</span></label><input type="text" id="fName"></div>
-      <div class="form-group"><label>学校名（受付時と同じ）</label><input type="text" id="fSchool"></div>
-      <button type="button" class="btn btn-secondary" id="guestFindBtn" style="width:auto;padding:10px 24px;margin-top:0"><i class="fas fa-search"></i> 出席記録をさがす</button>
-      <div id="guestFindStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>
-    </div>
   </div>
   <div id="content" style="display:none"></div>
 </div>
@@ -4057,6 +4197,8 @@ if (guestSubmitBtn) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          guest_id: (gSaved() || {}).gid || null,
+          guest_token: (gSaved() || {}).gtoken || '',
           name: name,
           school: (document.getElementById('gSchool').value || '').trim(),
           district: (document.getElementById('gDistrict').value || '').trim(),
@@ -4069,8 +4211,10 @@ if (guestSubmitBtn) {
         if (d2.guest_id && d2.guest_token) {
           try { localStorage.setItem(GKEY, JSON.stringify({ gid: d2.guest_id, gtoken: d2.guest_token, name: name })); } catch(e) {}
         }
-        var note = d2.has_questions ? '<div style="background:#fff3e0;border:2px solid #ffb74d;border-radius:12px;padding:12px 14px;font-size:13px;color:#5d4037;margin-top:14px;line-height:1.7;text-align:left"><i class="fas fa-clipboard-list"></i> 会の最後に<b>もう一度同じQRコード</b>を読むと、振り返り（アンケート）に回答できます。</div>' : '';
+        var note = (d2.has_questions && !d2.other_device) ? '<div style="background:#fff3e0;border:2px solid #ffb74d;border-radius:12px;padding:12px 14px;font-size:13px;color:#5d4037;margin-top:14px;line-height:1.7;text-align:left"><i class="fas fa-clipboard-list"></i> 会の最後に<b>この端末で</b>もう一度同じQRコードを読むと、振り返り（アンケート）に回答できます。</div>' : '';
         document.getElementById('loginPrompt').innerHTML = '<div class="success-box"><i class="fas fa-check-circle"></i><p>' + escG(name) + ' さんの出席を記録しました。<br>ご参加ありがとうございます！</p></div>' + (d2.attended === false ? '<p style="color:#888;font-size:12px">（' + escG(d2.message || '既に記録済みでした') + '）</p>' : '') + note;
+      } else if (d2.closed) {
+        showClosedBox();
       } else {
         guestSubmitBtn.disabled = false;
         st.style.color = '#c62828'; st.textContent = d2.error || 'エラーが発生しました。もう一度お試しください。';
@@ -4085,13 +4229,32 @@ if (guestSubmitBtn) {
 // ===== ゲスト振り返り（同じQR再読み込み） =====
 function gSaved() { try { return JSON.parse(localStorage.getItem(GKEY) || 'null'); } catch(e) { return null; } }
 
+function showClosedBox(name) {
+  var lp = document.getElementById('loginPrompt');
+  if (!lp) return;
+  lp.innerHTML = '<i class="fas fa-door-closed fa-3x" style="color:#bbb;margin-bottom:12px"></i>'
+    + '<p style="font-weight:700;font-size:16px;color:#555">受付は終了しました</p>'
+    + (name ? '<p style="color:#888;font-size:13px">' + escG(name) + ' さん、ご参加ありがとうございました。</p>' : '')
+    + '<p style="color:#888;font-size:12px;margin-top:16px">会員の方は <a href="/login?redirect=/mypage">ログイン</a> してマイページをご覧ください。</p>';
+}
+
 async function guestCheckReturn() {
-  var saved = gSaved();
-  if (!saved || !saved.gid || !saved.gtoken) return;
+  var saved = gSaved() || {};
   try {
-    var r = await fetch('/api/events/' + CODE + '/guest-status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: saved.gid, guest_token: saved.gtoken }) });
-    if (!r.ok) { if (r.status === 404) { try { localStorage.removeItem(GKEY); } catch(e) {} } return; }
-    renderGuestSurvey(await r.json());
+    var r = await fetch('/api/events/' + CODE + '/guest-status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: saved.gid || null, guest_token: saved.gtoken || '' }) });
+    if (r.ok) {
+      var d = await r.json();
+      if (d.guest_token && d.guest) { try { localStorage.setItem(GKEY, JSON.stringify({ gid: d.guest.id, gtoken: d.guest_token, name: d.guest.name })); } catch(e) {} }
+      renderGuestSurvey(d);
+      return;
+    }
+    if (r.status === 410) { var dc = {}; try { dc = await r.json(); } catch(e) {} showClosedBox(dc.guest && dc.guest.name); return; }
+    if (r.status === 404 && saved.gid) { try { localStorage.removeItem(GKEY); } catch(e) {} }
+  } catch(e) {}
+  // 受付が終わっているかを確認（終わっていれば案内だけ表示）
+  try {
+    var ri = await fetch('/api/events/' + CODE + '/info');
+    if (ri.status === 410) showClosedBox();
   } catch(e) {}
 }
 
@@ -4184,8 +4347,7 @@ function renderGuestSurveyForm(d) {
 }
 
 async function submitGuestSurvey(d) {
-  var saved = gSaved();
-  if (!saved) return;
+  var saved = gSaved() || {};
   var st = document.getElementById('gSurveyStatus');
   var answers = [];
   (d.questions || []).forEach(function(q) {
@@ -4206,48 +4368,12 @@ async function submitGuestSurvey(d) {
       document.getElementById('loginPrompt').innerHTML = '<div class="success-box"><i class="fas fa-heart"></i><p>回答ありがとうございました！</p></div>';
       return;
     }
+    if (d2.closed) { showClosedBox(); return; }
     if (st) { st.style.color = '#c62828'; st.textContent = d2.error || '送信に失敗しました'; }
   } catch(e) {
     if (st) { st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました'; }
   }
   if (gb) gb.disabled = false;
-}
-
-// 別端末用：名前で出席記録をさがす
-var gfLink = document.getElementById('guestFindLink');
-if (gfLink) {
-  gfLink.addEventListener('click', function(ev) {
-    ev.preventDefault();
-    document.getElementById('guestFindForm').style.display = 'block';
-    gfLink.style.display = 'none';
-  });
-}
-var gfBtn = document.getElementById('guestFindBtn');
-if (gfBtn) {
-  gfBtn.addEventListener('click', async function() {
-    var st = document.getElementById('guestFindStatus');
-    var name = (document.getElementById('fName').value || '').trim();
-    var school = (document.getElementById('fSchool').value || '').trim();
-    if (!name) { st.style.color = '#c62828'; st.textContent = 'お名前を入力してください'; return; }
-    gfBtn.disabled = true;
-    st.style.color = '#888'; st.textContent = '確認中...';
-    try {
-      var res = await fetch('/api/events/' + CODE + '/guest-find', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name: name, school: school }) });
-      var d2 = {};
-      try { d2 = await res.json(); } catch(e) {}
-      if (res.ok && d2.guest_id) {
-        try { localStorage.setItem(GKEY, JSON.stringify({ gid: d2.guest_id, gtoken: d2.guest_token, name: d2.name })); } catch(e) {}
-        var r = await fetch('/api/events/' + CODE + '/guest-status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ guest_id: d2.guest_id, guest_token: d2.guest_token }) });
-        if (r.ok) { renderGuestSurvey(await r.json()); return; }
-        st.style.color = '#c62828'; st.textContent = '読み込みに失敗しました';
-      } else {
-        st.style.color = '#c62828'; st.textContent = d2.error || '見つかりませんでした';
-      }
-    } catch(e) {
-      st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました';
-    }
-    gfBtn.disabled = false;
-  });
 }
 
 async function fetchWithTimeout(url, options, ms) {
@@ -4274,6 +4400,10 @@ async function loadEvent() {
     if (!res.ok) {
       var errData = {};
       try { errData = await res.json(); } catch(e2) {}
+      if (errData.closed) {
+        document.getElementById('loading').innerHTML='<i class="fas fa-door-closed fa-3x" style="color:#bbb"></i><p style="font-weight:700;font-size:16px;color:#555;margin-top:12px">受付は終了しました</p><a href="/mypage" style="display:inline-block;margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border-radius:20px;font-size:14px;text-decoration:none">マイページへ</a>';
+        return;
+      }
       document.getElementById('loading').innerHTML='<p style="color:#c62828">'+(errData.error||'エラーが発生しました（'+res.status+'）')+'</p><button onclick="location.reload()" style="margin-top:12px;padding:10px 24px;background:#e65100;color:#fff;border:none;border-radius:20px;font-size:14px;cursor:pointer">再試行</button>';
       return;
     }
@@ -5061,6 +5191,12 @@ app.get('/admin/events', (c) => {
   .ev-ended-toggle:hover { background: #eee; }
   .ev-ended-list { margin-top: 6px; }
   .ev-item-ended .title { color: #999 !important; }
+  .rc-line { font-size: 12px; margin-top: 4px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .rc-open { color: #2e7d32; font-weight: 700; }
+  .rc-closed { color: #888; font-weight: 700; }
+  .btn-reopen { background: #fff; color: #1a237e; border: 1.5px solid #1a237e; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 6px; cursor: pointer; font-family: inherit; }
+  .btn-reopen-cancel { background: #fff; color: #777; border: 1px solid #bbb; font-size: 11px; padding: 2px 8px; border-radius: 6px; cursor: pointer; font-family: inherit; }
+  .rc-msg { color: #c62828; }
   .ev-empty { color: #888; text-align: center; padding: 16px 0; }
   @media print {
     .top-bar, .main { display: none !important; }
@@ -5255,8 +5391,25 @@ function todayStr() {
   return n.getFullYear() + '-' + String(n.getMonth()+1).padStart(2,'0') + '-' + String(n.getDate()).padStart(2,'0');
 }
 
+function receptionHtml(ev) {
+  if (ev.reception_open) {
+    var until = (ev.reopen_until && ev.reopen_until > (ev.reception_close_date || '')) ? ev.reopen_until : ev.reception_close_date;
+    var h = '<span class="rc-open"><i class="fas fa-door-open"></i> 受付中（' + escHtml(String(until || '').slice(5).replace('-', '/')) + 'まで）</span>';
+    if (ev.reopen_until) h += ' <button class="btn-reopen-cancel" data-action="reopen-cancel" data-id="'+ev.id+'">再開を取り消す</button>';
+    return h;
+  }
+  return '<span class="rc-closed"><i class="fas fa-door-closed"></i> 受付終了</span> <button class="btn-reopen" data-action="reopen-ev" data-id="'+ev.id+'"><i class="fas fa-redo"></i> 受付を再開</button>';
+}
+async function reopenEvent(id, cancel) {
+  try {
+    var res = await fetch('/api/admin/events/' + id + (cancel ? '/reopen-cancel' : '/reopen'), { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) { var d = {}; try { d = await res.json(); } catch(e) {} var el = document.getElementById('rcMsg_' + id); if (el) el.textContent = d.error || '変更できませんでした'; return; }
+    await loadEvents();
+  } catch(e) { var el2 = document.getElementById('rcMsg_' + id); if (el2) el2.textContent = '通信エラーが発生しました'; }
+}
+
 function eventItemHtml(ev, ended) {
-  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-edit" data-action="rename-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-pen"></i></button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
+  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div><div class="rc-line">'+receptionHtml(ev)+' <span class="rc-msg" id="rcMsg_'+ev.id+'"></span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-edit" data-action="rename-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-pen"></i></button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
 }
 
 function buildYearOptions() {
@@ -5548,6 +5701,8 @@ document.addEventListener('click', function(e) {
   else if (action === 'delete-ev') deleteEvent(id, btn.dataset.title);
   else if (action === 'rename-ev') renameEvent(id, btn.dataset.title);
   else if (action === 'detail') showEventDetail(id, btn.dataset.tab);
+  else if (action === 'reopen-ev') reopenEvent(id, false);
+  else if (action === 'reopen-cancel') reopenEvent(id, true);
 });
 
 loadEvents();
