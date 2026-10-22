@@ -4615,6 +4615,7 @@ function renderRecall(rc) {
   var sendBtn = document.getElementById('rcSend');
   if (sendBtn) sendBtn.addEventListener('click', function() { saveRecall(); });
   if (noteEl) noteEl.addEventListener('keydown', function(ev) { if (ev.key === 'Enter') { ev.preventDefault(); saveRecall(); } });
+  if (noteEl) noteEl.addEventListener('change', function() { if (String(noteEl.value || '').trim() !== rcState.note) saveRecall(); });
   var cl = document.getElementById('rcClose');
   if (cl) cl.addEventListener('click', function() {
     try { localStorage.setItem(RC_CLOSED_KEY, '1'); } catch(e) {}
@@ -4629,8 +4630,6 @@ async function saveRecall() {
   rcState.note = noteEl ? String(noteEl.value || '').trim().slice(0, 100) : '';
   if (rcSaving) { rcPending = true; return; }
   rcSaving = true;
-  var sendBtn = document.getElementById('rcSend');
-  if (sendBtn) sendBtn.disabled = true;
   if (st) { st.style.color = '#999'; st.textContent = '保存中...'; }
   var ok = false;
   try {
@@ -4638,7 +4637,6 @@ async function saveRecall() {
     ok = r.ok;
   } catch(e) { ok = false; }
   rcSaving = false;
-  if (sendBtn) sendBtn.disabled = false;
   if (rcPending) { rcPending = false; return saveRecall(); }
   if (st) {
     if (ok) { st.style.color = '#2e7d32'; st.innerHTML = '<i class="fas fa-check"></i> 残しました（あなたと運営だけが見られます）'; }
