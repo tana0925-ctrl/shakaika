@@ -6434,6 +6434,6 @@ app.post('/api/auth/logout', async (c) => {
 registerAnalytics(app, { authMiddleware, adminMiddleware, commonHead, aiMask })
 
 // ========== 個人ポートフォリオ・年度末の成長レポート（src/growth_portfolio.ts） ==========
-registerPortfolio(app, { authMiddleware, adminMiddleware, commonHead, stepKeywords: AI_STEP_KEYWORDS })
+registerPortfolio(app, { authMiddleware, adminMiddleware, commonHead, stepKeywords: AI_STEP_KEYWORDS, report: true })
 
 export default app
