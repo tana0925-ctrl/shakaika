@@ -448,6 +448,36 @@ export function registerNotify(app: any, deps: Deps) {
     const row = await db.prepare('SELECT scope_mode FROM admin_notify_settings WHERE admin_id = ?').bind(me.id).first() as any
     return c.json({ success: true, on: !!body.on, mode: modeOf(row) })
   })
+  // まとめてON/OFF（グループ別画面の「このグループを通知で受け取る」用）。
+  // 会員だけを対象にし、選択した人の追加・解除だけを行う（ほかのデータは触らない）。
+  // to_selected: true のときだけ、受け取る対象を「選択した人」に切り替える（タイミングの設定はそのまま）。
+  app.post('/api/notify/watch-bulk', authMiddleware, adminMiddleware, async (c: any) => {
+    const me = c.get('user')
+    const db: D1Database = c.env.DB
+    let body: any = {}
+    try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+    const raw: any[] = Array.isArray(body.user_ids) ? body.user_ids.slice(0, WATCH_MAX) : []
+    const ids = Array.from(new Set(raw.map((x) => parseInt(String(x), 10) || 0).filter((x) => x > 0)))
+    if (!ids.length) return c.json({ error: '対象の会員がいません' }, 400)
+    const { results } = await db.prepare("SELECT id FROM users WHERE role = 'member' AND id IN (" + ids.join(',') + ')').all() as any
+    const valid: number[] = (results || []).map((r: any) => Number(r.id))
+    if (body.on) {
+      const cur = await loadWatch(db, me.id)
+      const adding = valid.filter((x) => cur.indexOf(x) < 0)
+      if (cur.length + adding.length > WATCH_MAX) return c.json({ error: '選べるのは' + WATCH_MAX + '人までです（今' + cur.length + '人）' }, 400)
+      if (adding.length) await db.batch(adding.map((uid) => db.prepare("INSERT OR IGNORE INTO admin_watch_members (admin_id, user_id, created_at) VALUES (?, ?, datetime('now'))").bind(me.id, uid)))
+      if (body.to_selected) {
+        await db.prepare(
+          "INSERT INTO admin_notify_settings (admin_id, scope_mode, push_mode, updated_at) VALUES (?, 'selected', 'daily', datetime('now')) " +
+          "ON CONFLICT(admin_id) DO UPDATE SET scope_mode = 'selected', updated_at = datetime('now')"
+        ).bind(me.id).run()
+      }
+    } else if (valid.length) {
+      await db.prepare('DELETE FROM admin_watch_members WHERE admin_id = ? AND user_id IN (' + valid.join(',') + ')').bind(me.id).run()
+    }
+    const row = await db.prepare('SELECT scope_mode FROM admin_notify_settings WHERE admin_id = ?').bind(me.id).first() as any
+    return c.json({ success: true, on: !!body.on, mode: modeOf(row), ids: await loadWatch(db, me.id) })
+  })
   // 名前・学校名で会員をさがす（設定画面で選ぶ用。最大30人）
   app.get('/api/notify/members', authMiddleware, adminMiddleware, async (c: any) => {
     const me = c.get('user')
