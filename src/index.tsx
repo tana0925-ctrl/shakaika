@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { getCookie, setCookie } from 'hono/cookie'
+import { registerDuplicates } from './growth_duplicates'
 import { registerPortfolio } from './growth_portfolio'
 import { registerAnalytics } from './growth_analytics'
 
@@ -3918,6 +3919,7 @@ app.get('/admin', (c) => {
     <a href="/admin/events" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-calendar-alt"></i> イベント</a>
     <a href="/admin/groups" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-users"></i> グループ別</a>
     <a href="/admin/analytics" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-chart-bar"></i> 分析</a>
+    <a href="/admin/duplicates" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-user-friends"></i> 重複のまとめ</a>
     <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i> ログアウト</button>
   </div>
 </div>
@@ -6435,5 +6437,8 @@ registerAnalytics(app, { authMiddleware, adminMiddleware, commonHead, aiMask })
 
 // ========== 個人ポートフォリオ・年度末の成長レポート（src/growth_portfolio.ts） ==========
 registerPortfolio(app, { authMiddleware, adminMiddleware, commonHead, stepKeywords: AI_STEP_KEYWORDS, report: true })
+
+// ========== 重複のまとめ（src/growth_duplicates.ts） ==========
+registerDuplicates(app, { authMiddleware, adminMiddleware, commonHead })
 
 export default app
