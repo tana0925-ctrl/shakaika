@@ -975,6 +975,7 @@ app.get('/api/me/history', authMiddleware, async (c) => {
       e.description,
       e.event_date,
       e.event_code,
+      e.insights_enabled,
       a.attended_at,
       sa.satisfaction,
       sa.comment,
@@ -1013,6 +1014,7 @@ app.get('/api/me/history', authMiddleware, async (c) => {
       description: r.description || '',
       event_date: r.event_date,
       event_code: r.event_code,
+      insights_enabled: r.insights_enabled === 0 ? 0 : 1,
       attended_at: r.attended_at,
       survey: {
         satisfaction: r.satisfaction ?? null,
@@ -1566,8 +1568,10 @@ function generateEventCode(): string {
 }
 
 app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
-  const { title, description, event_date, custom_questions } = await c.req.json()
+  const { title, description, event_date, custom_questions, insights_enabled } = await c.req.json()
   if (!title || !event_date) return c.json({ error: 'タイトルと日付は必須です' }, 400)
+  // みんなの気づきの対象（初期値ON。false/0 が送られたときだけOFF）
+  const insightsOn = (insights_enabled === false || insights_enabled === 0 || insights_enabled === '0') ? 0 : 1
   const db = c.env.DB
   const user = c.get('user')
   let code = ''
@@ -1576,8 +1580,8 @@ app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
     code = generateEventCode()
     try {
       res = await db.prepare(
-        'INSERT INTO events (title, description, event_date, event_code, created_by) VALUES (?,?,?,?,?)'
-      ).bind(title, description || '', event_date, code, user.id).run()
+        'INSERT INTO events (title, description, event_date, event_code, created_by, insights_enabled) VALUES (?,?,?,?,?,?)'
+      ).bind(title, description || '', event_date, code, user.id, insightsOn).run()
       break
     } catch (e: any) {
       if (attempt === 4 || !e.message?.includes('UNIQUE')) throw e
@@ -1675,7 +1679,13 @@ app.put('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
   const ev = await db.prepare('SELECT id FROM events WHERE id = ?').bind(id).first()
   if (!ev) return c.json({ error: 'イベントが見つかりません' }, 404)
   await db.prepare('UPDATE events SET title = ? WHERE id = ?').bind(title, id).run()
-  return c.json({ success: true, title })
+  // みんなの気づきの対象（送られたときだけ変更。OFFにしても採用済みの紹介文は消さない＝表示だけ止まる）
+  let insightsOn: number | undefined
+  if (Object.prototype.hasOwnProperty.call(body, 'insights_enabled')) {
+    insightsOn = (body.insights_enabled === false || body.insights_enabled === 0 || body.insights_enabled === '0') ? 0 : 1
+    await db.prepare('UPDATE events SET insights_enabled = ? WHERE id = ?').bind(insightsOn, id).run()
+  }
+  return c.json({ success: true, title, insights_enabled: insightsOn })
 })
 
 app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
@@ -1802,7 +1812,7 @@ app.post('/api/events/:code/guest-status', async (c) => {
   const db = c.env.DB
   let body: any = {}
   try { body = await c.req.json() } catch (e) { body = {} }
-  const event = await db.prepare('SELECT id, title, event_date, ' + OPEN_SQL + ' AS open FROM events WHERE event_code = ?').bind(code).first() as any
+  const event = await db.prepare('SELECT id, title, event_date, insights_enabled, ' + OPEN_SQL + ' AS open FROM events WHERE event_code = ?').bind(code).first() as any
   if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
   const cred = guestCredential(c, body, event.id)
   if (!cred.gid || !cred.tok) return c.json({ error: '出席記録が見つかりません' }, 404)
@@ -1814,7 +1824,7 @@ app.post('/api/events/:code/guest-status', async (c) => {
   const { results: questions } = await db.prepare('SELECT id, question_text, question_type, options, sort_order' + (_reqColOk ? ', required' : '') + ' FROM survey_questions WHERE event_id = ? ORDER BY sort_order').bind(event.id).all()
   const { results: answers } = await db.prepare('SELECT question_id, answer_text FROM guest_answers WHERE guest_id = ? AND event_id = ?').bind(guest.id, event.id).all()
   const shareConsent = await getShareConsent(db, event.id, 'guest', guest.id)
-  return c.json({ event: { title: event.title, event_date: event.event_date }, guest: { id: guest.id, name: guest.name }, guest_token: cred.tok, questions, answers, share_consent: shareConsent })
+  return c.json({ event: { title: event.title, event_date: event.event_date, insights_enabled: event.insights_enabled === 0 ? 0 : 1 }, guest: { id: guest.id, name: guest.name }, guest_token: cred.tok, questions, answers, share_consent: shareConsent })
 })
 
 // （廃止）名前・学校名での照合：他人が回答を見たり書き換えたりできたため削除
@@ -1824,7 +1834,7 @@ app.post('/api/events/:code/guest-find', (c) => c.json({ error: 'この機能は
 app.post('/api/events/:code/guest-survey', async (c) => {
   const code = c.req.param('code')
   const db = c.env.DB
-  const event = await db.prepare('SELECT id, ' + OPEN_SQL + ' AS open FROM events WHERE event_code = ?').bind(code).first() as any
+  const event = await db.prepare('SELECT id, insights_enabled, ' + OPEN_SQL + ' AS open FROM events WHERE event_code = ?').bind(code).first() as any
   if (!event) return c.json({ error: 'イベントが見つかりません' }, 404)
   let body: any = {}
   try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
@@ -1843,7 +1853,7 @@ app.post('/api/events/:code/guest-survey', async (c) => {
     await db.prepare("INSERT INTO guest_answers (guest_id, event_id, question_id, answer_text, answered_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(guest_id, question_id) DO UPDATE SET answer_text=excluded.answer_text, answered_at=datetime('now')").bind(guest.id, event.id, qid, text).run()
   }
   // 紹介の同意（同意欄つきのフォームから送られたときだけ。失敗しても回答は成立）
-  if (Object.prototype.hasOwnProperty.call(body, 'share_consent')) {
+  if (event.insights_enabled !== 0 && Object.prototype.hasOwnProperty.call(body, 'share_consent')) {
     try { const sc = parseShareConsent(body.share_consent); if (sc) await saveShareConsent(db, event.id, 'guest', guest.id, sc) } catch (e) { /* ignore */ }
   }
   // 事務局の「新着」へ（裏の処理。失敗しても回答は成立）
@@ -1914,7 +1924,7 @@ app.post('/api/events/:code/survey', authMiddleware, async (c) => {
     'INSERT OR IGNORE INTO points (user_id, event_id, points, reason, fiscal_year) VALUES (?, ?, 1, ?, ?)'
   ).bind(user.id, event.id, 'event_survey', fy).run()
   // 紹介の同意（同意欄つきのフォームから送られたときだけ。失敗しても回答は成立）
-  if (reqBody && Object.prototype.hasOwnProperty.call(reqBody, 'share_consent')) {
+  if (event.insights_enabled !== 0 && reqBody && Object.prototype.hasOwnProperty.call(reqBody, 'share_consent')) {
     try { const sc = parseShareConsent(reqBody.share_consent); if (sc) await saveShareConsent(db, event.id, 'member', user.id, sc) } catch (e) { /* ignore */ }
   }
   // 事務局の「新着」へ（裏の処理。失敗しても回答は成立）
@@ -2013,7 +2023,9 @@ const INSIGHT_VIEW_SQL =
   "LEFT JOIN users u ON si.respondent_type = 'member' AND u.id = si.respondent_id " +
   "LEFT JOIN guest_attendances g ON si.respondent_type = 'guest' AND g.id = si.respondent_id " +
   'LEFT JOIN survey_questions q ON q.id = si.question_id ' +
-  "WHERE sc.consent IN ('anon','named') "
+  "WHERE sc.consent IN ('anon','named') " +
+  // 「みんなの気づきの対象」がOFFの回は出さない（採用済みのデータは残る。ONに戻せば再び出る）
+  'AND EXISTS (SELECT 1 FROM events ie WHERE ie.id = si.event_id AND ie.insights_enabled = 1) '
 function insightOut(r: any) {
   return { body: String(r.body || ''), name: r.consent === 'named' && r.name ? String(r.name) : null, question_text: r.question_text ? String(r.question_text) : '' }
 }
@@ -2025,7 +2037,7 @@ app.get('/api/events/:code/insights-prev', authMiddleware, async (c) => {
     const cur = await db.prepare('SELECT id, event_date FROM events WHERE event_code = ?').bind(c.req.param('code')).first() as any
     if (!cur) return c.json({ prev: null })
     const prev = await db.prepare(
-      'SELECT e.id, e.title, e.event_date FROM events e WHERE (e.event_date < ? OR (e.event_date = ? AND e.id < ?)) AND e.id <> ? ' +
+      'SELECT e.id, e.title, e.event_date FROM events e WHERE (e.event_date < ? OR (e.event_date = ? AND e.id < ?)) AND e.id <> ? AND e.insights_enabled = 1 ' +
       "AND EXISTS (SELECT 1 FROM shared_insights si JOIN share_consents sc ON sc.event_id = si.event_id AND sc.respondent_type = si.respondent_type AND sc.respondent_id = si.respondent_id WHERE si.event_id = e.id AND sc.consent IN ('anon','named')) " +
       'ORDER BY e.event_date DESC, e.id DESC LIMIT 1'
     ).bind(cur.event_date, cur.event_date, cur.id, cur.id).first() as any
@@ -2063,8 +2075,9 @@ app.post('/api/events/:code/share-consent', authMiddleware, async (c) => {
   try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
   const consent = parseShareConsent(body.share_consent)
   if (!consent) return c.json({ error: '入力が不正です' }, 400)
-  const ev = await db.prepare('SELECT id FROM events WHERE event_code = ?').bind(c.req.param('code')).first() as any
+  const ev = await db.prepare('SELECT id, insights_enabled FROM events WHERE event_code = ?').bind(c.req.param('code')).first() as any
   if (!ev) return c.json({ error: 'イベントが見つかりません' }, 404)
+  if (ev.insights_enabled === 0) return c.json({ error: 'この会は「みんなの気づき」の対象外です' }, 403)
   const cur = await getShareConsent(db, ev.id, 'member', user.id)
   if (!cur) return c.json({ error: 'この会の回答には紹介の同意欄がありません' }, 404)
   await saveShareConsent(db, ev.id, 'member', user.id, consent)
@@ -2076,6 +2089,13 @@ app.get('/api/admin/events/:id/insights', authMiddleware, adminMiddleware, async
   const id = parseInt(c.req.param('id'))
   if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
   const db = c.env.DB
+  const evRow = await db.prepare('SELECT id, insights_enabled FROM events WHERE id = ?').bind(id).first() as any
+  if (!evRow) return c.json({ error: 'イベントが見つかりません' }, 404)
+  // 対象外の回：一覧は返さない（採用済みのデータは残っているので件数だけ知らせる）
+  if (evRow.insights_enabled === 0) {
+    const n = await db.prepare('SELECT COUNT(*) AS n FROM shared_insights WHERE event_id = ?').bind(id).first() as any
+    return c.json({ enabled: false, people: [], adopted_count: 0, kept_count: n ? Number(n.n) || 0 : 0 })
+  }
   const { results: qs } = await db.prepare("SELECT id, question_text, sort_order FROM survey_questions WHERE event_id = ? AND question_type = 'text' ORDER BY sort_order").bind(id).all() as any
   const { results: cons } = await db.prepare(
     'SELECT sc.respondent_type, sc.respondent_id, sc.consent, ' +
@@ -2112,7 +2132,7 @@ app.get('/api/admin/events/:id/insights', authMiddleware, adminMiddleware, async
     }
     if (answers.length) people.push({ respondent_type: p.respondent_type, respondent_id: p.respondent_id, name: p.name || '', consent: p.consent, answers })
   }
-  return c.json({ people, adopted_count: people.reduce((n, p) => n + p.answers.filter((a: any) => a.adopted).length, 0) })
+  return c.json({ enabled: true, people, adopted_count: people.reduce((n, p) => n + p.answers.filter((a: any) => a.adopted).length, 0) })
 })
 
 // 管理者：採用（新規）・文面の更新
@@ -2129,6 +2149,9 @@ app.post('/api/admin/events/:id/insights', authMiddleware, adminMiddleware, asyn
   if (!text) return c.json({ error: '紹介する文面が空です' }, 400)
   if (text.length > INSIGHT_BODY_MAX) return c.json({ error: '文面が長すぎます（' + INSIGHT_BODY_MAX + '字まで）' }, 400)
   const db = c.env.DB
+  const evRow = await db.prepare('SELECT insights_enabled FROM events WHERE id = ?').bind(id).first() as any
+  if (!evRow) return c.json({ error: 'イベントが見つかりません' }, 404)
+  if (evRow.insights_enabled === 0) return c.json({ error: 'この回は「みんなの気づき」の対象外です' }, 403)
   const consent = await getShareConsent(db, id, rtype, rid)
   if (consent !== 'anon' && consent !== 'named') return c.json({ error: 'この方は紹介に同意していません' }, 403)
   const q = await db.prepare("SELECT id FROM survey_questions WHERE id = ? AND event_id = ? AND question_type = 'text'").bind(qid, id).first()
@@ -3350,7 +3373,7 @@ function renderHistory(events) {
       +   '<div class="event-detail" id="' + esc(detailId) + '">'
       +     (comment ? '<div style="color:#555;white-space:pre-wrap">' + comment + '</div>' : '')
       +     qaHtml
-      +     (ev.share_consent ? '<div style="margin-top:10px;font-weight:700;color:#555;font-size:12px">紹介について（あとから変えられます）</div>' + scBlockHtml('hsc_' + ev.event_id, ev.share_consent) + '<div class="sc-status" id="hscStatus_' + ev.event_id + '"></div>' : '')
+      +     ((ev.share_consent && ev.insights_enabled !== 0) ? '<div style="margin-top:10px;font-weight:700;color:#555;font-size:12px">紹介について（あとから変えられます）</div>' + scBlockHtml('hsc_' + ev.event_id, ev.share_consent) + '<div class="sc-status" id="hscStatus_' + ev.event_id + '"></div>' : '')
       +   '</div>'
       + '</div>';
   }
@@ -3360,7 +3383,7 @@ function renderHistory(events) {
   // 紹介の同意の変更（その場で保存）
   for (const ev0 of events) {
     const ev = ev0 || {};
-    if (!ev.share_consent) continue;
+    if (!ev.share_consent || ev.insights_enabled === 0) continue;
     try {
       scBind(root, 'hsc_' + ev.event_id, async (v) => {
         const stEl = document.getElementById('hscStatus_' + ev.event_id);
@@ -3461,7 +3484,7 @@ function openAnswerForm(eventId) {
     }
     html += '</div>';
   }
-  html += scBlockHtml('msc_' + eventId, null);
+  if (ev.insights_enabled !== 0) html += scBlockHtml('msc_' + eventId, null);
   html += '<button type="button" class="answer-btn" id="mpSubmit_' + eventId + '" style="padding:10px 24px;font-size:13px"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
   html += '<div id="mpStatus_' + eventId + '" style="font-size:12px;margin-top:8px;color:#c62828"></div>';
   det.innerHTML = html;
@@ -4852,7 +4875,7 @@ function renderGuestSurveyForm(d) {
     }
     html += '</div>';
   }
-  html += scBlockHtml('gsc', d.share_consent || null);
+  if (!d.event || d.event.insights_enabled !== 0) html += scBlockHtml('gsc', d.share_consent || null);
   html += '<button type="button" class="btn btn-primary" id="gSurveyBtn"><i class="fas fa-paper-plane"></i> アンケートを送信</button>';
   html += '<div id="gSurveyStatus" style="margin-top:10px;font-size:13px;text-align:center"></div>';
   html += '</div>';
@@ -5841,6 +5864,13 @@ app.get('/admin/events', (c) => {
   .ev-rename-save { background: #1a237e; color: #fff; font-size: 12px; font-weight: 700; padding: 7px 16px; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; }
   .ev-rename-cancel { background: #eee; color: #555; font-size: 12px; font-weight: 700; padding: 7px 16px; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; }
   .ev-rename-status { font-size: 12px; color: #c62828; width: 100%; }
+  .ins-toggle { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; padding: 10px 12px; background: #f1f8e9; border: 1px solid #c5e1a5; border-radius: 10px; cursor: pointer; font-size: 13px; color: #33691e; line-height: 1.5; }
+  .ins-toggle input { width: 20px; height: 20px; margin: 1px 0 0; flex: none; accent-color: #558b2f; }
+  .ins-toggle small { display: block; font-size: 11px; color: #689f38; font-weight: 400; }
+  .ins-toggle.off { background: #fafafa; border-color: #e0e0e0; color: #757575; }
+  .ins-toggle.off small { color: #9e9e9e; }
+  .ev-rename-box .ins-toggle { width: 100%; margin-top: 0; }
+  .badge-insoff { background: #eeeeee; color: #757575; font-size: 10px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
   .event-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #eee; flex-wrap: wrap; gap: 8px; }
   .event-item:last-child { border-bottom: none; }
   .event-info .title { font-weight: 700; font-size: 15px; }
@@ -5975,6 +6005,7 @@ app.get('/admin/events', (c) => {
     <div class="form-row">
       <textarea id="evDesc" rows="2" placeholder="説明（任意）" style="width:100%"></textarea>
     </div>
+    <label class="ins-toggle"><input type="checkbox" id="evInsights" checked onchange="syncInsightsNote()"><span><b><i class="fas fa-comments"></i> みんなの気づきの対象にする</b><small>ONにすると、振り返りの最後に紹介の同意欄が付き、採用したものが「みんなの気づき」に載ります。</small></span></label>
     <div class="custom-q-area">
       <strong style="font-size:13px;color:#555"><i class="fas fa-question-circle"></i> カスタム質問（任意）</strong>
       <div class="preset-area" style="margin-top:8px">
@@ -5985,8 +6016,8 @@ app.get('/admin/events', (c) => {
       <div id="customQuestions" style="margin-top:10px"></div>
       <button class="btn-add-q" id="btnAddQ" onclick="toggleTypePicker()"><i class="fas fa-plus"></i> 新規追加</button>
       <div class="q-card fixed" style="margin-top:12px">
-        <div style="font-size:12px;font-weight:700;color:#8d6e63"><i class="fas fa-lock"></i> 最後に自動で付きます：紹介の同意欄（任意）</div>
-        <div style="font-size:11px;color:#999;margin:4px 0 8px;line-height:1.6">質問があるすべての回に、会員・ゲストどちらのフォームにも付きます。質問の数やCSVには入りません。選ばれた回答は、各回の「みんなの気づき」タブで選んで紹介できます。</div>
+        <div style="font-size:12px;font-weight:700;color:#8d6e63"><i class="fas fa-lock"></i> 最後に自動で付きます：紹介の同意欄（任意）<span id="evInsightsOffNote" style="display:none;color:#c62828;margin-left:6px">← 「みんなの気づきの対象にする」がOFFなので付きません</span></div>
+        <div style="font-size:11px;color:#999;margin:4px 0 8px;line-height:1.6">「みんなの気づきの対象にする」がONの回に、会員・ゲストどちらのフォームにも付きます。質問の数やCSVには入りません。選ばれた回答は、各回の「みんなの気づき」タブで選んで紹介できます。</div>
         <div style="font-size:12px;color:#666;line-height:1.9">□ 名前なしで紹介してもよい<br>□ 名前ありで紹介してもよい<br><span style="font-size:11px;color:#8d6e63">※ いただいた振り返りの中から、一部をご紹介させていただきます。</span></div>
       </div>
       <div class="type-picker" id="typePicker" style="display:none">
@@ -6104,11 +6135,22 @@ function applyPreset(type) {
 }
 
 
+function syncInsightsNote() {
+  var el = document.getElementById('evInsights');
+  var on = !el || el.checked;
+  var lb = el ? el.closest('.ins-toggle') : null;
+  if (lb) lb.classList.toggle('off', !on);
+  var n = document.getElementById('evInsightsOffNote');
+  if (n) n.style.display = on ? 'none' : 'inline';
+}
+
 async function submitCreateEvent() {
   const title = document.getElementById('evTitle').value;
   const event_date = document.getElementById('evDate').value;
   const description = document.getElementById('evDesc').value;
   if (!title||!event_date) { alert('タイトルと日付を入力してください'); return; }
+  const insEl = document.getElementById('evInsights');
+  const insights_enabled = insEl ? !!insEl.checked : true;
   const custom_questions = [];
   for (const q of qList) {
     const text = (q.text || '').trim();
@@ -6121,9 +6163,9 @@ async function submitCreateEvent() {
   }
   const res = await fetch('/api/admin/events', {
     method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
-    body: JSON.stringify({ title, event_date, description, custom_questions })
+    body: JSON.stringify({ title, event_date, description, custom_questions, insights_enabled })
   });
-  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; qList=[]; renderQuestions(); document.getElementById('typePicker').style.display='none'; loadEvents(); }
+  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; if (insEl) { insEl.checked = true; syncInsightsNote(); } qList=[]; renderQuestions(); document.getElementById('typePicker').style.display='none'; loadEvents(); }
   else { const d = await res.json(); alert(d.error); }
 }
 
@@ -6168,7 +6210,7 @@ async function reopenEvent(id, cancel) {
 }
 
 function eventItemHtml(ev, ended) {
-  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span></div><div class="rc-line">'+receptionHtml(ev)+' <span class="rc-msg" id="rcMsg_'+ev.id+'"></span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-edit" data-action="rename-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-pen"></i></button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
+  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span>'+(ev.insights_enabled === 0 ? ' <span class="badge-insoff" title="みんなの気づきの対象外の回です"><i class="fas fa-comment-slash"></i> 気づき対象外</span>' : '')+'</div><div class="rc-line">'+receptionHtml(ev)+' <span class="rc-msg" id="rcMsg_'+ev.id+'"></span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-edit" data-action="rename-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-pen"></i></button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
 }
 
 function buildYearOptions() {
@@ -6299,7 +6341,10 @@ function renameEvent(id, currentTitle) {
   if (wrap.querySelector('.ev-rename-box')) return; // 既に編集中
   var box = document.createElement('div');
   box.className = 'ev-rename-box';
+  var evObj = eventsData.find(function(e){ return e.id === id; }) || {};
+  var curIns = evObj.insights_enabled === 0 ? 0 : 1;
   box.innerHTML = '<input type="text" class="ev-rename-input" maxlength="100">'
+    + '<label class="ins-toggle' + (curIns ? '' : ' off') + '"><input type="checkbox" class="ev-ins-input"' + (curIns ? ' checked' : '') + '><span><b><i class="fas fa-comments"></i> みんなの気づきの対象にする</b><small>ONにすると、振り返りの最後に紹介の同意欄が付き、採用したものが「みんなの気づき」に載ります。OFFにすると、採用済みのものも表示されなくなります（消えません。ONに戻すと再び表示）。</small></span></label>'
     + '<button class="ev-rename-save"><i class="fas fa-check"></i> 保存</button>'
     + '<button class="ev-rename-cancel">キャンセル</button>'
     + '<div class="ev-rename-status"></div>';
@@ -6310,12 +6355,15 @@ function renameEvent(id, currentTitle) {
   input.focus();
   input.select();
   var statusEl = box.querySelector('.ev-rename-status');
+  var insInput = box.querySelector('.ev-ins-input');
+  insInput.addEventListener('change', function() { insInput.closest('.ins-toggle').classList.toggle('off', !insInput.checked); });
   function close() { box.remove(); }
   box.querySelector('.ev-rename-cancel').addEventListener('click', close);
   async function save() {
     var newTitle = (input.value || '').trim();
     if (!newTitle) { statusEl.textContent = 'イベント名を入力してください'; return; }
-    if (newTitle === currentTitle) { close(); return; }
+    var newIns = insInput.checked ? 1 : 0;
+    if (newTitle === currentTitle && newIns === curIns) { close(); return; }
     var saveBtn = box.querySelector('.ev-rename-save');
     saveBtn.disabled = true;
     statusEl.style.color = '#888'; statusEl.textContent = '保存中...';
@@ -6323,7 +6371,7 @@ function renameEvent(id, currentTitle) {
       var res = await fetch('/api/admin/events/'+id, {
         method: 'PUT',
         headers: { 'Authorization': 'Bearer '+token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: newTitle })
+        body: JSON.stringify({ title: newTitle, insights_enabled: !!newIns })
       });
       var d = {};
       try { d = await res.json(); } catch(e) {}
@@ -6365,7 +6413,7 @@ function renderDetail(el, d, tab) {
   html += '<div class="detail-tab'+(tab==='sur'?' active':'')+'" data-dtab="sur" data-eid="'+d.event.id+'"><i class="fas fa-clipboard"></i> 回答 ('+d.answers.length+')</div>';
   var rList = d.recalls || [];
   html += '<div class="detail-tab'+(tab==='rc'?' active':'')+'" data-dtab="rc" data-eid="'+d.event.id+'"><i class="fas fa-bookmark"></i> 前回のふり返り ('+rList.length+')</div>';
-  html += '<div class="detail-tab'+(tab==='ins'?' active':'')+'" data-dtab="ins" data-eid="'+d.event.id+'"><i class="fas fa-comments"></i> みんなの気づき</div>';
+  html += '<div class="detail-tab'+(tab==='ins'?' active':'')+'" data-dtab="ins" data-eid="'+d.event.id+'"><i class="fas fa-comments"></i> みんなの気づき'+(d.event.insights_enabled === 0 ? '（対象外）' : '')+'</div>';
   html += '</div>';
 
   if (tab === 'ins') {
@@ -6489,6 +6537,12 @@ async function loadInsightsPane(eventId) {
 function renderInsightsPane(eventId, d) {
   var pane = document.getElementById('insPane_' + eventId);
   if (!pane) return;
+  if (d.enabled === false) {
+    pane.innerHTML = '<div class="no-data" style="text-align:left;line-height:1.8"><i class="fas fa-comment-slash"></i> この回は「みんなの気づき」の<b>対象外の回</b>です。<br>振り返りフォームに紹介の同意欄は出ず、受付画面やマイページの「みんなの気づき」にも載りません。'
+      + (d.kept_count ? '<br>この回で以前に採用した ' + d.kept_count + ' 件は、消さずに残してあります（表示はしていません）。' : '')
+      + '<br>対象にするには、イベント一覧の <i class="fas fa-pen"></i> ボタンで「みんなの気づきの対象にする」をONにしてください。</div>';
+    return;
+  }
   var people = d.people || [];
   var h = '<div class="ins-lead">紹介に同意した人の振り返り（文章の回答）だけを表示しています。<b>学校名・子どもの名前など</b>は消してから「採用」してください。元の回答は書き換わりません。<br>採用したものは、次の回の受付画面（会員のみ）とマイページ「みんなの気づき」に出ます。名前あり同意でも、出るのは名前だけです。</div>';
   h += '<div style="font-size:12px;color:#555;margin-bottom:8px">同意した人 <b>' + people.length + '</b> 人 ／ 採用 <b>' + (d.adopted_count || 0) + '</b> 件</div>';
