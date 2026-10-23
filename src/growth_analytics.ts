@@ -280,6 +280,9 @@ function analyticsPage(commonHead: string): string {
 <title>分析ダッシュボード - 社会科同好会</title>
 <style>${GV_ADMIN_CSS}
 .ctrl{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.ctrl select{max-width:100%}
+table.t td:first-child{white-space:nowrap}
+@media(max-width:600px){.barcell{display:none}}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:6px}
 .tile{background:#f5f6fb;border-radius:12px;padding:10px 12px}
 .tile .n{font-size:24px;font-weight:700;color:#1a237e;line-height:1.2}
