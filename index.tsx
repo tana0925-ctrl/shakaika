@@ -6,7 +6,7 @@ import { registerPortfolio } from './growth_portfolio'
 import { registerAnalytics } from './growth_analytics'
 import { registerNotify, notifyReflection } from './growth_notify'
 import { A2HS_HEAD_SCRIPT, a2hsCardHtml, registerInstallHelp } from './app_install'
-import { registerSheet, normGroup } from './growth_sheet'
+import { registerSheet, normGroup, guessEventKind, normEventKind } from './growth_sheet'
 
 type Bindings = {
   DB: D1Database
@@ -1048,7 +1048,7 @@ app.get('/api/me/history', authMiddleware, async (c) => {
 // ========== Admin API ==========
 app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
   const { results: members } = await c.env.DB.prepare(
-    `SELECT u.id, u.name, u.school, u.email, u.role, u.district, u.experience_years, u.grade, u.position, u.school_type, u.training_group,
+    `SELECT u.id, u.name, u.school, u.email, u.role, u.district, u.experience_years, u.grade, u.position, u.school_type, u.training_group, u.promoter,
       datetime(u.created_at, '+9 hours') as created_at,
       GROUP_CONCAT(s.viewpoint || ':' || s.step || ':' || COALESCE(s.memo,''), '||') as selections_raw
      FROM users u
@@ -1080,6 +1080,7 @@ app.get('/api/admin/members', authMiddleware, adminMiddleware, async (c) => {
       position: m.position || '',
       school_type: m.school_type || '',
       training_group: (m as any).training_group || '',
+      promoter: (m as any).promoter ? 1 : 0,
       created_at: m.created_at,
       selections
     }
@@ -1119,6 +1120,18 @@ app.patch('/api/admin/members/:id/training-group', authMiddleware, adminMiddlewa
   const { training_group } = await c.req.json()
   await c.env.DB.prepare('UPDATE users SET training_group = ? WHERE id = ?').bind(training_group || '', id).run()
   return c.json({ success: true })
+})
+
+// 推進部員のしるし（管理者のみ。1枚シートの「研究」の会の参加率に使う。一般会員の画面には出さない）
+app.patch('/api/admin/members/:id/promoter', authMiddleware, adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: '不正なIDです' }, 400)
+  let body: any = {}
+  try { body = await c.req.json() } catch (e) { return c.json({ error: '入力が不正です' }, 400) }
+  const on = body.on === true || body.on === 1 || body.on === '1' ? 1 : 0
+  const r = await c.env.DB.prepare('UPDATE users SET promoter = ? WHERE id = ?').bind(on, id).run()
+  if (!r.meta || !r.meta.changes) return c.json({ error: '会員が見つかりません' }, 404)
+  return c.json({ success: true, promoter: on })
 })
 
 app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) => {
@@ -1568,8 +1581,10 @@ function generateEventCode(): string {
 }
 
 app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
-  const { title, description, event_date, custom_questions, insights_enabled } = await c.req.json()
+  const { title, description, event_date, custom_questions, insights_enabled, event_kind } = await c.req.json()
   if (!title || !event_date) return c.json({ error: 'タイトルと日付は必須です' }, 400)
+  // 会の種類（研修／研究／その他）。送られないときは会名から推定
+  const kind = normEventKind(event_kind) || guessEventKind(title)
   // みんなの気づきの対象（初期値ON。false/0 が送られたときだけOFF）
   const insightsOn = (insights_enabled === false || insights_enabled === 0 || insights_enabled === '0') ? 0 : 1
   const db = c.env.DB
@@ -1580,8 +1595,8 @@ app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
     code = generateEventCode()
     try {
       res = await db.prepare(
-        'INSERT INTO events (title, description, event_date, event_code, created_by, insights_enabled) VALUES (?,?,?,?,?,?)'
-      ).bind(title, description || '', event_date, code, user.id, insightsOn).run()
+        'INSERT INTO events (title, description, event_date, event_code, created_by, insights_enabled, event_kind) VALUES (?,?,?,?,?,?,?)'
+      ).bind(title, description || '', event_date, code, user.id, insightsOn, kind).run()
       break
     } catch (e: any) {
       if (attempt === 4 || !e.message?.includes('UNIQUE')) throw e
@@ -1678,6 +1693,7 @@ app.put('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
   const db = c.env.DB
   const ev = await db.prepare('SELECT id FROM events WHERE id = ?').bind(id).first()
   if (!ev) return c.json({ error: 'イベントが見つかりません' }, 404)
+  if (Object.prototype.hasOwnProperty.call(body, 'event_kind') && !normEventKind(body.event_kind)) return c.json({ error: '会の種類が正しくありません' }, 400)
   await db.prepare('UPDATE events SET title = ? WHERE id = ?').bind(title, id).run()
   // みんなの気づきの対象（送られたときだけ変更。OFFにしても採用済みの紹介文は消さない＝表示だけ止まる）
   let insightsOn: number | undefined
@@ -1685,7 +1701,15 @@ app.put('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
     insightsOn = (body.insights_enabled === false || body.insights_enabled === 0 || body.insights_enabled === '0') ? 0 : 1
     await db.prepare('UPDATE events SET insights_enabled = ? WHERE id = ?').bind(insightsOn, id).run()
   }
-  return c.json({ success: true, title, insights_enabled: insightsOn })
+  // 会の種類（送られたときだけ変更）
+  let kindOut: string | undefined
+  if (Object.prototype.hasOwnProperty.call(body, 'event_kind')) {
+    const k = normEventKind(body.event_kind)
+    if (!k) return c.json({ error: '会の種類が正しくありません' }, 400)
+    await db.prepare('UPDATE events SET event_kind = ? WHERE id = ?').bind(k, id).run()
+    kindOut = k
+  }
+  return c.json({ success: true, title, insights_enabled: insightsOn, event_kind: kindOut })
 })
 
 app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) => {
@@ -4094,6 +4118,29 @@ function toggleWatch(id) {
     }).catch(function() { alert('通信エラーで変更できませんでした'); });
 }
 loadWatch();
+// 推進部員のしるし（管理者だけが見る・変える）
+function promoterBtnHtml(id, big) {
+  var m = _allMembers.find(function(x) { return x.id === id; }) || {};
+  var on = !!m.promoter;
+  return '<button class="btn-sm" data-action="promoter" data-id="' + id + '"' + (big ? ' data-label="1"' : '') + ' title="' + (on ? '推進部員：ON（押すとOFF）' : '推進部員にする（押すとON）') + '" style="' + (on ? 'background:#00897b;color:#fff' : 'background:#f5f5f5;color:#bbb') + (big ? ';padding:8px 14px' : '') + '"><i class="fas fa-flag"></i>' + (big ? (on ? ' 推進部員：ON' : ' 推進部員：OFF') : '') + '</button>';
+}
+function paintPromoter(id) {
+  var m = _allMembers.find(function(x) { return x.id === id; }) || {};
+  document.querySelectorAll('[data-action="promoter"][data-id="' + id + '"]').forEach(function(b) { var w = document.createElement('span'); w.innerHTML = promoterBtnHtml(id, !!b.dataset.label); b.replaceWith(w.firstChild); });
+  document.querySelectorAll('.promo-badge[data-id="' + id + '"]').forEach(function(s) { s.style.display = m.promoter ? '' : 'none'; });
+}
+function togglePromoter(id) {
+  var m = _allMembers.find(function(x) { return x.id === id; });
+  if (!m) return;
+  var on = !m.promoter;
+  fetch('/api/admin/members/' + id + '/promoter', { method: 'PATCH', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ on: on }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+    .then(function(x) {
+      if (!x.ok) { alert((x.d && x.d.error) || '変更できませんでした'); return; }
+      m.promoter = x.d.promoter ? 1 : 0;
+      paintPromoter(id);
+    }).catch(function() { alert('通信エラーで変更できませんでした'); });
+}
 (function loadNewsBadge() {
   fetch('/api/notify/summary', { headers: { 'Authorization': 'Bearer ' + token } }).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
     if (!d) return;
@@ -4357,6 +4404,7 @@ function renderMembers(members) {
       '<input type="text" list="groupDatalist" class="group-input" data-id="' + m.id + '" value="' + escapeHtml(grp) + '" placeholder="例: Aグループ" style="display:none;width:80px;font-size:12px;padding:2px 4px;border:1px solid #90caf9;border-radius:4px" onblur="saveGroup(this)" onkeydown="handleGroupKey(event,this)">' +
       '</td>';
     var adminBadge = (m.role === 'admin') ? ' <span class="role-badge role-admin"><i class="fas fa-shield-halved"></i> 管理者</span>' : '';
+    adminBadge += ' <span class="promo-badge" data-id="' + m.id + '" title="推進部員" style="' + (m.promoter ? '' : 'display:none;') + 'background:#e0f2f1;color:#00695c;font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap"><i class="fas fa-flag"></i> 推進部員</span>';
     return '<tr' + (m.role === 'admin' ? ' class="is-admin-row"' : '') + '>' +
       '<td style="white-space:nowrap"><input type="checkbox" class="sheet-pick" data-id="' + m.id + '"' + (_sheetPick[m.id] ? ' checked' : '') + ' onclick="toggleSheetPick(this)" title="1枚シートのまとめ印刷に入れる" style="vertical-align:middle;margin:0 3px 0 0;cursor:pointer"> ' + (i + 1) + '</td>' +
          '<td class="member-name" style="cursor:pointer" data-action="detail" data-id="' + m.id + '" title="詳細を見る"><strong>' + (m.name || '') + '</strong>' + adminBadge + '</td>' +
@@ -4370,6 +4418,7 @@ function renderMembers(members) {
       (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>主幹・管理職</option></select></td>' : '') +
       '<td style="white-space:nowrap">' +
         (m.id !== user.id ? watchBtnHtml(m.id) + ' ' : '') +
+        promoterBtnHtml(m.id, false) + ' ' +
         '<a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener" title="学びの記録（ポートフォリオ）"><i class="fas fa-seedling"></i></a> ' +
         '<button class="btn-sm btn-warning" data-action="role" data-id="' + m.id + '" data-role="' + m.role + '" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '"><i class="fas ' + (m.role === 'admin' ? 'fa-user-minus' : 'fa-user-plus') + '"></i></button> ' +
         '<button class="btn-sm btn-key" data-action="reset-password" data-id="' + m.id + '" data-name="' + escapeHtml(m.name) + '" title="パスワードリセット"><i class="fas fa-key"></i></button> ' +
@@ -4516,7 +4565,8 @@ function showDetail(id) {
     html += '</div>' + stepBadge(sel) + '</div>';
   }
 
-  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:8px 14px" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-seedling"></i> 学びの記録</a><a class="btn-sm" style="background:#e8eaf6;color:#1a237e;text-decoration:none;padding:8px 14px" href="/admin/report?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a><a class="btn-sm" style="background:#1a237e;color:#fff;text-decoration:none;padding:8px 14px" href="/admin/sheet?uid=' + m.id + '" target="_blank" rel="noopener" title="A4縦1枚の個人まとめシート（印刷・PDF）"><i class="fas fa-id-card"></i> 1枚シート</a>' + (m.id !== user.id ? '<button class="btn-sm" data-action="watch" data-label="1" data-id="' + m.id + '">.</button>' : '') + '</div>';
+  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:8px 14px" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-seedling"></i> 学びの記録</a><a class="btn-sm" style="background:#e8eaf6;color:#1a237e;text-decoration:none;padding:8px 14px" href="/admin/report?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a><a class="btn-sm" style="background:#1a237e;color:#fff;text-decoration:none;padding:8px 14px" href="/admin/sheet?uid=' + m.id + '" target="_blank" rel="noopener" title="A4縦1枚の個人まとめシート（印刷・PDF）"><i class="fas fa-id-card"></i> 1枚シート</a>' + (m.id !== user.id ? '<button class="btn-sm" data-action="watch" data-label="1" data-id="' + m.id + '">.</button>' : '') + promoterBtnHtml(m.id, true) + '</div>';
+  html += '<div style="font-size:11px;color:#888;margin-top:6px">推進部員：ONの人だけ、1枚シートで「研究」の会（部会など）の参加率を出します。本人の画面には表示されません。</div>';
   html += '<div style="text-align:center;margin-top:24px"><button class="btn-sm" style="background:#eee;color:#555;padding:8px 24px" id="closeDetailBtn">閉じる</button></div>';
   document.getElementById('detailContent').innerHTML = html;
   document.getElementById('closeDetailBtn').addEventListener('click', function() { document.getElementById('detailModal').classList.remove('show'); });
@@ -4593,6 +4643,7 @@ document.addEventListener('click', function(e) {
   else if (action === 'reset-password') resetPassword(id, btn.dataset.name);
   else if (action === 'delete') deleteMember(id, btn.dataset.name);
   else if (action === 'watch') toggleWatch(id);
+  else if (action === 'promoter') togglePromoter(id);
 });
 
 loadMembers();
@@ -5870,6 +5921,15 @@ app.get('/admin/events', (c) => {
   .ins-toggle.off { background: #fafafa; border-color: #e0e0e0; color: #757575; }
   .ins-toggle.off small { color: #9e9e9e; }
   .ev-rename-box .ins-toggle { width: 100%; margin-top: 0; }
+  .kind-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-top: 8px; padding: 8px 12px; background: #f3f4fb; border: 1px solid #d1d5ee; border-radius: 10px; font-size: 13px; color: #283593; }
+  .kind-row label { font-weight: 700; }
+  .kind-row select { font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #9fa8da; border-radius: 6px; background: #fff; }
+  .kind-row small { flex-basis: 100%; font-size: 11px; color: #5c6bc0; }
+  .ev-rename-box .kind-row { width: 100%; margin-top: 0; }
+  .badge-kind { font-size: 10px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; font-weight: 700; }
+  .badge-kind.kind-training { background: #e3f2fd; color: #1565c0; }
+  .badge-kind.kind-research { background: #f3e5f5; color: #6a1b9a; }
+  .badge-kind.kind-other { background: #eceff1; color: #546e7a; }
   .badge-insoff { background: #eeeeee; color: #757575; font-size: 10px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
   .event-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #eee; flex-wrap: wrap; gap: 8px; }
   .event-item:last-child { border-bottom: none; }
@@ -6006,6 +6066,7 @@ app.get('/admin/events', (c) => {
       <textarea id="evDesc" rows="2" placeholder="説明（任意）" style="width:100%"></textarea>
     </div>
     <label class="ins-toggle"><input type="checkbox" id="evInsights" checked onchange="syncInsightsNote()"><span><b><i class="fas fa-comments"></i> みんなの気づきの対象にする</b><small>ONにすると、振り返りの最後に紹介の同意欄が付き、採用したものが「みんなの気づき」に載ります。</small></span></label>
+    <div class="kind-row"><label for="evKind"><i class="fas fa-tag"></i> 会の種類</label><select id="evKind" onchange="this.dataset.touched='1'"><option value="training">研修（全員向け）</option><option value="research">研究（部会など）</option><option value="other" selected>その他</option></select><small>個人まとめシートの参加率の数え方に使います（研修＝全員向け、研究＝部会など）。会名から自動で選びます。変えることもできます。</small></div>
     <div class="custom-q-area">
       <strong style="font-size:13px;color:#555"><i class="fas fa-question-circle"></i> カスタム質問（任意）</strong>
       <div class="preset-area" style="margin-top:8px">
@@ -6135,6 +6196,21 @@ function applyPreset(type) {
 }
 
 
+var EV_KIND_LABEL = { training: '研修', research: '研究', other: 'その他' };
+function guessEventKindClient(t) {
+  t = String(t || '').normalize('NFKC');
+  if (/部会|小中合同|研究/.test(t)) return 'research';
+  if (/スキルアップ|授業力アップ|研修/.test(t)) return 'training';
+  return 'other';
+}
+function kindOptionsHtml(cur) {
+  return ['training', 'research', 'other'].map(function(k) { return '<option value="' + k + '"' + (k === cur ? ' selected' : '') + '>' + EV_KIND_LABEL[k] + (k === 'training' ? '（全員向け）' : k === 'research' ? '（部会など）' : '') + '</option>'; }).join('');
+}
+document.addEventListener('input', function(e) {
+  if (!e.target || e.target.id !== 'evTitle') return;
+  var ks = document.getElementById('evKind');
+  if (ks && !ks.dataset.touched) ks.value = guessEventKindClient(e.target.value);
+});
 function syncInsightsNote() {
   var el = document.getElementById('evInsights');
   var on = !el || el.checked;
@@ -6151,6 +6227,8 @@ async function submitCreateEvent() {
   if (!title||!event_date) { alert('タイトルと日付を入力してください'); return; }
   const insEl = document.getElementById('evInsights');
   const insights_enabled = insEl ? !!insEl.checked : true;
+  const kindEl = document.getElementById('evKind');
+  const event_kind = kindEl ? kindEl.value : guessEventKindClient(title);
   const custom_questions = [];
   for (const q of qList) {
     const text = (q.text || '').trim();
@@ -6163,9 +6241,9 @@ async function submitCreateEvent() {
   }
   const res = await fetch('/api/admin/events', {
     method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
-    body: JSON.stringify({ title, event_date, description, custom_questions, insights_enabled })
+    body: JSON.stringify({ title, event_date, description, custom_questions, insights_enabled, event_kind })
   });
-  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; if (insEl) { insEl.checked = true; syncInsightsNote(); } qList=[]; renderQuestions(); document.getElementById('typePicker').style.display='none'; loadEvents(); }
+  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; if (insEl) { insEl.checked = true; syncInsightsNote(); } if (kindEl) { kindEl.value = 'other'; delete kindEl.dataset.touched; } qList=[]; renderQuestions(); document.getElementById('typePicker').style.display='none'; loadEvents(); }
   else { const d = await res.json(); alert(d.error); }
 }
 
@@ -6210,7 +6288,7 @@ async function reopenEvent(id, cancel) {
 }
 
 function eventItemHtml(ev, ended) {
-  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span>'+(ev.insights_enabled === 0 ? ' <span class="badge-insoff" title="みんなの気づきの対象外の回です"><i class="fas fa-comment-slash"></i> 気づき対象外</span>' : '')+'</div><div class="rc-line">'+receptionHtml(ev)+' <span class="rc-msg" id="rcMsg_'+ev.id+'"></span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-edit" data-action="rename-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-pen"></i></button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
+  return '<div class="event-item-wrap'+(ended?' ev-item-ended':'')+'" id="evWrap_'+ev.id+'"><div class="event-item"><div class="event-info"><div class="title">'+escHtml(ev.title)+'</div><div class="meta"><i class="fas fa-calendar"></i> '+ev.event_date+' &nbsp; <span class="badge badge-att" data-action="detail" data-id="'+ev.id+'" data-tab="att"><i class="fas fa-users"></i> 出席 '+ev.attendance_count+'</span> <span class="badge badge-sur" data-action="detail" data-id="'+ev.id+'" data-tab="sur"><i class="fas fa-clipboard"></i> 回答 '+ev.survey_count+'</span>'+' <span class="badge-kind kind-'+(EV_KIND_LABEL[ev.event_kind] ? ev.event_kind : 'other')+'" title="会の種類（✏️で変更）">'+(EV_KIND_LABEL[ev.event_kind] || 'その他')+'</span>'+(ev.insights_enabled === 0 ? ' <span class="badge-insoff" title="みんなの気づきの対象外の回です"><i class="fas fa-comment-slash"></i> 気づき対象外</span>' : '')+'</div><div class="rc-line">'+receptionHtml(ev)+' <span class="rc-msg" id="rcMsg_'+ev.id+'"></span></div></div><div class="actions"><button class="btn-qr" data-action="qr" data-id="'+ev.id+'"><i class="fas fa-qrcode"></i> QR</button><button class="btn-export2" data-action="export" data-id="'+ev.id+'"><i class="fas fa-download"></i> CSV</button><button class="btn-edit" data-action="rename-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-pen"></i></button><button class="btn-danger" data-action="delete-ev" data-id="'+ev.id+'" data-title="'+String(ev.title).replace(/"/g,'&quot;')+'"><i class="fas fa-trash"></i></button></div></div><div class="event-detail" id="evDetail_'+ev.id+'"></div></div>';
 }
 
 function buildYearOptions() {
@@ -6343,8 +6421,10 @@ function renameEvent(id, currentTitle) {
   box.className = 'ev-rename-box';
   var evObj = eventsData.find(function(e){ return e.id === id; }) || {};
   var curIns = evObj.insights_enabled === 0 ? 0 : 1;
+  var curKind = EV_KIND_LABEL[evObj.event_kind] ? evObj.event_kind : 'other';
   box.innerHTML = '<input type="text" class="ev-rename-input" maxlength="100">'
     + '<label class="ins-toggle' + (curIns ? '' : ' off') + '"><input type="checkbox" class="ev-ins-input"' + (curIns ? ' checked' : '') + '><span><b><i class="fas fa-comments"></i> みんなの気づきの対象にする</b><small>ONにすると、振り返りの最後に紹介の同意欄が付き、採用したものが「みんなの気づき」に載ります。OFFにすると、採用済みのものも表示されなくなります（消えません。ONに戻すと再び表示）。</small></span></label>'
+    + '<div class="kind-row"><label><i class="fas fa-tag"></i> 会の種類</label><select class="ev-kind-input">' + kindOptionsHtml(curKind) + '</select><small>個人まとめシートの参加率の数え方に使います（研修＝全員向け、研究＝部会など）。</small></div>'
     + '<button class="ev-rename-save"><i class="fas fa-check"></i> 保存</button>'
     + '<button class="ev-rename-cancel">キャンセル</button>'
     + '<div class="ev-rename-status"></div>';
@@ -6363,7 +6443,8 @@ function renameEvent(id, currentTitle) {
     var newTitle = (input.value || '').trim();
     if (!newTitle) { statusEl.textContent = 'イベント名を入力してください'; return; }
     var newIns = insInput.checked ? 1 : 0;
-    if (newTitle === currentTitle && newIns === curIns) { close(); return; }
+    var newKind = box.querySelector('.ev-kind-input').value;
+    if (newTitle === currentTitle && newIns === curIns && newKind === curKind) { close(); return; }
     var saveBtn = box.querySelector('.ev-rename-save');
     saveBtn.disabled = true;
     statusEl.style.color = '#888'; statusEl.textContent = '保存中...';
@@ -6371,7 +6452,7 @@ function renameEvent(id, currentTitle) {
       var res = await fetch('/api/admin/events/'+id, {
         method: 'PUT',
         headers: { 'Authorization': 'Bearer '+token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: newTitle, insights_enabled: !!newIns })
+        body: JSON.stringify({ title: newTitle, insights_enabled: !!newIns, event_kind: newKind })
       });
       var d = {};
       try { d = await res.json(); } catch(e) {}
