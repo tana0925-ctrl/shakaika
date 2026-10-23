@@ -158,7 +158,8 @@ export function registerAnalytics(app: any, deps: Deps) {
     if (!evs.length) return c.json({ error: '対象の研修会がありません' }, 404)
     const tokens = await loadAllNameTokens(db)
     const hits: Record<string, number> = {}
-    const mask = (s: string) => { const r = aiMask(s, tokens); for (const k of Object.keys(r.hits)) hits[k] = (hits[k] || 0) + r.hits[k]; return r.text }
+    const userParts: string[] = [] // 回答者が書いた文・研修会名（伏せたあと）だけを最終確認する
+    const mask = (s: string) => { const r = aiMask(s, tokens); for (const k of Object.keys(r.hits)) hits[k] = (hits[k] || 0) + r.hits[k]; userParts.push(r.text); return r.text }
     const order = canonOrder(d.am)
     const L: string[] = []
     L.push(AN_AI_INSTRUCTION)
@@ -196,7 +197,8 @@ export function registerAnalytics(app: any, deps: Deps) {
     L.push('===== ここまで =====')
     const text = L.join('\n')
     const leaked: string[] = []
-    for (const t of tokens) { if (t.length >= 2 && text.indexOf(t) !== -1) leaked.push(t) }
+    const checked = userParts.join('\n')
+    for (const t of tokens) { if (t.length >= 2 && checked.indexOf(t) !== -1) leaked.push(t) }
     if (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(text)) leaked.push('メールアドレス')
     if (leaked.length) return c.json({ error: '名前が残っている可能性があるため中止しました（' + leaked.length + '件）。運営に相談してください。' }, 500)
     return c.json({ text, chars: text.length, masked: Object.keys(hits).map((k) => ({ label: k, count: hits[k] })) })
