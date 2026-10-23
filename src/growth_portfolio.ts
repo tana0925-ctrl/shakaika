@@ -359,6 +359,7 @@ function portfolioPage(commonHead: string, isAdmin: boolean, withReport: boolean
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <select id="fySel" aria-label="年度"></select>
       ${withReport ? '<a class="btn btn-g" id="reportLink" href="#"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a>' : ''}
+      ${isAdmin ? '<a class="btn btn-g" id="sheetLink" href="#" target="_blank" rel="noopener" title="A4縦1枚の個人まとめシート（管理者用）"><i class="fas fa-id-card"></i> 1枚シート</a>' : ''}
     </div>
     <div class="lead" style="margin-top:8px">参加した研修会と、アンケートに書いたこと・選んだ視点を、時間の流れでまとめています。${isAdmin ? '本人と管理者だけが見られます。' : 'このページは、あなたと運営（管理者）だけが見られます。'}点数や順位はつけていません。</div>
   </div>
@@ -383,6 +384,8 @@ async function load(fy) {
   fs.innerHTML = P.fys.slice().reverse().map(function(f) { return '<option value="' + f + '"' + (String(P.fy) === String(f) ? ' selected' : '') + '>' + f + '年度</option>'; }).join('') + '<option value="all"' + (P.fy === 'all' ? ' selected' : '') + '>すべての年度</option>';
   const rl = document.getElementById('reportLink');
   if (rl) rl.href = (IS_ADMIN_VIEW ? '/admin/report?uid=' + encodeURIComponent(UID) + '&' : '/mypage/report?') + 'fy=' + (P.fy === 'all' ? P.note_fy : P.fy);
+  const sl = document.getElementById('sheetLink');
+  if (sl && IS_ADMIN_VIEW) sl.href = '/admin/sheet?uid=' + encodeURIComponent(UID) + '&fy=' + (P.fy === 'all' ? P.note_fy : P.fy);
   render();
 }
 function keptKey(eid, qid) { return eid + ':' + qid; }

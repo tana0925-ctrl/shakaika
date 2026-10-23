@@ -5,6 +5,7 @@ import { registerDuplicates } from './growth_duplicates'
 import { registerPortfolio } from './growth_portfolio'
 import { registerAnalytics } from './growth_analytics'
 import { registerNotify, notifyReflection } from './growth_notify'
+import { registerSheet, normGroup } from './growth_sheet'
 
 type Bindings = {
   DB: D1Database
@@ -1136,7 +1137,7 @@ app.get('/api/admin/group-summary', authMiddleware, adminMiddleware, async (c) =
     LEFT JOIN selections s ON u.id = s.user_id
     LEFT JOIN annual_notes an ON an.user_id = u.id AND an.fiscal_year = ?
     WHERE u.role = 'member'
-    GROUP BY u.id ORDER BY u.training_group, u.name
+    GROUP BY u.id ORDER BY u.name, u.id
   `).bind(fy).all() as any
   const { results: evts } = await db.prepare(`
     SELECT a.user_id, e.id as event_id, e.title, e.event_date, sa.satisfaction, sa.comment
@@ -1169,7 +1170,8 @@ app.get('/api/admin/group-summary', authMiddleware, adminMiddleware, async (c) =
         if (vp && stepStr) selections[vp] = parseInt(stepStr)
       }
     }
-    const g = (m.training_group && (m.training_group as string).trim()) ? (m.training_group as string).trim() : '未設定'
+    // グループ名は全角/半角・前後空白をそろえてまとめる（「Ｇ」と「G」を同じグループに。元のデータは書き換えない）
+    const g = normGroup(m.training_group) || '未設定'
     if (!groups[g]) groups[g] = []
     groups[g].push({ id: m.id, name: m.name, school: m.school || '', school_type: m.school_type || '', goal: m.goal || '', reflection: m.reflection || '', selections, events: attMap[m.id] || [] })
   }
@@ -3950,6 +3952,8 @@ app.get('/admin', (c) => {
     <input type="text" class="search-box" id="searchBox" placeholder="🔍 名前・メールで検索..." oninput="filterMembers()">
     <div style="display:flex;gap:8px">
       <button class="btn-sm btn-export" onclick="exportCSV()"><i class="fas fa-file-excel"></i> Excel (CSV) ダウンロード</button>
+      <button class="btn-sm" id="sheetPickBtn" style="background:#1a237e;color:#fff;padding:10px 14px;border-radius:10px;font-size:13px" onclick="openSheets('pick')" disabled title="左の□にチェックした人の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 選んだ人の1枚シート（0名）</button>
+      <button class="btn-sm" id="sheetAllBtn" style="background:#e8eaf6;color:#1a237e;padding:10px 14px;border-radius:10px;font-size:13px" onclick="openSheets('shown')" title="いま一覧に表示している全員の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 表示中の全員の1枚シート</button>
     </div>
 
 </div>
@@ -4030,6 +4034,32 @@ function stepBadge(sel) {
 var _allMembers = [];
 var _sortCol = '';
 var _sortDir = 1;
+// ===== 個人まとめシート（1枚シート）のまとめ印刷 =====
+var _sheetPick = {};
+var _sheetShown = [];
+function toggleSheetPick(cb) {
+  var id = +cb.getAttribute('data-id');
+  if (cb.checked) _sheetPick[id] = true; else delete _sheetPick[id];
+  updateSheetBtns();
+}
+function updateSheetBtns() {
+  var n = Object.keys(_sheetPick).length;
+  var b1 = document.getElementById('sheetPickBtn');
+  if (b1) { b1.disabled = !n; b1.style.opacity = n ? '1' : '.5'; b1.innerHTML = '<i class="fas fa-id-card"></i> 選んだ人の1枚シート（' + n + '名）'; }
+  var b2 = document.getElementById('sheetAllBtn');
+  if (b2) { b2.disabled = !_sheetShown.length; b2.innerHTML = '<i class="fas fa-id-card"></i> 表示中の全員の1枚シート（' + _sheetShown.length + '名）'; }
+}
+function openSheets(kind) {
+  var ids;
+  if (kind === 'pick') {
+    // 選んだ順ではなく、いまの一覧の並び順にそろえる（一覧にいない人は最後）
+    ids = _sheetShown.filter(function(id) { return _sheetPick[id]; });
+    Object.keys(_sheetPick).forEach(function(k) { if (ids.indexOf(+k) < 0) ids.push(+k); });
+  } else { ids = _sheetShown.slice(); }
+  if (!ids.length) return;
+  if (ids.length > 40 && !confirm(ids.length + '人分（' + ids.length + 'ページ）のシートを作ります。表示まで少し時間がかかります。よろしいですか？')) return;
+  window.open('/admin/sheet?uids=' + ids.join(','), '_blank', 'noopener');
+}
 var _activeTab = 'elem';
 
 var _vpTabConfig = {
@@ -4245,7 +4275,7 @@ function renderMembers(members) {
       '</td>';
     var adminBadge = (m.role === 'admin') ? ' <span class="role-badge role-admin"><i class="fas fa-shield-halved"></i> 管理者</span>' : '';
     return '<tr' + (m.role === 'admin' ? ' class="is-admin-row"' : '') + '>' +
-      '<td>' + (i + 1) + '</td>' +
+      '<td style="white-space:nowrap"><input type="checkbox" class="sheet-pick" data-id="' + m.id + '"' + (_sheetPick[m.id] ? ' checked' : '') + ' onclick="toggleSheetPick(this)" title="1枚シートのまとめ印刷に入れる" style="vertical-align:middle;margin:0 3px 0 0;cursor:pointer"> ' + (i + 1) + '</td>' +
          '<td class="member-name" style="cursor:pointer" data-action="detail" data-id="' + m.id + '" title="詳細を見る"><strong>' + (m.name || '') + '</strong>' + adminBadge + '</td>' +
       '<td>' + (m.school || '-') + '</td>' +
       '<td>' + (m.district || '-') + '</td>' +
@@ -4265,6 +4295,8 @@ function renderMembers(members) {
   }).join('');
 
   updateStats(members);
+  _sheetShown = members.map(function(m) { return m.id; });
+  updateSheetBtns();
 
   // Setup sort click handler
   if (!thead._sortReady) {
@@ -4401,7 +4433,7 @@ function showDetail(id) {
     html += '</div>' + stepBadge(sel) + '</div>';
   }
 
-  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:8px 14px" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-seedling"></i> 学びの記録</a><a class="btn-sm" style="background:#e8eaf6;color:#1a237e;text-decoration:none;padding:8px 14px" href="/admin/report?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a>' + (m.id !== user.id ? '<button class="btn-sm" data-action="watch" data-label="1" data-id="' + m.id + '">.</button>' : '') + '</div>';
+  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:8px 14px" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-seedling"></i> 学びの記録</a><a class="btn-sm" style="background:#e8eaf6;color:#1a237e;text-decoration:none;padding:8px 14px" href="/admin/report?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a><a class="btn-sm" style="background:#1a237e;color:#fff;text-decoration:none;padding:8px 14px" href="/admin/sheet?uid=' + m.id + '" target="_blank" rel="noopener" title="A4縦1枚の個人まとめシート（印刷・PDF）"><i class="fas fa-id-card"></i> 1枚シート</a>' + (m.id !== user.id ? '<button class="btn-sm" data-action="watch" data-label="1" data-id="' + m.id + '">.</button>' : '') + '</div>';
   html += '<div style="text-align:center;margin-top:24px"><button class="btn-sm" style="background:#eee;color:#555;padding:8px 24px" id="closeDetailBtn">閉じる</button></div>';
   document.getElementById('detailContent').innerHTML = html;
   document.getElementById('closeDetailBtn').addEventListener('click', function() { document.getElementById('detailModal').classList.remove('show'); });
@@ -5195,6 +5227,9 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .group-header{color:#fff;padding:12px 20px;font-size:17px;font-weight:700;display:flex;align-items:center;gap:10px}
 .grp-print{margin-left:auto;background:rgba(255,255,255,0.22);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px}
 .grp-print:hover{background:rgba(255,255,255,0.35)}
+.grp-print.grp-list{margin-left:8px}
+a.grp-print{text-decoration:none}
+.group-header{flex-wrap:wrap}
 .group-count{font-size:13px;opacity:0.85;font-weight:400}
 .member-row{padding:14px 20px;border-bottom:1px solid #f0f0f0}
 .member-row:last-child{border-bottom:none}
@@ -5287,7 +5322,7 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .ai-status{font-size:12px;margin-top:10px;line-height:1.6}
 @media(max-width:600px){.ai-modal{padding:0}.ai-box{border-radius:0;min-height:100vh}.ai-copy-btn{margin-left:0}}
 @media print{
-  .top-bar,.group-tabs,#bulkToggle,#printBtn,.no-print,.ai-copy-btn,.ai-paste-btn,.ai-modal{display:none!important}
+  .top-bar,.group-tabs,#bulkToggle,.no-print,.ai-copy-btn,.ai-paste-btn,.ai-modal{display:none!important}
   .note-body{display:block!important}
   .group-panel{display:none!important}
   .group-panel.active{display:block!important}
@@ -5313,7 +5348,6 @@ body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 <div class="container">
   <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
   <button type="button" id="bulkToggle" class="bulk-toggle" style="display:none"><i class="fas fa-expand"></i> すべて開く</button>
-  <button type="button" id="printBtn" class="bulk-toggle" style="display:none;margin-left:8px"><i class="fas fa-print"></i> このグループを印刷</button>
   <button type="button" id="aiAllBtn" class="ai-paste-btn no-print" style="background:#4a148c">\u2728 全員をまとめてコピー</button>
   <button type="button" id="aiPasteBtn" class="ai-paste-btn no-print"><i class="fas fa-wand-magic-sparkles"></i> AI分析結果を貼り付け</button>
   <div id="gList"><p style="color:#888;text-align:center;padding:40px">読み込み中...</p></div>
@@ -5354,7 +5388,8 @@ function render(groups,fy){
     var inner='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span>'
       +'<button class="grp-ai no-print" data-ai-set="'+setKey+'">\u2728 全員をコピー</button>'
       +'<button class="grp-ai no-print" data-ai-sel="'+setKey+'" disabled>\u2728 選択(0)</button>'
-      +'<button class="grp-print no-print" onclick="window.print()" title="このグループを印刷"><i class="fas fa-print"></i> 印刷</button></div>';
+      +'<a class="grp-print no-print" href="/admin/sheet?group='+encodeURIComponent(gname)+'" target="_blank" rel="noopener" title="このグループの会員の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 1枚シートをまとめて印刷（'+ms.length+'名）</a>'
+      +'<button class="grp-print grp-list no-print" onclick="window.print()" title="この画面の一覧（参加イベントの回答・伴走メモを含む）をそのまま印刷"><i class="fas fa-print"></i> 一覧を印刷</button></div>';
     ms.forEach(function(m){inner+=mRow(m,fy);});
     inner+='</div>';
     panels+='<div class="group-panel" id="'+pid+'">'+inner+'</div>';
@@ -5363,7 +5398,7 @@ function render(groups,fy){
     var pid='gp_unset';
     tabs.push({id:pid,label:'<i class="fas fa-question-circle"></i> 未設定 ('+unset.length+')',col:'#9e9e9e'});
     var secs=[['elementary','小学校'],['junior_high','中学校'],['admin_staff','主幹・管理職'],['','校種未設定']];
-    var u='<div class="group-card"><div class="group-header" style="background:#9e9e9e"><i class="fas fa-question-circle"></i> グループ未設定 <span class="group-count">('+unset.length+'名)</span><button class="grp-print no-print" onclick="window.print()" title="このグループを印刷"><i class="fas fa-print"></i> 印刷</button></div>';
+    var u='<div class="group-card"><div class="group-header" style="background:#9e9e9e"><i class="fas fa-question-circle"></i> グループ未設定 <span class="group-count">('+unset.length+'名)</span><a class="grp-print no-print" href="/admin/sheet?unset=1" target="_blank" rel="noopener" title="グループ未設定の会員の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 1枚シートをまとめて印刷（'+unset.length+'名）</a><button class="grp-print grp-list no-print" onclick="window.print()" title="この画面の一覧（参加イベントの回答・伴走メモを含む）をそのまま印刷"><i class="fas fa-print"></i> 一覧を印刷</button></div>';
     secs.forEach(function(sec){
       var list=unset.filter(function(m){return (m.school_type||'')===sec[0];});
       if(!list.length)return;
@@ -5394,8 +5429,6 @@ function render(groups,fy){
     };
     bulk.innerHTML='<i class="fas fa-expand"></i> すべて開く';
   }
-  var printBtn=document.getElementById('printBtn');
-  if(printBtn){printBtn.style.display=toggles.length?'inline-block':'none';printBtn.onclick=function(){window.print();};}
 }
 function mRow(m,fy){
   var sels=Object.keys(m.selections);
@@ -6503,5 +6536,8 @@ registerDuplicates(app, { authMiddleware, adminMiddleware, commonHead })
 
 // ========== 新着の振り返り・スマホへの通知（src/growth_notify.ts） ==========
 registerNotify(app, { authMiddleware, adminMiddleware, commonHead })
+
+// ========== 個人まとめシート（A4縦1枚・管理者のみ。src/growth_sheet.ts） ==========
+registerSheet(app, { authMiddleware, adminMiddleware, commonHead, stepKeywords: AI_STEP_KEYWORDS })
 
 export default app
