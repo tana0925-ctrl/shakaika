@@ -1585,8 +1585,9 @@ app.post('/api/admin/events', authMiddleware, adminMiddleware, async (c) => {
   if (!title || !event_date) return c.json({ error: 'タイトルと日付は必須です' }, 400)
   // 会の種類（研修／研究／その他）。送られないときは会名から推定
   const kind = normEventKind(event_kind) || guessEventKind(title)
-  // みんなの気づきの対象（初期値ON。false/0 が送られたときだけOFF）
-  const insightsOn = (insights_enabled === false || insights_enabled === 0 || insights_enabled === '0') ? 0 : 1
+  // みんなの気づきの対象（2026-10-24〜 新しく作る回の初期値はOFF。true/1 が送られたときだけON）
+  // 既存の回の設定は変えない（列の既定値1はそのまま。INSERTでは必ず値を指定する）
+  const insightsOn = (insights_enabled === true || insights_enabled === 1 || insights_enabled === '1') ? 1 : 0
   const db = c.env.DB
   const user = c.get('user')
   let code = ''
@@ -6194,6 +6195,8 @@ app.get('/admin/events', (c) => {
   .ins-toggle small { display: block; font-size: 11px; color: #689f38; font-weight: 400; }
   .ins-toggle.off { background: #fafafa; border-color: #e0e0e0; color: #757575; }
   .ins-toggle.off small { color: #9e9e9e; }
+  .q-card.fixed.sc-off { background: #fafafa; border-style: dashed; }
+  .q-card.fixed.sc-off .sc-sample { opacity: .45; text-decoration: line-through; }
   .ev-rename-box .ins-toggle { width: 100%; margin-top: 0; }
   .kind-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-top: 8px; padding: 8px 12px; background: #f3f4fb; border: 1px solid #d1d5ee; border-radius: 10px; font-size: 13px; color: #283593; }
   .kind-row label { font-weight: 700; }
@@ -6339,7 +6342,7 @@ app.get('/admin/events', (c) => {
     <div class="form-row">
       <textarea id="evDesc" rows="2" placeholder="説明（任意）" style="width:100%"></textarea>
     </div>
-    <label class="ins-toggle"><input type="checkbox" id="evInsights" checked onchange="syncInsightsNote()"><span><b><i class="fas fa-comments"></i> みんなの気づきの対象にする</b><small>ONにすると、振り返りの最後に紹介の同意欄が付き、採用したものが「みんなの気づき」に載ります。</small></span></label>
+    <label class="ins-toggle off"><input type="checkbox" id="evInsights" onchange="syncInsightsNote()"><span><b><i class="fas fa-comments"></i> みんなの気づきの対象にする</b><small>ONにすると、振り返りの最後に紹介の同意欄が付き、採用したものが「みんなの気づき」に載ります。</small></span></label>
     <div class="kind-row"><label for="evKind"><i class="fas fa-tag"></i> 会の種類</label><select id="evKind" onchange="this.dataset.touched='1'"><option value="training">研修（全員向け）</option><option value="research">研究（部会など）</option><option value="other" selected>その他</option></select><small>個人まとめシートの参加率の数え方に使います（研修＝全員向け、研究＝部会など）。会名から自動で選びます。変えることもできます。</small></div>
     <div class="custom-q-area">
       <strong style="font-size:13px;color:#555"><i class="fas fa-question-circle"></i> カスタム質問（任意）</strong>
@@ -6350,10 +6353,10 @@ app.get('/admin/events', (c) => {
       </div>
       <div id="customQuestions" style="margin-top:10px"></div>
       <button class="btn-add-q" id="btnAddQ" onclick="toggleTypePicker()"><i class="fas fa-plus"></i> 新規追加</button>
-      <div class="q-card fixed" style="margin-top:12px">
-        <div style="font-size:12px;font-weight:700;color:#8d6e63"><i class="fas fa-lock"></i> 最後に自動で付きます：紹介の同意欄（任意）<span id="evInsightsOffNote" style="display:none;color:#c62828;margin-left:6px">← 「みんなの気づきの対象にする」がOFFなので付きません</span></div>
+      <div class="q-card fixed sc-off" id="evConsentCard" style="margin-top:12px">
+        <div style="font-size:12px;font-weight:700;color:#8d6e63"><span id="evConsentOn" style="display:none"><i class="fas fa-lock"></i> 最後に自動で付きます：紹介の同意欄（任意）</span><span id="evInsightsOffNote" style="color:#c62828"><i class="fas fa-ban"></i> この回では付きません：紹介の同意欄（「みんなの気づきの対象にする」がOFFのため）</span></div>
         <div style="font-size:11px;color:#999;margin:4px 0 8px;line-height:1.6">「みんなの気づきの対象にする」がONの回に、会員・ゲストどちらのフォームにも付きます。質問の数やCSVには入りません。選ばれた回答は、各回の「みんなの気づき」タブで選んで紹介できます。</div>
-        <div style="font-size:12px;color:#666;line-height:1.9">□ 名前なしで紹介してもよい<br>□ 名前ありで紹介してもよい<br><span style="font-size:11px;color:#8d6e63">※ いただいた振り返りの中から、一部をご紹介させていただきます。</span></div>
+        <div class="sc-sample" style="font-size:12px;color:#666;line-height:1.9">□ 名前なしで紹介してもよい<br>□ 名前ありで紹介してもよい<br><span style="font-size:11px;color:#8d6e63">※ いただいた振り返りの中から、一部をご紹介させていただきます。</span></div>
       </div>
       <div class="type-picker" id="typePicker" style="display:none">
         <button type="button" class="type-tile" onclick="pickType('radio')"><i class="far fa-dot-circle"></i> 選択式（1つ）</button>
@@ -6492,6 +6495,10 @@ function syncInsightsNote() {
   if (lb) lb.classList.toggle('off', !on);
   var n = document.getElementById('evInsightsOffNote');
   if (n) n.style.display = on ? 'none' : 'inline';
+  var o = document.getElementById('evConsentOn');
+  if (o) o.style.display = on ? 'inline' : 'none';
+  var cd = document.getElementById('evConsentCard');
+  if (cd) cd.classList.toggle('sc-off', !on);
 }
 
 async function submitCreateEvent() {
@@ -6500,7 +6507,7 @@ async function submitCreateEvent() {
   const description = document.getElementById('evDesc').value;
   if (!title||!event_date) { alert('タイトルと日付を入力してください'); return; }
   const insEl = document.getElementById('evInsights');
-  const insights_enabled = insEl ? !!insEl.checked : true;
+  const insights_enabled = insEl ? !!insEl.checked : false;
   const kindEl = document.getElementById('evKind');
   const event_kind = kindEl ? kindEl.value : guessEventKindClient(title);
   const custom_questions = [];
@@ -6517,7 +6524,7 @@ async function submitCreateEvent() {
     method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
     body: JSON.stringify({ title, event_date, description, custom_questions, insights_enabled, event_kind })
   });
-  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; if (insEl) { insEl.checked = true; syncInsightsNote(); } if (kindEl) { kindEl.value = 'other'; delete kindEl.dataset.touched; } qList=[]; renderQuestions(); document.getElementById('typePicker').style.display='none'; loadEvents(); }
+  if (res.ok) { document.getElementById('evTitle').value=''; document.getElementById('evDate').value=''; document.getElementById('evDesc').value=''; if (insEl) { insEl.checked = false; syncInsightsNote(); } if (kindEl) { kindEl.value = 'other'; delete kindEl.dataset.touched; } qList=[]; renderQuestions(); document.getElementById('typePicker').style.display='none'; loadEvents(); }
   else { const d = await res.json(); alert(d.error); }
 }
 
