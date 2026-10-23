@@ -124,10 +124,9 @@ async function loadCtx(db: D1Database, fy: number, stepKeywords?: Record<string,
 
 // ---- 1人分を集める（すべて user_id で絞る。他の会員の情報は入らない） ----
 export async function buildSheet(db: D1Database, uid: number, ctx: Ctx) {
-  const u = await db.prepare('SELECT id, name, school, school_type, district, training_group, experience_years FROM users WHERE id = ?').bind(uid).first() as any
-  if (!u) return null
   const { start, end } = ctx
-  const [attR, qaR, selR, noteR] = await db.batch([
+  const [uR, attR, qaR, selR, noteR] = await db.batch([
+    db.prepare('SELECT id, name, school, school_type, district, training_group, experience_years FROM users WHERE id = ?').bind(uid),
     db.prepare(`SELECT a.event_id, e.title, e.event_date FROM attendances a JOIN events e ON e.id = a.event_id
                 WHERE a.user_id = ? AND e.event_date >= ? AND e.event_date <= ? ORDER BY e.event_date, e.id`).bind(uid, start, end),
     db.prepare(`SELECT ca.event_id, ca.question_id, ca.answer_text, q.question_text, q.question_type, q.sort_order
@@ -136,22 +135,20 @@ export async function buildSheet(db: D1Database, uid: number, ctx: Ctx) {
     db.prepare('SELECT viewpoint, step, memo FROM selections WHERE user_id = ?').bind(uid),
     db.prepare('SELECT goal, reflection FROM annual_notes WHERE user_id = ? AND fiscal_year = ?').bind(uid, ctx.fy)
   ]) as any[]
-  let recalls: any[] = []
-  try {
-    const r = await db.prepare(
+  const u = (uR && uR.results && uR.results[0]) as any
+  if (!u) return null
+  const [recR, keptR] = await Promise.all([
+    db.prepare(
       `SELECT r.event_id, r.status, r.note, r.source_answer_text FROM recall_reflections r JOIN events e ON e.id = r.event_id
        WHERE r.user_id = ? AND e.event_date >= ? AND e.event_date <= ?`
-    ).bind(uid, start, end).all() as any
-    recalls = r.results || []
-  } catch (e) { recalls = [] }
-  let kept: any[] = []
-  try {
-    const r = await db.prepare(
+    ).bind(uid, start, end).all().catch(() => null) as any,
+    db.prepare(
       `SELECT k.body, e.title, e.event_date FROM kept_words k LEFT JOIN events e ON e.id = k.event_id
        WHERE k.user_id = ? AND (e.event_date IS NULL OR (e.event_date >= ? AND e.event_date <= ?)) ORDER BY e.event_date, k.id LIMIT 20`
-    ).bind(uid, start, end).all() as any
-    kept = r.results || []
-  } catch (e) { kept = [] }
+    ).bind(uid, start, end).all().catch(() => null) as any
+  ])
+  const recalls: any[] = (recR && recR.results) || []
+  const kept: any[] = (keptR && keptR.results) || []
 
   const sel: any[] = (selR && selR.results) || []
   const selBy: Record<string, any> = {}
@@ -281,11 +278,8 @@ export function registerSheet(app: any, deps: Deps) {
     if (ids.length > SHEET_MAX_IDS) return c.json({ error: '一度に読み込めるのは' + SHEET_MAX_IDS + '人までです' }, 400)
     const fy = parseFY(c.req.query('fy'))
     const ctx = await loadCtx(db, fy, deps.stepKeywords)
-    const sheets: any[] = []
-    for (const id of ids) {
-      const s = await buildSheet(db, id, ctx)
-      sheets.push(s || { id, missing: true })
-    }
+    // 人ごとの読み込みは並行して行う（1人分はすべて会員IDの索引で読む）
+    const sheets: any[] = await Promise.all(ids.map(async (id) => (await buildSheet(db, id, ctx)) || { id, missing: true }))
     return c.json({ fy, rule_note: TARGET_RULE_NOTE, sheets })
   })
 
