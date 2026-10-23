@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { getCookie, setCookie } from 'hono/cookie'
+import { registerPortfolio } from './growth_portfolio'
 import { registerAnalytics } from './growth_analytics'
 
 type Bindings = {
@@ -2951,6 +2952,11 @@ ${SHARE_CONSENT_CSS}
     <div><div class="il-title">みんなの気づき</div><div class="il-sub">研修会の振り返りから、紹介に同意いただいた声を集めています</div></div>
     <i class="fas fa-chevron-right il-arrow"></i>
   </a>
+  <a class="insights-link" href="/mypage/portfolio" style="border-color:#ffe0b2;border-left-color:#ef6c00">
+    <i class="fas fa-seedling il-icon" style="color:#ef6c00"></i>
+    <div><div class="il-title">わたしの学びの記録（ポートフォリオ）</div><div class="il-sub">参加した研修会・選んだ視点・試してみたいことを、時間の流れで見られます</div></div>
+    <i class="fas fa-chevron-right il-arrow"></i>
+  </a>
 
   <div class="history-card">
     <div class="history-header">
@@ -4195,6 +4201,7 @@ function renderMembers(members) {
       vpCells +
       (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>主幹・管理職</option></select></td>' : '') +
       '<td style="white-space:nowrap">' +
+        '<a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener" title="学びの記録（ポートフォリオ）"><i class="fas fa-seedling"></i></a> ' +
         '<button class="btn-sm btn-warning" data-action="role" data-id="' + m.id + '" data-role="' + m.role + '" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '"><i class="fas ' + (m.role === 'admin' ? 'fa-user-minus' : 'fa-user-plus') + '"></i></button> ' +
         '<button class="btn-sm btn-key" data-action="reset-password" data-id="' + m.id + '" data-name="' + escapeHtml(m.name) + '" title="パスワードリセット"><i class="fas fa-key"></i></button> ' +
         '<button class="btn-sm btn-danger" data-action="delete" data-id="' + m.id + '" title="削除"><i class="fas fa-trash"></i></button>' +
@@ -6425,5 +6432,8 @@ app.post('/api/auth/logout', async (c) => {
 
 // ========== 運営向け分析ダッシュボード・視点の読みかえ表（src/growth_analytics.ts） ==========
 registerAnalytics(app, { authMiddleware, adminMiddleware, commonHead, aiMask })
+
+// ========== 個人ポートフォリオ・年度末の成長レポート（src/growth_portfolio.ts） ==========
+registerPortfolio(app, { authMiddleware, adminMiddleware, commonHead, stepKeywords: AI_STEP_KEYWORDS })
 
 export default app
