@@ -352,8 +352,9 @@ body { background:#eceff1; margin:0 }
 .hd .meta b { color:#555; font-weight:700; font-size:0.85em; margin-right:1mm }
 .rate { border:0.4mm solid #1a237e; border-radius:2mm; padding:1.2mm 2.5mm; text-align:center; min-width:46mm; flex:none }
 .rate table.kt { border-collapse:collapse; margin:0.6mm auto 0; font-size:0.95em }
-.rate table.kt td { padding:0.25mm 1mm; text-align:left; white-space:nowrap; vertical-align:middle }
-.rate table.kt b { font-size:1.25em; color:#1a237e; margin:0 0.4mm }
+.rate table.kt td { padding:0.1mm 1mm; text-align:left; white-space:nowrap; vertical-align:middle }
+.rate .pro { margin-left:1.5mm; font-weight:700; color:#00695c; border:0.2mm solid #00897b; border-radius:0.8mm; padding:0 0.8mm }
+.rate table.kt b { font-size:1.15em; color:#1a237e; margin:0 0.4mm }
 .rate table.kt .pc { font-weight:700; color:#1a237e }
 .kd { display:inline-block; font-size:0.78em; font-weight:700; border:0.2mm solid #777; border-radius:0.8mm; padding:0 0.8mm; line-height:1.35; white-space:nowrap }
 .kd.k-training { border-color:#1565c0; color:#1565c0 }
@@ -478,7 +479,7 @@ function build(d, L) {
   h += '<span><b>校種</b>' + esc(u.school_type_label) + (u.school_type_inferred ? '<span class="muted">（道しるべから推定）</span>' : '') + '</span>';
   if (u.experience_years != null) h += '<span><b>経験</b>' + esc(u.experience_years) + '年目</span>';
   h += '</div></div>';
-  h += '<div class="rate"><div class="sm">会への参加（種類ごと）</div><table class="kt">';
+  h += '<div class="rate"><div class="sm">会への参加（種類ごと）' + (A.promoter ? '<span class="pro">推進部員</span>' : '') + '</div><table class="kt">';
   ['training', 'research', 'other'].forEach(function(k) {
     const b = (A.by_kind || {})[k] || { attended: 0, has_rate: false };
     let v;
@@ -486,7 +487,7 @@ function build(d, L) {
     else v = '参加<b>' + b.attended + '</b>回';
     h += '<tr><td><span class="kd k-' + k + '">' + KIND_LABEL[k] + '</span></td><td>' + v + '</td></tr>';
   });
-  h += '</table>' + (A.promoter ? '<div class="sm" style="margin-top:0.4mm">推進部員</div>' : '') + '</div></div>';
+  h += '</table></div></div>';
 
   h += '<div class="grid">';
   // 2. 参加した会の一覧（左）
@@ -495,7 +496,7 @@ function build(d, L) {
   h += '<div class="sec"><h3>参加状況 <span class="sub">○＝出席　－＝欠席</span></h3>';
   if (!A.rows.length) h += '<div class="box muted">この年度の対象回・参加した回はまだありません。</div>';
   else {
-    h += '<table class="s"><colgroup><col style="width:3.9em"><col style="width:3.1em"><col><col style="width:3.2em"></colgroup><tr><th>日付</th><th class="c nw">種類</th><th>会名</th><th class="c nw">出席</th></tr>';
+    h += '<table class="s"><colgroup><col style="width:3.9em"><col style="width:3.8em"><col><col style="width:3.2em"></colgroup><tr><th>日付</th><th class="c nw">種類</th><th>会名</th><th class="c nw">出席</th></tr>';
     rows.forEach(function(r) { h += '<tr' + (r.attended ? '' : ' class="no"') + '><td class="nw">' + esc(md(r.date)) + '</td><td class="c nw"><span class="kd k-' + esc(r.kind) + '">' + (KIND_LABEL[r.kind] || 'その他') + '</span></td><td>' + esc(cut(r.title, 30)) + '</td><td class="c mk">' + (r.attended ? '○' : '－') + '</td></tr>'; });
     h += '</table>';
     if (omitted) h += '<div class="omit">※ 古い回 ' + omitted + '回分は表から省略（回数には含む）</div>';
