@@ -190,7 +190,7 @@ async function pushToAdmin(env: any, adminId: number, body: string, tag: string)
   const { results } = await env.DB.prepare('SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE admin_id = ? LIMIT 10').bind(adminId).all() as any
   const subs = results || []
   let sent = 0, gone = 0
-  const payload = { title: '社会科同好会 事務局', body, url: '/admin/news', tag }
+  const payload = { title: '学びの道しるべ（事務局）', body, url: '/admin/news', tag }
   for (const s of subs) {
     const r = await sendOne(env, s, payload)
     if (r === 'ok') sent++
@@ -299,16 +299,12 @@ export function registerNotify(app: any, deps: Deps) {
 
   // Service Worker（通知を受けて表示し、タップで新着一覧を開く）
   app.get('/sw.js', (c: any) => new Response(SW_JS, { headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' } }))
-  // ホーム画面に追加するための設定（iPhoneはホーム画面から開いたときだけ通知を受け取れる）
-  app.get('/admin.webmanifest', (c: any) => new Response(JSON.stringify({
-    name: '社会科同好会 事務局', short_name: '事務局', start_url: '/admin/news', scope: '/', display: 'standalone',
-    background_color: '#ffffff', theme_color: '#1a237e', lang: 'ja',
-    icons: [
-      { src: '/static/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-      { src: '/static/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-      { src: '/static/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
-    ]
-  }), { headers: { 'Content-Type': 'application/manifest+json; charset=utf-8', 'Cache-Control': 'no-cache' } }))
+  // アプリとしてインストール（ホーム画面に追加）するための設定。全ページで読み込む（commonHead）。
+  // 開くと / → ログイン画面 → ログイン済みなら会員はマイページ、管理者は管理画面へ自動で進む。
+  // iPhoneはホーム画面から開いたときだけ通知を受け取れる（通知・新着は管理者だけ）。
+  const manifest = (c: any) => new Response(JSON.stringify(APP_MANIFEST), { headers: { 'Content-Type': 'application/manifest+json; charset=utf-8', 'Cache-Control': 'no-cache' } })
+  app.get('/manifest.webmanifest', manifest)
+  app.get('/admin.webmanifest', manifest)   // 以前の名前（すでに追加した端末のため）
 
   // まとめ送信（Cron Worker から。だれが呼んでも「送る時期になったものだけ」送る。短時間の重複は間引く）
   const tick = async (c: any) => {
@@ -501,6 +497,17 @@ export function registerNotify(app: any, deps: Deps) {
   app.get('/admin/news', (c: any) => c.html(newsPage(commonHead)))
 }
 
+// ================= アプリの設定（manifest） =================
+export const APP_MANIFEST = {
+  id: '/', name: '社会科同好会 学びの道しるべ', short_name: '学びの道しるべ', description: '社会科同好会の研修会・学びの記録',
+  start_url: '/', scope: '/', display: 'standalone', lang: 'ja', background_color: '#fffaf0', theme_color: '#d84315',
+  icons: [
+    { src: '/static/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+    { src: '/static/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+    { src: '/static/icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+  ]
+}
+
 // ================= Service Worker =================
 const SW_JS = `
 self.addEventListener('install', function (e) { self.skipWaiting(); });
@@ -508,7 +515,7 @@ self.addEventListener('activate', function (e) { e.waitUntil(self.clients.claim(
 self.addEventListener('push', function (e) {
   var d = {};
   try { d = e.data ? e.data.json() : {}; } catch (err) { d = {}; }
-  var title = d.title || '社会科同好会 事務局';
+  var title = d.title || '学びの道しるべ（事務局）';
   var opt = {
     body: d.body || '新しい振り返りがあります',
     icon: '/static/icons/icon-192.png',
@@ -538,13 +545,7 @@ self.addEventListener('notificationclick', function (e) {
 function newsPage(commonHead: string): string {
   return `<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <meta name="robots" content="noindex, nofollow">
-<link rel="manifest" href="/admin.webmanifest">
-<meta name="theme-color" content="#1a237e">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="事務局">
-<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
-<title>新着の振り返り - 社会科同好会</title>
+<title>新着の振り返り - 学びの道しるべ</title>
 <style>${GV_ADMIN_CSS}
 .badge{display:inline-block;min-width:22px;padding:2px 9px;border-radius:12px;background:#e65100;color:#fff;font-size:13px;font-weight:700;text-align:center}
 .badge.zero{background:#bbb}
@@ -615,12 +616,13 @@ function newsPage(commonHead: string): string {
     <div class="st" id="pushSt"></div>
     <div class="howto" id="iosHow" style="display:none"><b><i class="fab fa-apple"></i> iPhone・iPad</b>（iOS 16.4以降）
       <ol><li>Safariでこの画面を開き、共有ボタン（□に↑）→「ホーム画面に追加」</li>
-      <li>ホーム画面の「事務局」アイコンから開き、もう一度ログイン</li>
+      <li>ホーム画面の「学びの道しるべ」アイコンから開き、もう一度ログイン</li>
       <li>「この端末で通知を受け取る」→「許可」</li></ol></div>
     <div class="howto" id="andHow" style="display:none"><b><i class="fab fa-android"></i> Android</b>：Chromeでこの画面を開き、「この端末で通知を受け取る」→「許可」。<br>（ホーム画面に追加しておくと、すぐ開けて便利です）</div>
+    <div class="note" style="margin-top:8px"><a href="/app-install" style="color:#d84315">📱 ホーム画面に追加のしかた</a></div>
     <div class="howto" style="background:#f5f5f5"><b>通知が来ないとき</b>
       <ol><li>「テスト通知を送る」で届くか確かめる</li>
-      <li>スマホの設定で、このサイト（iPhoneは「事務局」アプリ）の通知が「許可」になっているか</li>
+      <li>スマホの設定で、このサイト（iPhoneは「学びの道しるべ」アプリ）の通知が「許可」になっているか</li>
       <li>おやすみモード・省電力モードになっていないか</li>
       <li>それでも来ないときは「この端末の通知をやめる」→もう一度「受け取る」</li></ol></div>
   </div>
@@ -763,7 +765,7 @@ async function refreshPush() {
   const sub = document.getElementById('subBtn'), un = document.getElementById('unsubBtn'), te = document.getElementById('testBtn');
   if (!canPush) {
     sub.disabled = true;
-    pushMsg(isIOS && !standalone ? 'iPhoneでは、ホーム画面に追加した「事務局」アイコンから開いたときだけ通知を受け取れます（下の手順）。' : 'このブラウザは通知に対応していません。', !isIOS);
+    pushMsg(isIOS && !standalone ? 'iPhoneでは、ホーム画面に追加した「学びの道しるべ」アイコンから開いたときだけ通知を受け取れます（下の手順）。' : 'このブラウザは通知に対応していません。', !isIOS);
     return;
   }
   if (S && !S.push_ready) { sub.disabled = true; pushMsg('通知の準備（鍵の設定）がまだです。新着はこの画面で確認できます。'); return; }

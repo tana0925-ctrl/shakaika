@@ -1,10 +1,11 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { getCookie, setCookie } from 'hono/cookie'
+import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import { registerDuplicates } from './growth_duplicates'
 import { registerPortfolio } from './growth_portfolio'
 import { registerAnalytics } from './growth_analytics'
 import { registerNotify, notifyReflection } from './growth_notify'
+import { A2HS_HEAD_SCRIPT, a2hsCardHtml, registerInstallHelp } from './app_install'
 import { registerSheet, normGroup } from './growth_sheet'
 
 type Bindings = {
@@ -20,6 +21,46 @@ type Variables = {
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 app.use('/api/*', cors())
+
+// ========== 管理画面の入口チェック（サーバ側）・キャッシュさせない設定 ==========
+// ログイン時に HttpOnly のクッキー（sk_sess＝ログインの合言葉）も渡し、/admin と /admin/* のページはサーバ側で
+// 「管理者か」を確かめてから返す。未ログイン→ログイン画面、一般会員→マイページへ戻す（画面の中身は返さない）。
+// 管理画面のページと /api/* の返事は端末やService Workerに保存させない（no-store）。
+const SESSION_COOKIE = 'sk_sess'
+const SESSION_DAYS = 7
+function setSessionCookie(c: any, token: string) {
+  setCookie(c, SESSION_COOKIE, token, { httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: SESSION_DAYS * 24 * 3600 })
+}
+async function cookieUser(c: any): Promise<any> {
+  const t = getCookie(c, SESSION_COOKIE) || ''
+  if (!/^[0-9a-f]{64}$/.test(t)) return null
+  const uid = await getUserIdFromToken(c.env.DB, t)
+  if (!uid) return null
+  return await c.env.DB.prepare('SELECT id, role FROM users WHERE id = ?').bind(uid).first()
+}
+async function adminPageGate(c: any, next: any) {
+  let u: any = null
+  try { u = await cookieUser(c) } catch (e) { u = null }
+  if (!u) {
+    const url = new URL(c.req.url)
+    const res = c.redirect('/login?redirect=' + encodeURIComponent(url.pathname + url.search), 302)
+    res.headers.set('Cache-Control', 'no-store')
+    return res
+  }
+  if (u.role !== 'admin') {
+    const res = c.redirect('/mypage', 302)
+    res.headers.set('Cache-Control', 'no-store')
+    return res
+  }
+  await next()
+  c.res.headers.set('Cache-Control', 'no-store, private')
+}
+app.use('/admin', adminPageGate)
+app.use('/admin/*', adminPageGate)
+app.use('/api/*', async (c, next) => {
+  await next()
+  if (!c.res.headers.get('Cache-Control')) c.res.headers.set('Cache-Control', 'no-store, private')
+})
 
 async function ensureGuestTable(db: any) {
   await db.prepare(`CREATE TABLE IF NOT EXISTS guest_attendances (
@@ -673,6 +714,7 @@ app.post('/api/auth/register', async (c) => {
   const userId = result.meta.last_row_id as number
   const token = generateToken()
   await setToken(c.env.DB, token, userId)
+  setSessionCookie(c, token)
 
   return c.json({ token, user: { id: userId, name, school, email, role: 'member' } })
 })
@@ -705,8 +747,16 @@ app.post('/api/auth/login', async (c) => {
   }
   const token = generateToken()
   await setToken(c.env.DB, token, user.id as number)
+  setSessionCookie(c, token)
 
   return c.json({ token, user: { id: user.id, name: user.name, school: (user as any).school || '', email: user.email, role: user.role } })
+})
+
+// ログイン済みの端末（ログインの合言葉が端末に保存済み）で、管理画面用のクッキーを付け直す
+app.post('/api/auth/session-cookie', authMiddleware, async (c) => {
+  const token = (c.req.header('Authorization') || '').replace('Bearer ', '')
+  if (/^[0-9a-f]{64}$/.test(token)) setSessionCookie(c, token)
+  return c.json({ success: true })
 })
 
 app.get('/api/auth/me', authMiddleware, async (c) => {
@@ -2108,6 +2158,13 @@ app.get('/api/health', (c) => c.json({ status: 'ok' }))
 const commonHead = `
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#d84315">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="学びの道しるべ">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+${A2HS_HEAD_SCRIPT}
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap');
@@ -2172,7 +2229,7 @@ function scValue(root, prefix) {
 // --- Forgot Password Page ---
 app.get('/forgot-password', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>パスワードを忘れた方 - 社会科同好会</title>
+<title>パスワードを忘れた方 - 学びの道しるべ</title>
 <style>
   .auth-container { max-width: 440px; margin: 60px auto; padding: 0 20px; }
   .auth-card { background: #fff; border-radius: 16px; padding: 40px 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; }
@@ -2282,7 +2339,7 @@ async function doReset() {
 
 app.get('/login', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>ログイン - 社会科同好会</title>
+<title>ログイン - 学びの道しるべ</title>
 <style>
   .auth-container { max-width: 440px; margin: 60px auto; padding: 0 20px; }
   .auth-card { background: #fff; border-radius: 16px; padding: 40px 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; }
@@ -2434,7 +2491,7 @@ const token = localStorage.getItem('token');
 if (token) {
   fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } })
     .then(r => { if (!r.ok) { localStorage.clear(); return {}; } return r.json(); })
-    .then(d => { if (d.user) { const redirectTo = (function(){ const r = new URLSearchParams(window.location.search).get('redirect'); return r && r.startsWith('/') && !r.startsWith('//') ? r : null; })(); window.location.href = redirectTo || (d.user.role === 'admin' ? '/admin' : '/mypage'); } })
+    .then(async d => { if (d.user) { try { await fetch('/api/auth/session-cookie', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } }); } catch(e) {} localStorage.setItem('user', JSON.stringify(d.user)); const redirectTo = (function(){ const r = new URLSearchParams(window.location.search).get('redirect'); return r && r.startsWith('/') && !r.startsWith('//') ? r : null; })(); window.location.href = redirectTo || (d.user.role === 'admin' ? '/admin' : '/mypage'); } })
     .catch(() => { localStorage.clear(); });
 }
 </script>
@@ -2444,7 +2501,7 @@ if (token) {
 // --- Member My Page (with interactive rubric) ---
 app.get('/mypage', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>マイページ - 社会科同好会</title>
+<title>マイページ - 学びの道しるべ</title>
 <style>
   .top-bar { background: #fff; border-bottom: 3px solid var(--header-line); padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
   .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); font-size: 18px; font-weight: 700; }
@@ -2632,6 +2689,7 @@ ${SHARE_CONSENT_CSS}
 </div>
 
 <div class="main">
+  ${a2hsCardHtml()}
   <div class="guide">
     <strong><i class="fas fa-hand-pointer"></i> 使い方：</strong>
     今の自分に当てはまるステップのセルをクリックしてください。各視点ごとに1つ選べます。メモも書けます。最後に「保存する」を押すと記録されます。
@@ -2669,6 +2727,7 @@ ${SHARE_CONSENT_CSS}
           <h2 style="margin:0;font-family:'Zen Maru Gothic',sans-serif;color:#e65100;font-size:18px"><i class="fas fa-user-edit"></i> プロフィール設定</h2>
           <button onclick="document.getElementById('profileModal').style.display='none'" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;padding:4px 8px">&times;</button>
         </div>
+        <div style="text-align:right;margin:-8px 0 10px"><a href="/app-install" style="font-size:12px;color:#d84315">📱 ホーム画面に追加のしかた</a></div>
         <div style="display:flex;flex-direction:column;gap:12px;">
           <div>
             <label style="font-size:12px;font-weight:bold;color:#5d4037;">学校名</label>
@@ -3832,7 +3891,7 @@ if (document.readyState === 'loading') {
 // --- Admin Dashboard ---
 app.get('/admin', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>管理者ダッシュボード - 社会科同好会</title>
+<title>管理者ダッシュボード - 学びの道しるべ</title>
 <style>
   .top-bar { background: #1a237e; color: #fff; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
   .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; font-size: 18px; font-weight: 700; }
@@ -3940,6 +3999,7 @@ app.get('/admin', (c) => {
 </div>
 
 <div class="main">
+  ${a2hsCardHtml()}
   <a id="newsBanner" href="/admin/news" style="display:none;text-decoration:none;margin-bottom:16px;background:#fff3e0;border:2px solid #ff9800;border-radius:12px;padding:12px 16px;color:#e65100;font-weight:700;align-items:center;gap:10px"><i class="fas fa-bell"></i> <span id="newsBannerText"></span> <span style="margin-left:auto;font-size:12px">新着を見る <i class="fas fa-chevron-right"></i></span></a>
   <div class="stats">
     <div class="stat-card total"><div class="num" id="totalCount">-</div><div class="label">総会員数</div></div>
@@ -4524,7 +4584,7 @@ loadMembers();
 app.get('/attend/:code', (c) => {
   const code = c.req.param('code').replace(/[^A-Za-z0-9]/g, '')
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>出席・アンケート - 社会科同好会</title>
+<title>出席・アンケート - 学びの道しるべ</title>
 <style>
   .attend-container { max-width: 560px; margin: 20px auto; padding: 0 16px; }
   .card { background: #fff; border-radius: 16px; padding: 28px 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #f0e6d2; margin-bottom: 20px; }
@@ -5150,7 +5210,7 @@ async function submitSurvey() {
 app.get('/mypage/insights', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <meta name="robots" content="noindex, nofollow">
-<title>みんなの気づき - 社会科同好会</title>
+<title>みんなの気づき - 学びの道しるべ</title>
 <style>
   .top-bar { background: #fff; border-bottom: 3px solid var(--header-line); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; gap: 8px; }
   .top-bar .logo { font-family: 'Zen Maru Gothic', sans-serif; color: var(--header-line); font-size: 17px; font-weight: 700; }
@@ -5213,7 +5273,7 @@ if (token) load();
 // --- Admin Groups Page ---
 app.get('/admin/groups', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>グループ別管理 - 社会科同好会</title>
+<title>グループ別管理 - 学びの道しるべ</title>
 <style>
 body{background:#f5f5f5;font-family:'Noto Sans JP',sans-serif;margin:0}
 .top-bar{background:#1a237e;color:#fff;padding:10px 24px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}
@@ -5755,7 +5815,7 @@ load();
 // --- Admin Events Page ---
 app.get('/admin/events', (c) => {
   return c.html(`<!DOCTYPE html><html lang="ja"><head>${commonHead}
-<title>イベント管理 - 社会科同好会</title>
+<title>イベント管理 - 学びの道しるべ</title>
 <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
 <style>
   .top-bar { background: #1a237e; color: #fff; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
@@ -6511,8 +6571,13 @@ loadEvents();
 })
 
 // --- Root redirect ---
-app.get('/', (c) => {
-  return c.redirect('/login')
+// 共通の入口（アプリの start_url）。ログイン状態と権限で振り分ける（管理者→管理画面、会員→マイページ）
+app.get('/', async (c) => {
+  let u: any = null
+  try { u = await cookieUser(c) } catch (e) { u = null }
+  const res = c.redirect(!u ? '/login' : (u.role === 'admin' ? '/admin' : '/mypage'), 302)
+  res.headers.set('Cache-Control', 'no-store')
+  return res
 })
 
 // --- Logout API (clean up session from D1) ---
@@ -6522,6 +6587,7 @@ app.post('/api/auth/logout', async (c) => {
     const token = authHeader.replace('Bearer ', '')
     await c.env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run()
   }
+  deleteCookie(c, SESSION_COOKIE, { path: '/', secure: true })
   return c.json({ success: true })
 })
 
@@ -6536,6 +6602,9 @@ registerDuplicates(app, { authMiddleware, adminMiddleware, commonHead })
 
 // ========== 新着の振り返り・スマホへの通知（src/growth_notify.ts） ==========
 registerNotify(app, { authMiddleware, adminMiddleware, commonHead })
+
+// ========== ホーム画面に追加のしかた（src/app_install.ts） ==========
+registerInstallHelp(app, commonHead)
 
 // ========== 個人まとめシート（A4縦1枚・管理者のみ。src/growth_sheet.ts） ==========
 registerSheet(app, { authMiddleware, adminMiddleware, commonHead, stepKeywords: AI_STEP_KEYWORDS })

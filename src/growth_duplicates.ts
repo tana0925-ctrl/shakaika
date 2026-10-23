@@ -347,7 +347,7 @@ export function registerDuplicates(app: any, deps: Deps) {
 function duplicatesPage(commonHead: string): string {
   return `<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <meta name="robots" content="noindex, nofollow">
-<title>重複のまとめ - 社会科同好会</title>
+<title>重複のまとめ - 学びの道しるべ</title>
 <style>${GV_ADMIN_CSS}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
 .tab{padding:8px 14px;border-radius:18px;border:2px solid #c5cae9;background:#fff;color:#1a237e;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}

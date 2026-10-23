@@ -277,7 +277,7 @@ async function api(path, opt) {
 function analyticsPage(commonHead: string): string {
   return `<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <meta name="robots" content="noindex, nofollow">
-<title>分析ダッシュボード - 社会科同好会</title>
+<title>分析ダッシュボード - 学びの道しるべ</title>
 <style>${GV_ADMIN_CSS}
 .ctrl{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .ctrl select{max-width:100%}
@@ -538,7 +538,7 @@ load(params.get('fy') || '');
 function viewpointsPage(commonHead: string): string {
   return `<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <meta name="robots" content="noindex, nofollow">
-<title>視点の読みかえ表 - 社会科同好会</title>
+<title>視点の読みかえ表 - 学びの道しるべ</title>
 <style>${GV_ADMIN_CSS}
 .row-unset td{background:#fff8e1}
 .chg td{background:#e8f5e9}

@@ -346,7 +346,7 @@ const KL = { reason:'選んだ理由', try:'試してみたいこと', impressio
 function portfolioPage(commonHead: string, isAdmin: boolean, withReport: boolean): string {
   return `<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <meta name="robots" content="noindex, nofollow">
-<title>学びの記録（ポートフォリオ） - 社会科同好会</title>
+<title>学びの記録（ポートフォリオ） - 学びの道しるべ</title>
 <style>${MEMBER_CSS}</style>
 </head><body>
 <div class="top-bar${isAdmin ? ' adm' : ''}">
@@ -471,7 +471,7 @@ load(params.get('fy') || '');
 function reportPage(commonHead: string, isAdmin: boolean): string {
   return `<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <meta name="robots" content="noindex, nofollow">
-<title>年度末の成長レポート - 社会科同好会</title>
+<title>年度末の成長レポート - 学びの道しるべ</title>
 <style>${MEMBER_CSS}
 .rp { max-width: 800px; margin: 16px auto 50px; padding: 0 14px; }
 .sheet { background:#fff; border-radius: 14px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); padding: 26px 28px; }

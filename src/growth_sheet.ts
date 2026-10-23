@@ -300,7 +300,7 @@ export function registerSheet(app: any, deps: Deps) {
 function sheetPage(commonHead: string): string {
   return `<!DOCTYPE html><html lang="ja"><head>${commonHead}
 <meta name="robots" content="noindex, nofollow">
-<title>個人まとめシート - 社会科同好会</title>
+<title>個人まとめシート - 学びの道しるべ</title>
 <style>
 body { background:#eceff1; margin:0 }
 .top-bar { background:#1a237e; color:#fff; padding:10px 16px; display:flex; justify-content:space-between; align-items:center; position:sticky; top:0; z-index:100; gap:8px; flex-wrap:wrap }
