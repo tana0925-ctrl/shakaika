@@ -4,9 +4,12 @@ import { getCookie, setCookie } from 'hono/cookie'
 import { registerDuplicates } from './growth_duplicates'
 import { registerPortfolio } from './growth_portfolio'
 import { registerAnalytics } from './growth_analytics'
+import { registerNotify, notifyReflection } from './growth_notify'
 
 type Bindings = {
   DB: D1Database
+  VAPID_PUBLIC_KEY?: string   // スマホ通知（Web Push）の公開鍵
+  VAPID_PRIVATE_KEY?: string  // 秘密鍵（Cloudflareのシークレット。コードには書かない）
 }
 
 type Variables = {
@@ -41,7 +44,7 @@ async function ensureGuestTable(db: any) {
 }
 
 // ========== 安全対策の設定（必要ならここの数字だけ変える） ==========
-const RECEPTION_CLOSE_DAYS = 7      // 研修会の日から何日たったら受付（出席・ゲスト回答）を締め切るか
+const RECEPTION_CLOSE_DAYS = 14     // 研修会の日から何日たったら受付（出席・ゲスト回答）を締め切るか（管理者の「受付を再開」も同じ日数）
 const LOGIN_MAX_FAILS = 5           // 同じメールアドレスで何回続けて失敗したらロックするか
 const LOGIN_LOCK_MINUTES = 15       // ロックする時間（分）
 const PBKDF2_ITERATIONS = 50000     // パスワード保存の強さ（Cloudflare Workersの上限は100000）
@@ -870,6 +873,9 @@ app.post('/api/me/annual-notes', authMiddleware, async (c) => {
       reflection = excluded.reflection,
       updated_at = datetime('now')
   `).bind(user.id, fiscal_year, goal, reflection).run()
+
+  // 事務局の「新着」へ（裏の処理。失敗しても保存は成立）
+  if (reflection.trim()) notifyReflection(c, { kind: 'annual', rtype: 'member', rid: user.id, fy: fiscal_year, content: reflection })
 
   return c.json({ success: true })
 })
@@ -1788,6 +1794,8 @@ app.post('/api/events/:code/guest-survey', async (c) => {
   if (Object.prototype.hasOwnProperty.call(body, 'share_consent')) {
     try { const sc = parseShareConsent(body.share_consent); if (sc) await saveShareConsent(db, event.id, 'guest', guest.id, sc) } catch (e) { /* ignore */ }
   }
+  // 事務局の「新着」へ（裏の処理。失敗しても回答は成立）
+  notifyReflection(c, { kind: 'survey', rtype: 'guest', rid: guest.id, eventId: event.id, content: JSON.stringify(answers) })
   return c.json({ success: true })
 })
 
@@ -1857,6 +1865,8 @@ app.post('/api/events/:code/survey', authMiddleware, async (c) => {
   if (reqBody && Object.prototype.hasOwnProperty.call(reqBody, 'share_consent')) {
     try { const sc = parseShareConsent(reqBody.share_consent); if (sc) await saveShareConsent(db, event.id, 'member', user.id, sc) } catch (e) { /* ignore */ }
   }
+  // 事務局の「新着」へ（裏の処理。失敗しても回答は成立）
+  notifyReflection(c, { kind: 'survey', rtype: 'member', rid: user.id, eventId: event.id, fy, content: JSON.stringify([satisfaction || null, comment || '', custom_answers || []]) })
   return c.json({ success: true })
 })
 
@@ -1913,6 +1923,8 @@ app.post('/api/events/:code/recall', authMiddleware, async (c) => {
     "INSERT INTO recall_reflections (user_id, event_id, source_event_id, source_question_id, source_answer_text, status, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now')) " +
     "ON CONFLICT(user_id, event_id) DO UPDATE SET source_event_id=excluded.source_event_id, source_question_id=excluded.source_question_id, source_answer_text=excluded.source_answer_text, status=excluded.status, note=excluded.note, updated_at=datetime('now')"
   ).bind(user.id, cur.id, src.source_event_id, src.question_id, String(src.answer_text || '').slice(0, 2000), status, note).run()
+  // 事務局の「新着」へ（ボタンか一言があるときだけ。裏の処理で、失敗しても保存は成立）
+  if (status || note) notifyReflection(c, { kind: 'recall', rtype: 'member', rid: user.id, eventId: cur.id, content: (status || '') + '|' + note })
   return c.json({ success: true, status, note })
 })
 
@@ -3920,11 +3932,13 @@ app.get('/admin', (c) => {
     <a href="/admin/groups" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-users"></i> グループ別</a>
     <a href="/admin/analytics" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-chart-bar"></i> 分析</a>
     <a href="/admin/duplicates" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-user-friends"></i> 重複のまとめ</a>
+    <a href="/admin/news" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-bell"></i> 新着 <span id="newsNavBadge" style="display:none;background:#ff9800;color:#fff;border-radius:10px;padding:0 7px;margin-left:2px"></span></a>
     <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i> ログアウト</button>
   </div>
 </div>
 
 <div class="main">
+  <a id="newsBanner" href="/admin/news" style="display:none;text-decoration:none;margin-bottom:16px;background:#fff3e0;border:2px solid #ff9800;border-radius:12px;padding:12px 16px;color:#e65100;font-weight:700;align-items:center;gap:10px"><i class="fas fa-bell"></i> <span id="newsBannerText"></span> <span style="margin-left:auto;font-size:12px">新着を見る <i class="fas fa-chevron-right"></i></span></a>
   <div class="stats">
     <div class="stat-card total"><div class="num" id="totalCount">-</div><div class="label">総会員数</div></div>
     <div class="stat-card active"><div class="num" id="completeCount">-</div><div class="label">全項目記入済み</div></div>
@@ -3965,6 +3979,45 @@ let user = JSON.parse(localStorage.getItem('user') || 'null');
 if (!token || !user || user.role !== 'admin') { window.location.href = '/login'; throw new Error('redirect'); }
 
 let allMembers = [];
+// 新着の振り返り（担当グループの件数）。失敗しても画面には影響しない
+// 「この人の振り返りを通知で受け取る」（事務局ごとの個別ON/OFF）
+var _watch = {}, _watchMode = 'all';
+function watchBtnHtml(id) {
+  var on = !!_watch[id];
+  return '<button class="btn-sm" data-action="watch" data-id="' + id + '" title="' + (on ? 'この人の振り返りを受け取る：ON（押すとOFF）' : 'この人の振り返りを通知で受け取る（押すとON）') + '" style="' + (on ? 'background:#ff9800;color:#fff' : 'background:#f5f5f5;color:#bbb') + '"><i class="fas ' + (on ? 'fa-bell' : 'fa-bell-slash') + '"></i></button>';
+}
+function paintWatch() {
+  document.querySelectorAll('[data-action="watch"]').forEach(function(b) { var w = document.createElement('span'); w.innerHTML = watchBtnHtml(parseInt(b.dataset.id)); var nb = w.firstChild; if (b.dataset.label) { nb.dataset.label = '1'; nb.innerHTML += (_watch[b.dataset.id] ? ' 通知で受け取る：ON' : ' 通知で受け取る：OFF'); nb.style.padding = '8px 14px'; } b.replaceWith(nb); });
+}
+function loadWatch() {
+  fetch('/api/notify/watch', { headers: { 'Authorization': 'Bearer ' + token } }).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
+    if (!d) return; _watch = {}; (d.ids || []).forEach(function(i) { _watch[i] = true; }); _watchMode = d.mode || 'all'; paintWatch();
+  }).catch(function() {});
+}
+function toggleWatch(id) {
+  var on = !_watch[id];
+  fetch('/api/notify/watch', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: id, on: on }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+    .then(function(x) {
+      if (!x.ok) { alert((x.d && x.d.error) || '変更できませんでした'); return; }
+      if (on) _watch[id] = true; else delete _watch[id];
+      _watchMode = x.d.mode || _watchMode;
+      paintWatch();
+      if (on && _watchMode !== 'selected') alert('「選択した人」に入れました。\\n今の受け取る対象は「' + (_watchMode === 'all' ? '全員' : '受け取らない') + '」です。選んだ人だけにしたいときは、新着の画面の設定で「選択した人」にしてください。');
+    }).catch(function() { alert('通信エラーで変更できませんでした'); });
+}
+loadWatch();
+(function loadNewsBadge() {
+  fetch('/api/notify/summary', { headers: { 'Authorization': 'Bearer ' + token } }).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
+    if (!d) return;
+    var b = document.getElementById('newsBanner'), t = document.getElementById('newsBannerText'), nb = document.getElementById('newsNavBadge');
+    if (d.unread > 0) {
+      t.textContent = '新しい振り返り ' + (d.unread_text || (d.unread + '件'));
+      b.style.display = 'flex';
+      nb.textContent = d.unread > 99 ? '99+' : String(d.unread); nb.style.display = 'inline-block';
+    }
+  }).catch(function() {});
+})();
 const vpKeys = ['lesson_plan','lesson_practice','student_eval','connection','research'];
 const vpLabels = { lesson_plan:'授業をつくる', lesson_practice:'授業をする', student_eval:'子どもを見る', connection:'つながる', research:'深める' };
 const stepLabels = { 1:'STEP1', 2:'STEP2', 3:'STEP3', 4:'STEP4' };
@@ -4203,6 +4256,7 @@ function renderMembers(members) {
       vpCells +
       (_activeTab === 'unset' ? '<td><select class="school-type-select" data-id="' + m.id + '" onchange="updateSchoolType(this)"><option value="">未設定</option><option value="elementary"' + (m.school_type==='elementary'?' selected':'') + '>小学校</option><option value="junior_high"' + (m.school_type==='junior_high'?' selected':'') + '>中学校</option><option value="admin_staff"' + (m.school_type==='admin_staff'?' selected':'') + '>主幹・管理職</option></select></td>' : '') +
       '<td style="white-space:nowrap">' +
+        (m.id !== user.id ? watchBtnHtml(m.id) + ' ' : '') +
         '<a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener" title="学びの記録（ポートフォリオ）"><i class="fas fa-seedling"></i></a> ' +
         '<button class="btn-sm btn-warning" data-action="role" data-id="' + m.id + '" data-role="' + m.role + '" title="' + (m.role === 'admin' ? '管理者を解除' : '管理者にする') + '"><i class="fas ' + (m.role === 'admin' ? 'fa-user-minus' : 'fa-user-plus') + '"></i></button> ' +
         '<button class="btn-sm btn-key" data-action="reset-password" data-id="' + m.id + '" data-name="' + escapeHtml(m.name) + '" title="パスワードリセット"><i class="fas fa-key"></i></button> ' +
@@ -4347,11 +4401,12 @@ function showDetail(id) {
     html += '</div>' + stepBadge(sel) + '</div>';
   }
 
-  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:8px 14px" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-seedling"></i> 学びの記録</a><a class="btn-sm" style="background:#e8eaf6;color:#1a237e;text-decoration:none;padding:8px 14px" href="/admin/report?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a></div>';
+  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:8px 14px" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-seedling"></i> 学びの記録</a><a class="btn-sm" style="background:#e8eaf6;color:#1a237e;text-decoration:none;padding:8px 14px" href="/admin/report?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a>' + (m.id !== user.id ? '<button class="btn-sm" data-action="watch" data-label="1" data-id="' + m.id + '">.</button>' : '') + '</div>';
   html += '<div style="text-align:center;margin-top:24px"><button class="btn-sm" style="background:#eee;color:#555;padding:8px 24px" id="closeDetailBtn">閉じる</button></div>';
   document.getElementById('detailContent').innerHTML = html;
   document.getElementById('closeDetailBtn').addEventListener('click', function() { document.getElementById('detailModal').classList.remove('show'); });
   document.getElementById('detailModal').classList.add('show');
+  paintWatch();
 
   loadAnnualNotesForMember(id);
 }
@@ -4422,6 +4477,7 @@ document.addEventListener('click', function(e) {
   else if (action === 'role') toggleRole(id, btn.dataset.role);
   else if (action === 'reset-password') resetPassword(id, btn.dataset.name);
   else if (action === 'delete') deleteMember(id, btn.dataset.name);
+  else if (action === 'watch') toggleWatch(id);
 });
 
 loadMembers();
@@ -6444,5 +6500,8 @@ registerPortfolio(app, { authMiddleware, adminMiddleware, commonHead, stepKeywor
 
 // ========== 重複のまとめ（src/growth_duplicates.ts） ==========
 registerDuplicates(app, { authMiddleware, adminMiddleware, commonHead })
+
+// ========== 新着の振り返り・スマホへの通知（src/growth_notify.ts） ==========
+registerNotify(app, { authMiddleware, adminMiddleware, commonHead })
 
 export default app
