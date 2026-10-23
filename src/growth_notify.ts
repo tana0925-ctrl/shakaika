@@ -499,7 +499,7 @@ export function registerNotify(app: any, deps: Deps) {
 
 // ================= アプリの設定（manifest） =================
 export const APP_MANIFEST = {
-  id: '/', name: '社会科同好会 学びの道しるべ', short_name: '学びの道しるべ', description: '社会科同好会の研修会・学びの記録',
+  id: '/', name: '学びの道しるべ', short_name: '学びの道しるべ', description: '社会科同好会の研修会・学びの記録',
   start_url: '/', scope: '/', display: 'standalone', lang: 'ja', background_color: '#fffaf0', theme_color: '#d84315',
   icons: [
     { src: '/static/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
