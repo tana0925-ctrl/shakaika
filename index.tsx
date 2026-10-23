@@ -4193,7 +4193,7 @@ function renderMembers(members) {
     var adminBadge = (m.role === 'admin') ? ' <span class="role-badge role-admin"><i class="fas fa-shield-halved"></i> 管理者</span>' : '';
     return '<tr' + (m.role === 'admin' ? ' class="is-admin-row"' : '') + '>' +
       '<td>' + (i + 1) + '</td>' +
-         '<td><strong>' + (m.name || '') + '</strong>' + adminBadge + '</td>' +
+         '<td class="member-name" style="cursor:pointer" data-action="detail" data-id="' + m.id + '" title="詳細を見る"><strong>' + (m.name || '') + '</strong>' + adminBadge + '</td>' +
       '<td>' + (m.school || '-') + '</td>' +
       '<td>' + (m.district || '-') + '</td>' +
       '<td>' + (m.experience_years != null ? m.experience_years + '年目' : '-') + '</td>' +
@@ -4319,7 +4319,7 @@ async function loadAnnualNotesForMember(userId) {
 }
 
 function showDetail(id) {
-  const m = allMembers.find(x => x.id === id);
+  const m = _allMembers.find(x => x.id === id);
   if (!m) return;
 
   const fy = getCurrentFiscalYearClient();
@@ -4337,13 +4337,17 @@ function showDetail(id) {
     + '<div id="annualNotesContent" style="font-size:13px;color:#555">読み込み中...</div>'
     + '</div>';
 
-  for (const vp of vpKeys) {
-    const sel = m.selections[vp];
-    html += '<div class="detail-item"><div><div class="vp-name">' + escapeHtml(vpLabels[vp]) + '</div>';
+  const stTab = { elementary: 'elem', junior_high: 'junior', admin_staff: 'admin' }[inferSchoolType(m)] || 'elem';
+  const dvps = (_vpTabConfig[stTab] && _vpTabConfig[stTab].viewpoints.length) ? _vpTabConfig[stTab].viewpoints : vpKeys.map(function(k) { return { key: k, label: vpLabels[k] }; });
+  for (const dv of dvps) {
+    const vp = dv.key;
+    const sel = (m.selections || {})[vp];
+    html += '<div class="detail-item"><div><div class="vp-name">' + escapeHtml(dv.label) + '</div>';
     if (sel && sel.memo) html += '<div class="memo">' + escapeHtml(sel.memo) + '</div>';
     html += '</div>' + stepBadge(sel) + '</div>';
   }
 
+  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:8px 14px" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-seedling"></i> 学びの記録</a><a class="btn-sm" style="background:#e8eaf6;color:#1a237e;text-decoration:none;padding:8px 14px" href="/admin/report?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a></div>';
   html += '<div style="text-align:center;margin-top:24px"><button class="btn-sm" style="background:#eee;color:#555;padding:8px 24px" id="closeDetailBtn">閉じる</button></div>';
   document.getElementById('detailContent').innerHTML = html;
   document.getElementById('closeDetailBtn').addEventListener('click', function() { document.getElementById('detailModal').classList.remove('show'); });
