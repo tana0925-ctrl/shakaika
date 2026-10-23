@@ -20,13 +20,13 @@ async function buildAnalytics(db: D1Database, fy: number) {
   const [start, end] = fyRange(fy)
   const am = await loadAliases(db)
   const { results: evs } = await db.prepare(
-    'SELECT id, title, event_date FROM events WHERE event_date >= ? AND event_date <= ? ORDER BY event_date, id'
+    'SELECT id, title, event_date, event_kind FROM events WHERE event_date >= ? AND event_date <= ? ORDER BY event_date, id'
   ).bind(start, end).all() as any
   const events: any[] = []
   const byId: Record<number, any> = {}
   for (const e of (evs || [])) {
     const o = {
-      id: e.id, title: e.title, date: e.event_date,
+      id: e.id, title: e.title, date: e.event_date, kind: (['training', 'research', 'other'].indexOf(e.event_kind) >= 0 ? e.event_kind : 'other'),
       att_m: 0, att_g: 0, resp_m: 0, resp_g: 0,
       has_growth: false, growth_n: 0, growth_total: 0,
       growth_people: {} as Record<string, number>, unmapped: {} as Record<string, number>,
@@ -154,7 +154,8 @@ export function registerAnalytics(app: any, deps: Deps) {
     const fy = parseFY(body.fy)
     const eventId = parseInt(String(body.event_id || ''), 10) || 0
     const d = await buildAnalytics(db, fy)
-    const evs = eventId ? d.events.filter((e: any) => e.id === eventId) : d.events
+    const kindF = ['training', 'research', 'other'].indexOf(String(body.kind || '')) >= 0 ? String(body.kind) : ''
+    const evs = eventId ? d.events.filter((e: any) => e.id === eventId) : (kindF ? d.events.filter((e: any) => e.kind === kindF) : d.events)
     if (!evs.length) return c.json({ error: '対象の研修会がありません' }, 404)
     const tokens = await loadAllNameTokens(db)
     const hits: Record<string, number> = {}
@@ -321,6 +322,7 @@ table.t td:first-child{white-space:nowrap}
   <div class="card">
     <div class="ctrl">
       <select id="fySel" aria-label="年度"></select>
+      <select id="kindSel" aria-label="会の種類"><option value="">すべての種類</option><option value="training">研修の回だけ</option><option value="research">研究の回だけ</option><option value="other">その他の回だけ</option></select>
       <select id="evSel" aria-label="表示する回"><option value="">年度全体</option></select>
       <button class="btn btn-gray" id="aiBtn" type="button"><i class="fas fa-copy"></i> AIに貼る用にコピー（名前は伏せます）</button>
     </div>
@@ -358,13 +360,24 @@ async function load(fy) {
   fs.innerHTML = D.fys.map(function(f) { return '<option value="' + f + '"' + (f === D.fy ? ' selected' : '') + '>' + f + '年度</option>'; }).join('');
   const es = document.getElementById('evSel');
   const want = params.get('event') || '';
-  es.innerHTML = '<option value="">年度全体（' + D.events.length + '回）</option>' + D.events.map(function(e) { return '<option value="' + e.id + '"' + (String(e.id) === want ? ' selected' : '') + '>' + esc(e.date + ' ' + e.title) + '</option>'; }).join('');
+  fillEvSel(want);
   render();
+}
+const KINDL = { training: '研修', research: '研究', other: 'その他' };
+function kindEvents() {
+  const k = document.getElementById('kindSel').value;
+  return k ? D.events.filter(function(e) { return e.kind === k; }) : D.events;
+}
+function fillEvSel(want) {
+  const es = document.getElementById('evSel');
+  const k = document.getElementById('kindSel').value;
+  const list = kindEvents();
+  es.innerHTML = '<option value="">' + (k ? KINDL[k] + 'の回すべて' : '年度全体') + '（' + list.length + '回）</option>' + list.map(function(e) { return '<option value="' + e.id + '"' + (String(e.id) === want ? ' selected' : '') + '>' + esc(e.date + ' ' + e.title) + '</option>'; }).join('');
 }
 
 function selEvents() {
   const v = document.getElementById('evSel').value;
-  return v ? D.events.filter(function(e) { return String(e.id) === v; }) : D.events;
+  return v ? D.events.filter(function(e) { return String(e.id) === v; }) : kindEvents();
 }
 
 function render() {
@@ -372,6 +385,8 @@ function render() {
   const single = evs.length === 1 && document.getElementById('evSel').value;
   const body = document.getElementById('body');
   if (!D.events.length) { body.innerHTML = '<div class="card"><div class="msg">この年度の研修会はまだありません。</div></div>'; return; }
+  if (!evs.length) { body.innerHTML = '<div class="card"><div class="msg">この種類の回は、この年度にはまだありません。</div></div>'; return; }
+  const kindNow = document.getElementById('kindSel').value;
   let h = '';
   if (!D.alias_table) h += '<div class="warnbox">読みかえ表がまだ準備されていないため、初期設定の読みかえで数えています。</div>';
   // 読みかえ未設定
@@ -383,12 +398,12 @@ function render() {
   // 人数
   let am = 0, ag = 0, rm = 0, rg = 0;
   evs.forEach(function(e) { am += e.att_m; ag += e.att_g; rm += e.resp_m; rg += e.resp_g; });
-  h += '<div class="card"><h2><i class="fas fa-users"></i> 参加と回答' + (single ? '' : '（' + D.fy + '年度・' + evs.length + '回の合計）') + '</h2><div class="tiles">';
+  h += '<div class="card"><h2><i class="fas fa-users"></i> 参加と回答' + (single ? '' : '（' + D.fy + '年度・' + (kindNow ? KINDL[kindNow] + 'の回・' : '') + evs.length + '回の合計）') + '</h2><div class="tiles">';
   if (!single) h += tile(evs.length + '回', '研修会の数', '');
   h += tile((am + ag) + '人', single ? '参加人数' : '延べ参加人数', '会員' + am + '・ゲスト' + ag);
   h += tile((rm + rg) + '人', single ? '回答人数' : '延べ回答人数', '会員' + rm + '・ゲスト' + rg);
   h += tile(pct(rm + rg, am + ag), '回答率', '回答 ÷ 参加');
-  if (!single) h += tile(D.unique_members + '人', '参加した会員の実人数', 'ゲストは人の区別ができないため含めません');
+  if (!single && !kindNow) h += tile(D.unique_members + '人', '参加した会員の実人数', 'ゲストは人の区別ができないため含めません');
   h += '</div></div>';
 
   // 成長の視点
@@ -413,14 +428,14 @@ function render() {
   // 回ごとの比較
   if (!single) {
     const used = D.canon.filter(function(cn) { return gp[cn]; });
-    h += '<div class="card"><h2><i class="fas fa-table"></i> 回ごとの比較</h2>';
+    h += '<div class="card"><h2><i class="fas fa-table"></i> 回ごとの比較' + (kindNow ? '（' + KINDL[kindNow] + 'の回）' : '') + '</h2>';
     h += '<div class="note">参加人数がちがう回どうしを比べられるよう、視点は「その回で視点の質問に答えた人のうち、選んだ人の割合」で示しています（かっこ内は人数）。人数が少ない回は、割合が大きく動きやすい点にご注意ください。</div>';
     h += '<div class="tbl-wrap" style="margin-top:8px"><table class="t"><tr><th>日付</th><th>研修会</th><th class="num">参加</th><th class="num">回答（率）</th><th class="num">視点の回答</th>';
     used.forEach(function(cn) { h += '<th class="heat">' + esc(cn) + '</th>'; });
     h += '</tr>';
     evs.forEach(function(e) {
       const att = e.att_m + e.att_g, resp = e.resp_m + e.resp_g;
-      h += '<tr><td style="white-space:nowrap">' + esc(e.date) + '</td><td style="min-width:150px"><a href="?fy=' + D.fy + '&event=' + e.id + '" onclick="return pickEv(' + e.id + ')">' + esc(e.title) + '</a></td><td class="num">' + att + '</td><td class="num">' + resp + '（' + pct(resp, att) + '）</td><td class="num">' + (e.has_growth ? e.growth_n + '人' : '<span class="pill gray">質問なし</span>') + '</td>';
+      h += '<tr><td style="white-space:nowrap">' + esc(e.date) + '</td><td style="min-width:150px"><span class="pill gray">' + (KINDL[e.kind] || 'その他') + '</span> <a href="?fy=' + D.fy + '&event=' + e.id + '" onclick="return pickEv(' + e.id + ')">' + esc(e.title) + '</a></td><td class="num">' + att + '</td><td class="num">' + resp + '（' + pct(resp, att) + '）</td><td class="num">' + (e.has_growth ? e.growth_n + '人' : '<span class="pill gray">質問なし</span>') + '</td>';
       used.forEach(function(cn) {
         const n = e.growth_people[cn] || 0;
         if (!e.growth_n) { h += '<td class="heat" style="color:#ccc">－</td>'; return; }
@@ -512,10 +527,11 @@ function renderTexts() {
 
 document.getElementById('fySel').addEventListener('change', function() { params.delete('event'); load(this.value); });
 document.getElementById('evSel').addEventListener('change', render);
+document.getElementById('kindSel').addEventListener('change', function() { fillEvSel(''); render(); });
 document.getElementById('aiBtn').addEventListener('click', async function() {
   const btn = this; btn.disabled = true;
   try {
-    const d = await api('/api/admin/analytics/ai-text', { method: 'POST', body: JSON.stringify({ fy: D.fy, event_id: document.getElementById('evSel').value || null }) });
+    const d = await api('/api/admin/analytics/ai-text', { method: 'POST', body: JSON.stringify({ fy: D.fy, event_id: document.getElementById('evSel').value || null, kind: document.getElementById('kindSel').value || null }) });
     document.getElementById('aiText').value = d.text;
     const m = (d.masked || []).map(function(x) { return x.label + ' ' + x.count + '件'; }).join('、');
     document.getElementById('aiInfo').innerHTML = '名前などを伏せた文章です（' + d.chars + '文字）。' + (m ? '伏せたもの：' + esc(m) + '。' : '') + '<br>コピーして、使っているAI（ChatGPT など）に貼り付けてください。AIには「回答の傾向」と「運営への提案」を分けて書くよう、指示文が入っています。<br><b>貼る前に、名前や学校名が残っていないか、ざっと確かめてください。</b>';

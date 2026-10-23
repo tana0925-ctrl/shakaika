@@ -89,7 +89,22 @@ export function classifyEvent(title: string, groupNames: string[]): EvTarget {
   }
   return { kind: 'all' }
 }
-export const TARGET_RULE_NOTE = '対象回の決め方：全体向けの会（スキルアップ研修会・全体会など）は全員が対象。会名に「小学校部会」「中学校部会」「小中合同」とある回はその校種の会員、「グループ」「授業力アップ」とある回は会名のグループの会員が対象（会名から判定）。まだ開かれていない回と、出席者が一人もいない回は数えない。本人が出席した回は必ず対象に含める。'
+export const TARGET_RULE_NOTE = '参加状況の数え方：会の種類（研修・研究・その他）は管理者がイベントごとに決めています。【研修】対象回に対する参加率を出します（全体向けの回は全員、会名に「小学校」「中学校」の部会・「小中合同」とある回はその校種、「グループ」「授業力アップ」とある回は会名のグループの会員が対象）。【研究】部会などの研究の会は、推進部員の人だけ対象回（同じく会名の校種で判定）に対する参加率を出し、それ以外の人は参加回数だけを示します。【その他】参加回数だけを示します。まだ開かれていない回・出席者が一人もいない回は数えません。本人が出席した回は必ず含めます。'
+
+// ---- 会の種類（研修／研究／その他） ----
+// training=研修（全員向け：スキルアップ研修会・授業力アップなど） / research=研究（部会など） / other=その他
+export const EVENT_KINDS = ['training', 'research', 'other']
+export function normEventKind(v: any): string | null {
+  const k = String(v == null ? '' : v)
+  return EVENT_KINDS.indexOf(k) >= 0 ? k : null
+}
+// 会名からの推定（新しいイベントの初期値。migration 0013 の既存の回の初期値と同じ決め方）
+export function guessEventKind(title: any): string {
+  const t = normGroup(title)
+  if (/部会|小中合同|研究/.test(t)) return 'research'
+  if (/スキルアップ|授業力アップ|研修/.test(t)) return 'training'
+  return 'other'
+}
 
 type Ctx = { fy: number; start: string; end: string; events: any[]; groupNames: string[]; am: any; stepKeywords?: Record<string, string[]> }
 
@@ -100,14 +115,14 @@ async function loadCtx(db: D1Database, fy: number, stepKeywords?: Record<string,
   let evRows: any[] = []
   try {
     const r = await db.prepare(
-      `SELECT e.id, e.title, e.event_date,
+      `SELECT e.id, e.title, e.event_date, e.event_kind,
          (SELECT COUNT(*) FROM attendances a WHERE a.event_id = e.id) + (SELECT COUNT(*) FROM guest_attendances g WHERE g.event_id = e.id) AS n
        FROM events e WHERE e.event_date >= ? AND e.event_date <= ? ORDER BY e.event_date, e.id`
     ).bind(start, last).all() as any
     evRows = r.results || []
   } catch (e) {
     const r = await db.prepare(
-      `SELECT e.id, e.title, e.event_date, (SELECT COUNT(*) FROM attendances a WHERE a.event_id = e.id) AS n
+      `SELECT e.id, e.title, e.event_date, e.event_kind, (SELECT COUNT(*) FROM attendances a WHERE a.event_id = e.id) AS n
        FROM events e WHERE e.event_date >= ? AND e.event_date <= ? ORDER BY e.event_date, e.id`
     ).bind(start, last).all() as any
     evRows = r.results || []
@@ -117,7 +132,7 @@ async function loadCtx(db: D1Database, fy: number, stepKeywords?: Record<string,
   for (const r of (gr || [])) { const g = normGroup(r.g); if (g && groupNames.indexOf(g) < 0) groupNames.push(g) }
   // 長い名前から照合（「A」より「A-1」などを先に）
   groupNames.sort((a, b) => b.length - a.length)
-  const events = evRows.map((e: any) => ({ id: e.id, title: e.title, date: e.event_date, n: Number(e.n) || 0, target: classifyEvent(e.title, groupNames) }))
+  const events = evRows.map((e: any) => ({ id: e.id, title: e.title, date: e.event_date, n: Number(e.n) || 0, kind: normEventKind(e.event_kind) || 'other', target: classifyEvent(e.title, groupNames) }))
   const am = await loadAliases(db)
   return { fy, start, end, events, groupNames, am, stepKeywords }
 }
@@ -126,8 +141,8 @@ async function loadCtx(db: D1Database, fy: number, stepKeywords?: Record<string,
 export async function buildSheet(db: D1Database, uid: number, ctx: Ctx) {
   const { start, end } = ctx
   const [uR, attR, qaR, selR, noteR] = await db.batch([
-    db.prepare('SELECT id, name, school, school_type, district, training_group, experience_years FROM users WHERE id = ?').bind(uid),
-    db.prepare(`SELECT a.event_id, e.title, e.event_date FROM attendances a JOIN events e ON e.id = a.event_id
+    db.prepare('SELECT id, name, school, school_type, district, training_group, experience_years, promoter FROM users WHERE id = ?').bind(uid),
+    db.prepare(`SELECT a.event_id, e.title, e.event_date, e.event_kind FROM attendances a JOIN events e ON e.id = a.event_id
                 WHERE a.user_id = ? AND e.event_date >= ? AND e.event_date <= ? ORDER BY e.event_date, e.id`).bind(uid, start, end),
     db.prepare(`SELECT ca.event_id, ca.question_id, ca.answer_text, q.question_text, q.question_type, q.sort_order
                 FROM custom_answers ca JOIN survey_questions q ON q.id = ca.question_id JOIN events e ON e.id = ca.event_id
@@ -159,26 +174,37 @@ export async function buildSheet(db: D1Database, uid: number, ctx: Ctx) {
   // 参加状況
   const attended: any[] = (attR && attR.results) || []
   const attSet = new Set<number>(attended.map((a: any) => a.event_id))
+  // 種類ごと：研修＝対象回に対する率／研究＝推進部員だけ率（ほかの人は参加回数だけ）／その他＝参加回数だけ
+  const promoter = !!u.promoter
+  const rateKinds: Record<string, boolean> = { training: true, research: promoter, other: false }
   const rows: any[] = []
   const seen = new Set<number>()
   for (const ev of ctx.events) {
     const mine = attSet.has(ev.id)
     let target = false
     if (mine) target = true
-    else if (ev.n > 0) {
+    else if (ev.n > 0 && rateKinds[ev.kind]) {
       const tg = ev.target as EvTarget
       if (tg.kind === 'all') target = true
       else if (tg.kind === 'school') target = tg.types.indexOf(st) >= 0
       else if (tg.kind === 'group') target = !!group && tg.group === group
     }
-    if (target) { rows.push({ date: ev.date, title: ev.title, attended: mine }); seen.add(ev.id) }
+    if (target) { rows.push({ date: ev.date, title: ev.title, attended: mine, kind: ev.kind }); seen.add(ev.id) }
   }
   // 出席したのに一覧に入っていない回（今日より後の日付の会に出席記録がある等）も必ず入れる
   for (const a of attended) {
-    if (!seen.has(a.event_id)) { rows.push({ date: a.event_date, title: a.title, attended: true }); seen.add(a.event_id) }
+    if (!seen.has(a.event_id)) { rows.push({ date: a.event_date, title: a.title, attended: true, kind: normEventKind(a.event_kind) || 'other' }); seen.add(a.event_id) }
   }
   rows.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
   const nAtt = rows.filter((r) => r.attended).length
+  const byKind: Record<string, any> = {}
+  for (const k of EVENT_KINDS) {
+    const kr = rows.filter((r) => r.kind === k)
+    const a = kr.filter((r) => r.attended).length
+    byKind[k] = rateKinds[k]
+      ? { attended: a, target: kr.length, rate: kr.length ? Math.round(a / kr.length * 100) : null, has_rate: true }
+      : { attended: a, target: null, rate: null, has_rate: false }
+  }
 
   // 回ごとの振り返り
   const byEv: Record<number, any> = {}
@@ -232,7 +258,7 @@ export async function buildSheet(db: D1Database, uid: number, ctx: Ctx) {
       experience_years: u.experience_years == null || u.experience_years === '' ? null : u.experience_years
     },
     fy: ctx.fy,
-    attendance: { rows, attended: nAtt, target: rows.length, rate: rows.length ? Math.round(nAtt / rows.length * 100) : null },
+    attendance: { rows, attended: nAtt, by_kind: byKind, promoter },
     annual: { goal: cut(note?.goal, 600), reflection: cut(note?.reflection, 600) },
     rubric,
     counts: cnt, growth_events: growthEvents,
@@ -324,7 +350,15 @@ body { background:#eceff1; margin:0 }
 .hd .meta { font-size:0.95em; color:#333; margin-top:0.5mm }
 .hd .meta span { display:inline-block; margin-right:3mm; white-space:nowrap }
 .hd .meta b { color:#555; font-weight:700; font-size:0.85em; margin-right:1mm }
-.rate { border:0.4mm solid #1a237e; border-radius:2mm; padding:1.5mm 3mm; text-align:center; min-width:38mm; flex:none }
+.rate { border:0.4mm solid #1a237e; border-radius:2mm; padding:1.2mm 2.5mm; text-align:center; min-width:46mm; flex:none }
+.rate table.kt { border-collapse:collapse; margin:0.6mm auto 0; font-size:0.95em }
+.rate table.kt td { padding:0.25mm 1mm; text-align:left; white-space:nowrap; vertical-align:middle }
+.rate table.kt b { font-size:1.25em; color:#1a237e; margin:0 0.4mm }
+.rate table.kt .pc { font-weight:700; color:#1a237e }
+.kd { display:inline-block; font-size:0.78em; font-weight:700; border:0.2mm solid #777; border-radius:0.8mm; padding:0 0.8mm; line-height:1.35; white-space:nowrap }
+.kd.k-training { border-color:#1565c0; color:#1565c0 }
+.kd.k-research { border-color:#6a1b9a; color:#6a1b9a }
+.kd.k-other { border-color:#607d8b; color:#455a64 }
 .rate .big { font-size:1.9em; font-weight:700; color:#1a237e; line-height:1.15 }
 .rate .big small { font-size:0.5em; font-weight:700; color:#333 }
 .rate .sm { font-size:0.8em; color:#333 }
@@ -430,6 +464,7 @@ function levelsFor(d) {
   return out;
 }
 let RULE = '';
+const KIND_LABEL = { training: '研修', research: '研究', other: 'その他' };
 
 function build(d, L) {
   const u = d.user, A = d.attendance;
@@ -443,17 +478,25 @@ function build(d, L) {
   h += '<span><b>校種</b>' + esc(u.school_type_label) + (u.school_type_inferred ? '<span class="muted">（道しるべから推定）</span>' : '') + '</span>';
   if (u.experience_years != null) h += '<span><b>経験</b>' + esc(u.experience_years) + '年目</span>';
   h += '</div></div>';
-  h += '<div class="rate"><div class="sm">研修会への参加</div><div class="big">' + A.attended + '<small> 回 ／ 対象 </small>' + A.target + '<small> 回</small></div><div class="sm">参加率 <b>' + (A.rate == null ? '―' : A.rate + '%') + '</b></div></div></div>';
+  h += '<div class="rate"><div class="sm">会への参加（種類ごと）</div><table class="kt">';
+  ['training', 'research', 'other'].forEach(function(k) {
+    const b = (A.by_kind || {})[k] || { attended: 0, has_rate: false };
+    let v;
+    if (b.has_rate) v = b.target ? '<b>' + b.target + '</b>回中<b>' + b.attended + '</b>回<span class="pc">（' + (b.rate == null ? '―' : b.rate + '%') + '）</span>' : '<span class="muted">対象回なし</span>';
+    else v = '参加<b>' + b.attended + '</b>回';
+    h += '<tr><td><span class="kd k-' + k + '">' + KIND_LABEL[k] + '</span></td><td>' + v + '</td></tr>';
+  });
+  h += '</table>' + (A.promoter ? '<div class="sm" style="margin-top:0.4mm">推進部員</div>' : '') + '</div></div>';
 
   h += '<div class="grid">';
   // 2. 参加した会の一覧（左）
   let rows = A.rows, omitted = 0;
   if (rows.length > L.a) { omitted = rows.length - L.a; rows = rows.slice(rows.length - L.a); }
   h += '<div class="sec"><h3>参加状況 <span class="sub">○＝出席　－＝欠席</span></h3>';
-  if (!A.rows.length) h += '<div class="box muted">この年度の対象回はまだありません。</div>';
+  if (!A.rows.length) h += '<div class="box muted">この年度の対象回・参加した回はまだありません。</div>';
   else {
-    h += '<table class="s"><colgroup><col style="width:3.9em"><col><col style="width:3.2em"></colgroup><tr><th>日付</th><th>会名</th><th class="c nw">出席</th></tr>';
-    rows.forEach(function(r) { h += '<tr' + (r.attended ? '' : ' class="no"') + '><td class="nw">' + esc(md(r.date)) + '</td><td>' + esc(cut(r.title, 30)) + '</td><td class="c mk">' + (r.attended ? '○' : '－') + '</td></tr>'; });
+    h += '<table class="s"><colgroup><col style="width:3.9em"><col style="width:3.1em"><col><col style="width:3.2em"></colgroup><tr><th>日付</th><th class="c nw">種類</th><th>会名</th><th class="c nw">出席</th></tr>';
+    rows.forEach(function(r) { h += '<tr' + (r.attended ? '' : ' class="no"') + '><td class="nw">' + esc(md(r.date)) + '</td><td class="c nw"><span class="kd k-' + esc(r.kind) + '">' + (KIND_LABEL[r.kind] || 'その他') + '</span></td><td>' + esc(cut(r.title, 30)) + '</td><td class="c mk">' + (r.attended ? '○' : '－') + '</td></tr>'; });
     h += '</table>';
     if (omitted) h += '<div class="omit">※ 古い回 ' + omitted + '回分は表から省略（回数には含む）</div>';
   }
