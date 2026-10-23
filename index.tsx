@@ -2091,6 +2091,41 @@ app.get('/api/insights', authMiddleware, async (c) => {
   }
 })
 
+// 会員：マイページ「みんなの気づき」の一覧（研修会ごとの件数だけ。中身は開いたときに読む）
+// いちばん新しい回の中身だけは最初から開くので、一緒に返す（通信1回で済ませる）
+app.get('/api/insights/summary', authMiddleware, async (c) => {
+  try {
+    const db = c.env.DB
+    const { results } = await db.prepare(
+      'SELECT e.id, e.title, e.event_date, e.event_kind, x.n FROM (SELECT event_id, COUNT(*) AS n FROM (' + INSIGHT_VIEW_SQL + ') GROUP BY event_id) x ' +
+      'JOIN events e ON e.id = x.event_id ORDER BY e.event_date DESC, e.id DESC'
+    ).all() as any
+    const events = (results || []).filter((r: any) => Number(r.n) > 0).map((r: any) => ({
+      id: Number(r.id), title: String(r.title || ''), event_date: String(r.event_date || ''),
+      event_kind: (r.event_kind === 'training' || r.event_kind === 'research') ? r.event_kind : 'other', count: Number(r.n)
+    }))
+    let latest: any = null
+    if (events.length) {
+      const { results: items } = await db.prepare(INSIGHT_VIEW_SQL + 'AND si.event_id = ? ORDER BY q.sort_order, si.id').bind(events[0].id).all() as any
+      latest = { id: events[0].id, items: (items || []).map(insightOut) }
+    }
+    return c.json({ events, latest })
+  } catch (e) {
+    return c.json({ events: [], latest: null, error: '読み込めませんでした' })
+  }
+})
+// 会員：1つの研修会の「みんなの気づき」（フォルダを開いたとき）
+app.get('/api/insights/events/:id', authMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'), 10)
+  if (!id) return c.json({ items: [] }, 400)
+  try {
+    const { results } = await c.env.DB.prepare(INSIGHT_VIEW_SQL + 'AND si.event_id = ? ORDER BY q.sort_order, si.id').bind(id).all() as any
+    return c.json({ items: (results || []).map(insightOut) })
+  } catch (e) {
+    return c.json({ items: [], error: '読み込めませんでした' }, 500)
+  }
+})
+
 // 会員本人：回答済みの会の「紹介の同意」を変更（同意欄つきで回答した会のみ）
 app.post('/api/events/:code/share-consent', authMiddleware, async (c) => {
   const db = c.env.DB
@@ -5301,6 +5336,36 @@ app.get('/mypage/insights', (c) => {
   .name { font-size: 12px; color: #6d4c41; text-align: right; margin-top: 4px; }
   .yr { font-family: 'Zen Maru Gothic', sans-serif; font-size: 13px; color: #8d6e63; font-weight: 700; margin: 22px 2px 8px; }
   .empty, .msg { text-align: center; color: #888; padding: 40px 10px; font-size: 14px; line-height: 1.8; }
+  /* 種類の絞り込み */
+  .kf { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 14px; }
+  .kf button { min-height: 40px; padding: 6px 14px; border-radius: 20px; border: 2px solid #e0e0e0; background: #fff; color: #666; font-size: 13px; font-weight: 700; font-family: inherit; cursor: pointer; }
+  .kf button.on { border-color: #66bb6a; background: #e8f5e9; color: #2e7d32; }
+  /* 年度フォルダ */
+  .fy { margin-bottom: 12px; }
+  .fy-head { width: 100%; display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 10px 14px; border: 2px solid #f0e6d2; border-radius: 12px; background: #fffaf2; color: #6d4c41; font-family: 'Zen Maru Gothic', sans-serif; font-size: 16px; font-weight: 700; cursor: pointer; text-align: left; -webkit-tap-highlight-color: transparent; }
+  .fy-head .ic { color: #ffb74d; width: 20px; text-align: center; }
+  .fy-head .cnt { margin-left: auto; font-family: 'Noto Sans JP', sans-serif; font-size: 12px; font-weight: 700; color: #8d6e63; background: #fff; border: 1px solid #f0e6d2; border-radius: 10px; padding: 2px 9px; white-space: nowrap; }
+  .fy-head .chev { color: #bcaaa4; font-size: 12px; transition: transform .15s; }
+  .fy.open > .fy-head .chev, .ev.open > .ev-btn .chev { transform: rotate(90deg); }
+  .fy-body { display: none; padding: 8px 0 0 10px; border-left: 3px solid #f6ead6; margin-left: 12px; }
+  .fy.open > .fy-body { display: block; }
+  /* 研修会フォルダ */
+  .ev { padding: 0; margin-bottom: 8px; overflow: hidden; }
+  .ev-btn { width: 100%; display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 10px 12px; border: none; background: #fff; cursor: pointer; text-align: left; font-family: inherit; -webkit-tap-highlight-color: transparent; }
+  .ev-btn .chev { color: #a5d6a7; font-size: 12px; transition: transform .15s; flex: none; }
+  .ev-btn .ic { color: #66bb6a; flex: none; }
+  .ev-btn .tx { flex: 1; min-width: 0; }
+  .ev-btn .ev-title { display: block; font-size: 15px; line-height: 1.45; word-break: break-word; }
+  .ev-btn .ev-sub { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+  .ev-btn .cnt { flex: none; font-size: 12px; font-weight: 700; color: #2e7d32; background: #e8f5e9; border-radius: 10px; padding: 2px 9px; white-space: nowrap; }
+  .kd { font-size: 10px; padding: 1px 7px; border-radius: 10px; font-weight: 700; white-space: nowrap; }
+  .kd.kind-training { background: #e3f2fd; color: #1565c0; }
+  .kd.kind-research { background: #f3e5f5; color: #6a1b9a; }
+  .kd.kind-other { background: #eceff1; color: #546e7a; }
+  .ev-body { display: none; padding: 4px 12px 8px; border-top: 2px dashed #e8f5e9; }
+  .ev.open > .ev-body { display: block; }
+  .ev-body .msg { padding: 14px 6px; font-size: 13px; }
+  .retry { margin-top: 6px; min-height: 36px; padding: 4px 14px; border-radius: 8px; border: 1px solid #c8e6c9; background: #fff; color: #2e7d32; font-weight: 700; font-family: inherit; cursor: pointer; }
 </style>
 </head><body>
 <div class="top-bar">
@@ -5308,33 +5373,125 @@ app.get('/mypage/insights', (c) => {
   <a class="back" href="/mypage"><i class="fas fa-arrow-left"></i> マイページ</a>
 </div>
 <div class="wrap">
-  <div class="lead">研修会の振り返りから、紹介に同意いただいた声を運営が選んでいます。<br>会員の方だけが見られるページです。</div>
+  <div class="lead">研修会の振り返りから、紹介に同意いただいた声を運営が選んでいます。<br>会員の方だけが見られるページです。見出しを押すと開いたり閉じたりできます。</div>
+  <div class="kf" id="kf" style="display:none" role="group" aria-label="会の種類で絞り込み">
+    <button type="button" data-k="all" class="on">すべて</button>
+    <button type="button" data-k="training">研修</button>
+    <button type="button" data-k="research">研究</button>
+    <button type="button" data-k="other">その他</button>
+  </div>
   <div id="list"><div class="msg"><i class="fas fa-spinner fa-spin"></i> 読み込み中...</div></div>
 </div>
 <script>
 const token = localStorage.getItem('token');
 if (!token) { window.location.href = '/login?redirect=/mypage/insights'; }
+const KIND_LABEL = { training: '研修', research: '研究', other: 'その他' };
 function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
 function fyOf(ds) { const m = /^(\\d{4})-(\\d{2})/.exec(ds || ''); if (!m) return null; const y = +m[1], mo = +m[2]; return mo >= 4 ? y : y - 1; }
+function curFy() { const n = new Date(Date.now() + 9 * 3600 * 1000); const y = n.getUTCFullYear(), mo = n.getUTCMonth() + 1; return mo >= 4 ? y : y - 1; }
+function fmtDate(ds) { const m = /^(\\d{4})-(\\d{2})-(\\d{2})/.exec(ds || ''); return m ? (+m[2]) + '月' + (+m[3]) + '日' : esc(ds); }
+let EVENTS = [], KIND = 'all';
+const ITEMS = {}, LOADING = {}, OPEN_EV = {}, OPEN_FY = {};
+function itemsHtml(items) {
+  if (!items.length) return '<div class="msg">今は表示できる気づきがありません。</div>';
+  return items.map(function(it) {
+    return '<div class="item">' + (it.question_text ? '<div class="q">' + esc(it.question_text) + '</div>' : '') + '<div class="body">' + esc(it.body) + '</div>' + (it.name ? '<div class="name">― ' + esc(it.name) + ' さん</div>' : '') + '</div>';
+  }).join('');
+}
+function bodyHtml(id) {
+  if (ITEMS[id]) return itemsHtml(ITEMS[id]);
+  if (ITEMS[id] === false) return '<div class="msg" style="color:#c62828">読み込めませんでした。<br><button type="button" class="retry" data-retry="' + id + '">もう一度読み込む</button></div>';
+  return '<div class="msg"><i class="fas fa-spinner fa-spin"></i> 読み込み中...</div>';
+}
+function render() {
+  const list = document.getElementById('list');
+  const evs = EVENTS.filter(function(ev) { return KIND === 'all' || ev.event_kind === KIND; });
+  if (!evs.length) { list.innerHTML = '<div class="empty"><i class="far fa-folder-open fa-2x" style="color:#c8e6c9"></i><br>「' + esc(KIND_LABEL[KIND] || '') + '」の会の気づきは、まだありません。</div>'; return; }
+  const groups = [], byFy = {};
+  evs.forEach(function(ev) {
+    const fy = fyOf(ev.event_date); const key = fy == null ? 'x' : String(fy);
+    if (!byFy[key]) { byFy[key] = { fy: fy, key: key, evs: [], n: 0 }; groups.push(byFy[key]); }
+    byFy[key].evs.push(ev); byFy[key].n += ev.count;
+  });
+  let h = '';
+  groups.forEach(function(g) {
+    const fo = !!OPEN_FY[g.key];
+    h += '<div class="fy' + (fo ? ' open' : '') + '" data-fy="' + g.key + '">'
+      + '<button type="button" class="fy-head" data-fyb="' + g.key + '" aria-expanded="' + fo + '"><i class="fas fa-chevron-right chev"></i><i class="fas ' + (fo ? 'fa-folder-open' : 'fa-folder') + ' ic"></i>' + (g.fy != null ? g.fy + '年度' : 'その他') + '<span class="cnt">' + g.evs.length + '回・' + g.n + '件</span></button>'
+      + '<div class="fy-body">';
+    g.evs.forEach(function(ev) {
+      const eo = !!OPEN_EV[ev.id];
+      h += '<div class="ev' + (eo ? ' open' : '') + '" data-ev="' + ev.id + '">'
+        + '<button type="button" class="ev-btn" data-evb="' + ev.id + '" aria-expanded="' + eo + '"><i class="fas fa-chevron-right chev"></i>'
+        + '<span class="tx"><span class="ev-title">' + esc(ev.title) + '</span><span class="ev-sub"><span class="ev-date"><i class="fas fa-calendar-day"></i> ' + fmtDate(ev.event_date) + '</span><span class="kd kind-' + ev.event_kind + '">' + esc(KIND_LABEL[ev.event_kind] || 'その他') + '</span></span></span>'
+        + '<span class="cnt">' + ev.count + '件</span></button>'
+        + '<div class="ev-body">' + (eo ? bodyHtml(ev.id) : '') + '</div></div>';
+    });
+    h += '</div></div>';
+  });
+  list.innerHTML = h;
+}
+async function loadItems(id) {
+  if (ITEMS[id] || LOADING[id]) return;
+  LOADING[id] = true;
+  try {
+    const r = await fetch('/api/insights/events/' + id, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (r.status === 401) { localStorage.removeItem('token'); window.location.href = '/login?redirect=/mypage/insights'; return; }
+    const d = await r.json();
+    if (!r.ok || !d || d.error) throw new Error('x');
+    ITEMS[id] = d.items || [];
+  } catch (e) { ITEMS[id] = false; }
+  LOADING[id] = false;
+  const box = document.querySelector('.ev[data-ev="' + id + '"] > .ev-body');
+  if (box && OPEN_EV[id]) box.innerHTML = bodyHtml(id);
+}
+function toggleEv(id) {
+  OPEN_EV[id] = !OPEN_EV[id];
+  const el = document.querySelector('.ev[data-ev="' + id + '"]'); if (!el) return;
+  el.classList.toggle('open', OPEN_EV[id]);
+  el.querySelector('.ev-btn').setAttribute('aria-expanded', String(OPEN_EV[id]));
+  if (OPEN_EV[id]) { el.querySelector('.ev-body').innerHTML = bodyHtml(id); if (!ITEMS[id]) loadItems(id); }
+}
+function toggleFy(key) {
+  OPEN_FY[key] = !OPEN_FY[key];
+  const el = document.querySelector('.fy[data-fy="' + key + '"]'); if (!el) return;
+  el.classList.toggle('open', OPEN_FY[key]);
+  const b = el.querySelector('.fy-head'); b.setAttribute('aria-expanded', String(OPEN_FY[key]));
+  const ic = b.querySelector('.ic'); ic.classList.toggle('fa-folder-open', OPEN_FY[key]); ic.classList.toggle('fa-folder', !OPEN_FY[key]);
+}
+document.getElementById('list').addEventListener('click', function(e) {
+  const rt = e.target.closest('[data-retry]');
+  if (rt) { const id = +rt.getAttribute('data-retry'); delete ITEMS[id]; const box = rt.closest('.ev-body'); if (box) box.innerHTML = bodyHtml(id); loadItems(id); return; }
+  const eb = e.target.closest('[data-evb]'); if (eb) { toggleEv(+eb.getAttribute('data-evb')); return; }
+  const fb = e.target.closest('[data-fyb]'); if (fb) { toggleFy(fb.getAttribute('data-fyb')); }
+});
+document.getElementById('kf').addEventListener('click', function(e) {
+  const b = e.target.closest('button[data-k]'); if (!b) return;
+  KIND = b.getAttribute('data-k');
+  document.querySelectorAll('#kf button').forEach(function(x) { x.classList.toggle('on', x === b); });
+  // 絞り込んだ中で開いている回が無ければ、いちばん新しい回を開く
+  const evs = EVENTS.filter(function(ev) { return KIND === 'all' || ev.event_kind === KIND; });
+  if (evs.length && !evs.some(function(ev) { return OPEN_EV[ev.id]; })) {
+    const f = evs[0]; OPEN_EV[f.id] = true; const fy = fyOf(f.event_date); OPEN_FY[fy == null ? 'x' : String(fy)] = true;
+    if (!ITEMS[f.id]) loadItems(f.id);
+  }
+  render();
+});
 async function load() {
   const list = document.getElementById('list');
   try {
-    const r = await fetch('/api/insights', { headers: { 'Authorization': 'Bearer ' + token } });
+    const r = await fetch('/api/insights/summary', { headers: { 'Authorization': 'Bearer ' + token } });
     if (r.status === 401) { localStorage.removeItem('token'); window.location.href = '/login?redirect=/mypage/insights'; return; }
     const d = await r.json();
-    const evs = (d && d.events) || [];
-    if (!evs.length) { list.innerHTML = '<div class="empty"><i class="far fa-comment-dots fa-2x" style="color:#c8e6c9"></i><br>まだありません。<br>研修会のあと、紹介された気づきがここにたまっていきます。</div>'; return; }
-    let h = '', lastFy = null;
-    evs.forEach(function(ev) {
-      const fy = fyOf(ev.event_date);
-      if (fy !== lastFy) { h += '<div class="yr">' + (fy ? fy + '年度' : '') + '</div>'; lastFy = fy; }
-      h += '<div class="ev"><div class="ev-head"><span class="ev-title">' + esc(ev.title) + '</span><span class="ev-date"><i class="fas fa-calendar-day"></i> ' + esc(ev.event_date) + '</span></div>';
-      (ev.items || []).forEach(function(it) {
-        h += '<div class="item">' + (it.question_text ? '<div class="q">' + esc(it.question_text) + '</div>' : '') + '<div class="body">' + esc(it.body) + '</div>' + (it.name ? '<div class="name">― ' + esc(it.name) + ' さん</div>' : '') + '</div>';
-      });
-      h += '</div>';
-    });
-    list.innerHTML = h;
+    if (d && d.error) throw new Error('x');
+    EVENTS = (d && d.events) || [];
+    if (!EVENTS.length) { list.innerHTML = '<div class="empty"><i class="far fa-comment-dots fa-2x" style="color:#c8e6c9"></i><br>まだありません。<br>研修会のあと、紹介された気づきがここにたまっていきます。</div>'; return; }
+    document.getElementById('kf').style.display = '';
+    OPEN_FY[String(curFy())] = true;
+    const f = EVENTS[0]; OPEN_EV[f.id] = true;
+    const ffy = fyOf(f.event_date); OPEN_FY[ffy == null ? 'x' : String(ffy)] = true; // 今年度にまだ無いときは、いちばん新しい回の年度を開く
+    if (d.latest && d.latest.id === f.id) ITEMS[f.id] = d.latest.items || []; else loadItems(f.id);
+    render();
   } catch (e) {
     list.innerHTML = '<div class="msg" style="color:#c62828">読み込めませんでした。通信の良いところで、もう一度開いてください。</div>';
   }
