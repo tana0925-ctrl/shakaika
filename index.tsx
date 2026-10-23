@@ -5612,6 +5612,27 @@ a.grp-print{text-decoration:none}
 .ai-entry h4{margin:0 0 10px;font-size:15px;color:#333}
 .ai-status{font-size:12px;margin-top:10px;line-height:1.6}
 @media(max-width:600px){.ai-modal{padding:0}.ai-box{border-radius:0;min-height:100vh}.ai-copy-btn{margin-left:0}}
+.ntf-bar{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;background:#fff8e1;border:1px solid #ffe0a3;border-radius:10px;padding:7px 12px;font-size:12px;color:#6d4c00;margin:-8px 0 14px}
+.ntf-bar b{color:#e65100}
+.ntf-bar a{color:#1565c0;font-weight:700;text-decoration:none;margin-left:auto;white-space:nowrap}
+.ntf-bar a:hover{text-decoration:underline}
+.ntf-bell{background:#f5f5f5;color:#bbb;border:none;border-radius:8px;padding:5px 9px;font-size:12px;cursor:pointer;font-family:inherit;flex-shrink:0;line-height:1}
+.ntf-bell.on{background:#ff9800;color:#fff}
+.ntf-bell:disabled{opacity:.5}
+.member-name .ntf-bell{margin-left:auto}
+.member-name .ntf-bell+.ai-copy-btn{margin-left:0}
+.grp-bell{background:rgba(255,255,255,0.22);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap;margin-left:8px}
+.grp-bell:hover{background:rgba(255,255,255,0.35)}
+.grp-bell.on{background:#ff9800}
+.grp-bell:disabled{opacity:.5}
+@media(max-width:600px){
+  .group-header{gap:6px;padding:10px 12px}
+  .group-header .grp-ai,.group-header .grp-bell,.group-header .grp-print{margin-left:0;padding:6px 9px;font-size:11px}
+  .group-header .grp-ai:first-of-type{margin-left:0}
+  .gb-long{display:none}
+  .ntf-bar a{margin-left:0}
+  .member-name .ntf-bell{margin-left:auto}
+}
 @media print{
   .top-bar,.group-tabs,#bulkToggle,.no-print,.ai-copy-btn,.ai-paste-btn,.ai-modal{display:none!important}
   .note-body{display:block!important}
@@ -5638,6 +5659,7 @@ a.grp-print{text-decoration:none}
 </div>
 <div class="container">
   <div class="page-title"><i class="fas fa-users"></i> グループ別メンバー状況</div>
+  <div id="ntfBar" class="ntf-bar no-print" style="display:none"></div>
   <button type="button" id="bulkToggle" class="bulk-toggle" style="display:none"><i class="fas fa-expand"></i> すべて開く</button>
   <button type="button" id="aiAllBtn" class="ai-paste-btn no-print" style="background:#4a148c">\u2728 全員をまとめてコピー</button>
   <button type="button" id="aiPasteBtn" class="ai-paste-btn no-print"><i class="fas fa-wand-magic-sparkles"></i> AI分析結果を貼り付け</button>
@@ -5661,6 +5683,7 @@ async function load(){
     const d=await res.json();
     await loadNotes();
     render(d.groups,d.fiscal_year);
+    ntfPaint();ntfLoad();
     loadProgress();
   }catch(e){document.getElementById('gList').innerHTML='<p style="color:#c62828;text-align:center">読み込みに失敗しました</p>';}
 }
@@ -5679,6 +5702,7 @@ function render(groups,fy){
     var inner='<div class="group-card"><div class="group-header" style="background:'+col+'"><i class="fas fa-layer-group"></i> '+esc(gname)+' <span class="group-count">('+ms.length+'名)</span>'
       +'<button class="grp-ai no-print" data-ai-set="'+setKey+'">\u2728 全員をコピー</button>'
       +'<button class="grp-ai no-print" data-ai-sel="'+setKey+'" disabled>\u2728 選択(0)</button>'
+      +ntfGroupBtn(setKey,gname,ms)
       +'<a class="grp-print no-print" href="/admin/sheet?group='+encodeURIComponent(gname)+'" target="_blank" rel="noopener" title="このグループの会員の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 1枚シートをまとめて印刷（'+ms.length+'名）</a>'
       +'<button class="grp-print grp-list no-print" onclick="window.print()" title="この画面の一覧（参加イベントの回答・伴走メモを含む）をそのまま印刷"><i class="fas fa-print"></i> 一覧を印刷</button></div>';
     ms.forEach(function(m){inner+=mRow(m,fy);});
@@ -5689,7 +5713,7 @@ function render(groups,fy){
     var pid='gp_unset';
     tabs.push({id:pid,label:'<i class="fas fa-question-circle"></i> 未設定 ('+unset.length+')',col:'#9e9e9e'});
     var secs=[['elementary','小学校'],['junior_high','中学校'],['admin_staff','主幹・管理職'],['','校種未設定']];
-    var u='<div class="group-card"><div class="group-header" style="background:#9e9e9e"><i class="fas fa-question-circle"></i> グループ未設定 <span class="group-count">('+unset.length+'名)</span><a class="grp-print no-print" href="/admin/sheet?unset=1" target="_blank" rel="noopener" title="グループ未設定の会員の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 1枚シートをまとめて印刷（'+unset.length+'名）</a><button class="grp-print grp-list no-print" onclick="window.print()" title="この画面の一覧（参加イベントの回答・伴走メモを含む）をそのまま印刷"><i class="fas fa-print"></i> 一覧を印刷</button></div>';
+    var u='<div class="group-card"><div class="group-header" style="background:#9e9e9e"><i class="fas fa-question-circle"></i> グループ未設定 <span class="group-count">('+unset.length+'名)</span>'+ntfGroupBtn('unset','グループ未設定',unset)+'<a class="grp-print no-print" href="/admin/sheet?unset=1" target="_blank" rel="noopener" title="グループ未設定の会員の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 1枚シートをまとめて印刷（'+unset.length+'名）</a><button class="grp-print grp-list no-print" onclick="window.print()" title="この画面の一覧（参加イベントの回答・伴走メモを含む）をそのまま印刷"><i class="fas fa-print"></i> 一覧を印刷</button></div>';
     secs.forEach(function(sec){
       var list=unset.filter(function(m){return (m.school_type||'')===sec[0];});
       if(!list.length)return;
@@ -5746,6 +5770,7 @@ function mRow(m,fy){
   h+='<div class="member-name"><input type="checkbox" class="ai-pick no-print" data-pick="'+m.id+'" title="まとめてコピーする対象に含める">'+esc(m.name);
   if(stL)h+=' <span class="school-badge '+stC+'">'+stL+'</span>';
   if(m.school)h+=' <span class="school-nm">'+esc(m.school)+'</span>';
+  h+='<button type="button" class="ntf-bell no-print" data-ntf="'+m.id+'" title="この人の振り返りを通知で受け取る（押すとON）"><i class="fas fa-bell-slash"></i></button>';
   h+='<button type="button" class="ai-copy-btn no-print" data-ai-copy="'+m.id+'">\u2728 AI伴走用にコピー</button>';
   h+='</div>';
   h+='<div class="steps-row">'+stepsHtml+'</div>';
@@ -6036,6 +6061,98 @@ document.addEventListener('click',function(e){
     if(b){var open=b.classList.toggle('show');nt.classList.toggle('open',open);}return;}
   var md=document.getElementById('aiModal');
   if(md&&e.target===md)aiClose();
+});
+
+// ===== 新着の受け取り（ログイン中の事務局の「選択した人」に追加・解除するだけ）=====
+var NTF={mode:null,ids:{},busy:false};
+var NTF_SETS={};
+var NTF_MODE_TEXT={all:'全員',selected:'選択した人',none:'受け取らない'};
+function ntfGroupBtn(key,label,ms){
+  NTF_SETS[key]={label:label,ids:ms.map(function(x){return x.id;})};
+  return '<button type="button" class="grp-bell no-print" data-ntf-set="'+key+'" title="このグループの全員を、新着（通知）で受け取る人に追加します">🔔 <span class="gb-long">このグループを</span>通知で受け取る</button>';
+}
+function ntfCount(){return Object.keys(NTF.ids).length;}
+function ntfPaint(){
+  var bar=document.getElementById('ntfBar');
+  if(bar&&NTF.mode){
+    var t='🔔 新着の受け取り：<b>'+NTF_MODE_TEXT[NTF.mode]+'</b>';
+    if(NTF.mode==='selected')t+='（選択中 '+ntfCount()+'人）';
+    else t+='<span style="color:#8d6e63">（選択中 '+ntfCount()+'人・今は使われていません）</span>';
+    t+='<a href="/admin/news#setCard">受け取り設定を開く <i class="fas fa-chevron-right"></i></a>';
+    bar.innerHTML=t;bar.style.display='flex';
+  }
+  document.querySelectorAll('[data-ntf]').forEach(function(b){
+    var on=!!NTF.ids[b.getAttribute('data-ntf')];
+    b.classList.toggle('on',on);
+    b.innerHTML='<i class="fas '+(on?'fa-bell':'fa-bell-slash')+'"></i>';
+    b.title=on?'この人の振り返りを受け取る：ON（押すとOFF）':'この人の振り返りを通知で受け取る（押すとON）';
+    b.disabled=NTF.busy||!NTF.mode;
+  });
+  Object.keys(NTF_SETS).forEach(function(key){
+    var b=document.querySelector('[data-ntf-set="'+key+'"]');if(!b)return;
+    var ids=NTF_SETS[key].ids;
+    var all=ids.length>0&&ids.every(function(id){return NTF.ids[id];});
+    b.classList.toggle('on',all);
+    b.innerHTML=all?'🔔 受け取り中<span class="gb-long">（解除）</span>':'🔔 <span class="gb-long">このグループを</span>通知で受け取る';
+    b.title=all?'このグループの全員を、受け取る人から外します':'このグループの全員を、新着（通知）で受け取る人に追加します';
+    b.disabled=NTF.busy||!NTF.mode||!ids.length;
+  });
+}
+function ntfApply(d){
+  if(!d)return;
+  if(d.mode)NTF.mode=d.mode;
+  if(d.ids){NTF.ids={};d.ids.forEach(function(i){NTF.ids[i]=true;});}
+}
+function ntfLoad(){
+  fetch('/api/notify/watch',{headers:{'Authorization':'Bearer '+token}}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+    if(!d)return;ntfApply(d);ntfPaint();
+  }).catch(function(){});
+}
+function ntfToggleOne(id){
+  if(NTF.busy||!NTF.mode)return;
+  var on=!NTF.ids[id];
+  NTF.busy=true;ntfPaint();
+  fetch('/api/notify/watch',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({user_id:id,on:on})})
+    .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});})
+    .then(function(x){
+      NTF.busy=false;
+      if(!x.ok){ntfPaint();alert((x.d&&x.d.error)||'変更できませんでした');return;}
+      if(on)NTF.ids[id]=true;else delete NTF.ids[id];
+      if(x.d.mode)NTF.mode=x.d.mode;
+      ntfPaint();
+      if(on&&NTF.mode!=='selected')alert('「選択した人」に入れました。\\n今の受け取る対象は「'+NTF_MODE_TEXT[NTF.mode]+'」です。選んだ人だけにしたいときは、画面上の「受け取り設定を開く」から「選択した人」にしてください。');
+    }).catch(function(){NTF.busy=false;ntfPaint();alert('通信エラーで変更できませんでした');});
+}
+function ntfToggleSet(key){
+  var set=NTF_SETS[key];if(!set||NTF.busy||!NTF.mode)return;
+  var ids=set.ids;
+  var all=ids.length>0&&ids.every(function(id){return NTF.ids[id];});
+  var body;
+  if(all){
+    if(!confirm('「'+set.label+'」の'+ids.length+'名を、受け取る人から外します。よろしいですか？'))return;
+    body={user_ids:ids,on:false};
+  }else{
+    var toSel=false;
+    if(NTF.mode!=='selected'){
+      if(!confirm('受け取る対象を「選択した人」に切り替えます。\\n（今は「'+NTF_MODE_TEXT[NTF.mode]+'」）\\n\\n「'+set.label+'」の'+ids.length+'名を追加し、選んだ人の振り返りだけを受け取るようにします。よろしいですか？'))return;
+      toSel=true;
+    }
+    body={user_ids:ids,on:true,to_selected:toSel};
+  }
+  NTF.busy=true;ntfPaint();
+  fetch('/api/notify/watch-bulk',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});})
+    .then(function(x){
+      NTF.busy=false;
+      if(!x.ok){ntfPaint();alert((x.d&&x.d.error)||'変更できませんでした');return;}
+      ntfApply(x.d);ntfPaint();
+    }).catch(function(){NTF.busy=false;ntfPaint();alert('通信エラーで変更できませんでした');});
+}
+document.addEventListener('click',function(e){
+  var nb=e.target.closest&&e.target.closest('[data-ntf]');
+  if(nb){e.preventDefault();ntfToggleOne(parseInt(nb.getAttribute('data-ntf'),10));return;}
+  var ns=e.target.closest&&e.target.closest('[data-ntf-set]');
+  if(ns){e.preventDefault();ntfToggleSet(ns.getAttribute('data-ntf-set'));return;}
 });
 document.getElementById('aiPasteBtn').addEventListener('click',aiOpenPaste);
 document.getElementById('aiAllBtn').addEventListener('click',function(){aiCopyPending(this);});
