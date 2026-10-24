@@ -13,6 +13,10 @@ type Deps = {
 
 const SHEET_MAX_IDS = 10 // 1回の読み込みで扱う人数（まとめ印刷は画面側でこの人数ずつ分けて読む）
 const RECALL_LABEL: Record<string, string> = { tried: 'やってみた', a_little: 'ちょっとだけ', not_yet: 'まだ', changed: '考えが変わった' }
+// 前回の学びカードを始めた日（2026-10-22 夜に公開）。この日より前の回は「記録の対象外」として斜線で表示する。
+// 基準日はここ1か所だけ（記録テーブル recall_reflections の最初の記録より前に公開しているため、コード上の公開日を使う）
+export const RECALL_START_DATE = '2026-10-23'
+export const RECALL_NA_NOTE = '前回の学びカードは2026年10月に始めた機能のため、それより前の回は斜線（記録なし）です。'
 const ST_LABEL: Record<string, string> = { elementary: '小学校', junior_high: '中学校', admin_staff: '主幹・管理職' }
 
 // 成長の道しるべ（STEP表）の視点：管理画面の会員一覧と同じ並び・名前
@@ -235,7 +239,7 @@ export async function buildSheet(db: D1Database, uid: number, ctx: Ctx) {
   }
   const history = hist
     .filter((e) => e.growth.length || e.reason.length || e.try.length || e.recall)
-    .map((e) => ({ date: e.date, title: e.title, growth: e.growth, reason: e.reason.join(' / '), try: e.try.join(' / '), recall: e.recall }))
+    .map((e) => ({ date: e.date, title: e.title, growth: e.growth, reason: e.reason.join(' / '), try: e.try.join(' / '), recall: e.recall, recall_na: !e.recall && String(e.date || '') < RECALL_START_DATE }))
 
   // 選んだ成長の視点（回数。読みかえ表でまとめる）
   const order = canonOrder(ctx.am)
@@ -306,7 +310,7 @@ export function registerSheet(app: any, deps: Deps) {
     const ctx = await loadCtx(db, fy, deps.stepKeywords)
     // 人ごとの読み込みは並行して行う（1人分はすべて会員IDの索引で読む）
     const sheets: any[] = await Promise.all(ids.map(async (id) => (await buildSheet(db, id, ctx)) || { id, missing: true }))
-    return c.json({ fy, rule_note: TARGET_RULE_NOTE, sheets })
+    return c.json({ fy, rule_note: TARGET_RULE_NOTE, recall_note: RECALL_NA_NOTE, recall_start: RECALL_START_DATE, sheets })
   })
 
   // まとめ印刷する会員IDの一覧（グループ指定。グループ別画面と同じ並び）
@@ -377,6 +381,9 @@ table.s .nw { white-space:nowrap; word-break:normal; overflow-wrap:normal }
 .box { border:0.2mm solid #9e9e9e; border-radius:1.2mm; padding:1mm 1.8mm; font-size:0.95em; white-space:pre-wrap; word-break:break-all; overflow-wrap:anywhere; min-height:6mm }
 .lbl { font-size:0.82em; font-weight:700; color:#1a237e; margin:0.6mm 0 0.3mm }
 .muted { color:#777 }
+table.s td.rc-na { background-color:#fff; background-image:repeating-linear-gradient(135deg, #b0b0b0 0, #b0b0b0 0.22mm, transparent 0.22mm, transparent 1.5mm) }
+table.s td.rc-none { color:#999; text-align:center; vertical-align:middle }
+.na-sw { display:inline-block; width:4.2mm; height:2.6mm; border:0.2mm solid #9e9e9e; vertical-align:-0.4mm; margin-right:0.8mm; background-image:repeating-linear-gradient(135deg, #b0b0b0 0, #b0b0b0 0.22mm, transparent 0.22mm, transparent 1.5mm) }
 .bar-row { display:flex; align-items:center; gap:1.5mm; margin:0.6mm 0; font-size:0.92em }
 .bar-row .n1 { width:24mm; flex:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
 .bar-row .bt { flex:1; height:3mm; border:0.2mm solid #9e9e9e; background:#fff }
@@ -385,6 +392,10 @@ table.s .nw { white-space:nowrap; word-break:normal; overflow-wrap:normal }
 .stp { font-weight:700; white-space:nowrap }
 .kw { border-left:0.8mm solid #555; padding:0.3mm 0 0.3mm 1.8mm; margin:0.8mm 0; font-size:0.95em }
 .kw .src { font-size:0.8em; color:#555 }
+.hd2 { display:flex; justify-content:space-between; align-items:baseline; gap:4mm; border-bottom:0.4mm solid #1a237e; padding-bottom:1.2mm; margin-bottom:2.5mm }
+.hd2 .nm2 { font-family:'Zen Maru Gothic','Noto Sans JP',sans-serif; font-size:1.35em; font-weight:700 }
+.hd2 .ttl2 { font-size:0.85em; color:#1a237e; font-weight:700 }
+.backnote { text-align:center; color:#999; padding:30mm 0; font-size:1.1em }
 .foot { font-size:0.72em; color:#555; border-top:0.2mm solid #bbb; padding-top:1mm; margin-top:2mm; line-height:1.45 }
 .omit { font-size:0.8em; color:#555; margin-top:0.5mm }
 .clipnote { position:absolute; right:10mm; bottom:3mm; font-size:7pt; color:#555; background:#fff; padding:0 1mm }
@@ -407,9 +418,10 @@ table.s .nw { white-space:nowrap; word-break:normal; overflow-wrap:normal }
 </div>
 <div class="toolbar">
   <select id="fySel" aria-label="年度"></select>
+  <select id="modeSel" aria-label="シートの形"><option value="single">1枚版（A4・1枚）</option><option value="duplex">両面2ページ版</option></select>
   <button class="tbtn" type="button" id="printBtn" disabled><i class="fas fa-print"></i> 印刷・PDFで保存</button>
 </div>
-<div class="hint">1人分をA4縦1枚にまとめています（入りきらないときは文字を小さくし、古い回などを省略します）。<br>「印刷・PDFで保存」→ 用紙A4・縦、余白「なし」または「デフォルト」、倍率100%で印刷できます。PDFにするときは送信先で「PDFに保存」を選びます。</div>
+<div class="hint" id="hint"></div>
 <div id="status"></div>
 <div id="pages"><div class="msg"><i class="fas fa-spinner fa-spin"></i> 読み込み中...</div></div>
 <script>
@@ -465,9 +477,11 @@ function levelsFor(d) {
   return out;
 }
 let RULE = '';
+let RNOTE = '';
 const KIND_LABEL = { training: '研修', research: '研究', other: 'その他' };
 
-function build(d, L) {
+// 1〜5（名前・参加状況・目標・視点・道しるべ）。<div class="pin"> を開いたまま返す
+function buildTop(d, L) {
   const u = d.user, A = d.attendance;
   let h = '<div class="pin">';
   // 1. 名前・学校など ＋ 2. 参加率
@@ -522,31 +536,83 @@ function build(d, L) {
     h += '<tr><td>' + esc(r.label) + '</td><td>' + (r.step ? '<span class="stp">STEP' + r.step + '</span>' + (r.keyword ? '　' + esc(r.keyword) : '') : '<span class="muted">未選択</span>') + '</td><td>' + esc(cut(r.memo, L.m)) + '</td></tr>';
   });
   h += '</table></div>';
-  // 6. 振り返りのあゆみ
-  let hist = d.history, hOm = 0;
-  if (hist.length > L.h) { hOm = hist.length - L.h; hist = hist.slice(hist.length - L.h); }
-  h += '<div class="sec" style="margin-bottom:2.5mm"><h3>振り返りのあゆみ <span class="sub">回ごとのアンケートと前回の学びカード（古い順）</span></h3>';
-  if (!d.history.length) h += '<div class="box muted">この年度のアンケートの記録はありません。</div>';
-  else {
-    h += '<table class="s"><colgroup><col style="width:6.4em"><col style="width:7.2em"><col><col><col style="width:10em"></colgroup><tr><th>日付・会</th><th>選んだ視点</th><th>選んだ理由</th><th>明日以降試してみたいこと</th><th>前回の学びカード</th></tr>';
-    hist.forEach(function(e) {
-      const rc = e.recall ? ((e.recall.label ? '<b>' + esc(e.recall.label) + '</b>' : '') + (e.recall.note ? (e.recall.label ? '<br>' : '') + esc(cut(e.recall.note, Math.max(12, Math.round(L.t / 2)))) : '')) : '';
-      h += '<tr><td><span class="nw">' + esc(md(e.date)) + '</span><br><span class="muted" style="font-size:0.85em">' + esc(cut(e.title, 18)) + '</span></td><td style="font-size:0.9em">' + esc(e.growth.join('・')) + '</td><td>' + esc(cut(e.reason, L.t)) + '</td><td>' + esc(cut(e.try, L.t)) + '</td><td>' + rc + '</td></tr>';
-    });
-    h += '</table>';
-    if (hOm) h += '<div class="omit">※ 古い回 ' + hOm + '回分は省略しています（学びの記録で全部見られます）。</div>';
-  }
-  h += '</div>';
-  // 7. 印象に残った言葉（☆）
-  if (d.kept && d.kept.length) {
-    const ks = d.kept.slice(-L.k);
-    h += '<div class="sec"><h3>印象に残った言葉 <span class="sub">本人が☆をつけたもの' + (d.kept.length > ks.length ? '（新しい ' + ks.length + '件／全' + d.kept.length + '件）' : '') + '</span></h3>';
-    ks.forEach(function(k) { h += '<div class="kw">' + esc(cut(k.body, L.kc)) + ' <span class="src">（' + esc(md(k.date)) + ' ' + esc(cut(k.title, 16)) + '）</span></div>'; });
-    h += '</div>';
-  }
-  h += '<div class="foot">' + esc(RULE) + '<br>本人の記録・記入をそのまままとめたものです（点数・順位・評価ではありません）。管理者だけが見られます。取り扱いに注意してください。</div>';
+  return h;
+}
+function build(d, L) {
+  let h = buildTop(d, L);
+  const hOm = d.history.length > L.h ? d.history.length - L.h : 0;
+  h += histSection(d, L, d.history.slice(hOm), hOm, {});
+  h += keptSection(d, L);
+  h += footHtml();
   h += '</div>';
   return h;
+}
+
+// 6. 振り返りのあゆみ（rows＝載せる回、om＝省略した古い回の数）
+// opt.cont：表面で「裏面へ続く」 / opt.back：裏面の続き / opt.none：表面に1行も載らず全部裏面
+function histSection(d, L, rows, om, opt) {
+  let h = '';
+  const ttl = opt.back ? '振り返りのあゆみ（つづき）' : '振り返りのあゆみ';
+  h += '<div class="sec" style="margin-bottom:2.5mm"><h3>' + ttl + ' <span class="sub">回ごとのアンケートと前回の学びカード（古い順）</span></h3>';
+  if (!d.history.length) { h += '<div class="box muted">この年度のアンケートの記録はありません。</div></div>'; return h; }
+  if (opt.none) { h += '<div class="omit">→ 振り返りのあゆみは裏面に載せています。</div></div>'; return h; }
+  h += '<table class="s"><colgroup><col style="width:6.4em"><col style="width:7.2em"><col><col><col style="width:10em"></colgroup><tr><th>日付・会</th><th>選んだ視点</th><th>選んだ理由</th><th>明日以降試してみたいこと</th><th>前回の学びカード</th></tr>';
+  rows.forEach(function(e) {
+    const rc = e.recall ? ((e.recall.label ? '<b>' + esc(e.recall.label) + '</b>' : '') + (e.recall.note ? (e.recall.label ? '<br>' : '') + esc(cut(e.recall.note, Math.max(12, Math.round(L.t / 2)))) : '')) : '';
+    const rcTd = e.recall ? '<td>' + rc + '</td>' : (e.recall_na ? '<td class="rc-na" title="記録の対象外（前回の学びカードを始める前の回）"></td>' : '<td class="rc-none">—</td>');
+    h += '<tr class="hrow"><td><span class="nw">' + esc(md(e.date)) + '</span><br><span class="muted" style="font-size:0.85em">' + esc(cut(e.title, 18)) + '</span></td><td style="font-size:0.9em">' + esc(e.growth.join('・')) + '</td><td>' + esc(cut(e.reason, L.t)) + '</td><td>' + esc(cut(e.try, L.t)) + '</td>' + rcTd + '</tr>';
+  });
+  h += '</table>';
+  if (om && !opt.back) h += '<div class="omit">※ 古い回 ' + om + '回分は省略しています（学びの記録で全部見られます）。</div>';
+  if (opt.cont) h += '<div class="omit">→ 裏面に続きます。</div>';
+  h += '</div>';
+  return h;
+}
+// 7. 印象に残った言葉（☆）
+function keptSection(d, L) {
+  if (!d.kept || !d.kept.length) return '';
+  let h = '';
+  const ks = d.kept.slice(-L.k);
+  h += '<div class="sec"><h3>印象に残った言葉 <span class="sub">本人が☆をつけたもの' + (d.kept.length > ks.length ? '（新しい ' + ks.length + '件／全' + d.kept.length + '件）' : '') + '</span></h3>';
+  ks.forEach(function(k) { h += '<div class="kw">' + esc(cut(k.body, L.kc)) + ' <span class="src">（' + esc(md(k.date)) + ' ' + esc(cut(k.title, 16)) + '）</span></div>'; });
+  h += '</div>';
+  return h;
+}
+function footHtml() {
+  return '<div class="foot">' + esc(RULE) + (RNOTE ? '<br><span class="na-sw"></span>' + esc(RNOTE) : '') + '<br>本人の記録・記入をそのまままとめたものです（点数・順位・評価ではありません）。管理者だけが見られます。取り扱いに注意してください。</div>';
+}
+
+// ---- 両面2ページ版 ----
+// 表面：名前・参加状況・目標・視点・道しるべ・振り返りのあゆみ（入るだけ） / 裏面：あゆみの続き・印象に残った言葉・注記
+// 省略しないのが基本。2ページに入らないときは文字を小さくし、それでも無理なら最古の回から省略して注記する。
+const DUPLEX_STEPS = [
+  { fs: 10,  t: 200, g: 600, m: 120, k: 20, kc: 160 },
+  { fs: 9.5, t: 200, g: 600, m: 120, k: 20, kc: 160 },
+  { fs: 9,   t: 200, g: 600, m: 120, k: 20, kc: 160 },
+  { fs: 8.5, t: 200, g: 600, m: 120, k: 20, kc: 160 },
+  { fs: 8,   t: 200, g: 600, m: 120, k: 20, kc: 160 },
+  { fs: 7.5, t: 200, g: 600, m: 120, k: 20, kc: 160 },
+  { fs: 7,   t: 150, g: 450, m: 90,  k: 12, kc: 130 },
+  { fs: 6.5, t: 110, g: 320, m: 60,  k: 8,  kc: 100 }
+];
+function buildFront(d, L, rows, k, om) {
+  let h = buildTop(d, L);
+  if (k >= rows.length) h += histSection(d, L, rows, om, {});
+  else if (k <= 0) h += histSection(d, L, [], om, { none: true });
+  else h += histSection(d, L, rows.slice(0, k), om, { cont: true });
+  return h + '</div>';
+}
+function buildBack(d, L, rows, k, om) {
+  const u = d.user;
+  let h = '<div class="pin"><div class="hd2"><div class="nm2">' + esc(u.name) + '</div><div class="ttl2">個人まとめシート　' + d.fy + '年度（令和' + (d.fy - 2018) + '年度）・裏面</div></div>';
+  const rest = rows.slice(Math.max(0, k));
+  const kept = keptSection(d, L);
+  if (rest.length) h += histSection(d, L, rest, om, { back: true });
+  if (kept) h += kept;
+  if (!rest.length && !kept) h += '<div class="backnote">（このページは裏面です）</div>';
+  if (om) h += '<div class="omit">※ 2ページに入りきらないため、古い回 ' + om + '回分を省略しています（学びの記録で全部見られます）。</div>';
+  h += footHtml();
+  return h + '</div>';
 }
 
 const MM = 96 / 25.4;
@@ -570,20 +636,93 @@ function scaleOne(w) {
   w.style.width = (pw * s) + 'px'; w.style.height = (ph * s) + 'px';
   w.firstChild.style.transform = s < 1 ? 'scale(' + s + ')' : 'none';
 }
+// 両面2ページ版：表と裏の2ページに分けて入れる
+function fits(page) { return page.querySelector('.pin').offsetHeight <= page.clientHeight - 18 * MM - 1; }
+function tryDuplex(p1, p2, d, L, om) {
+  const rows = d.history.slice(om), n = rows.length;
+  p1.style.fontSize = p2.style.fontSize = L.fs + 'pt';
+  let k = n;
+  p1.innerHTML = buildFront(d, L, rows, k, om);
+  if (!fits(p1)) {
+    // はみ出した高さぶん、表の下の回から裏面へ回す（見込みで減らしてから1回ずつ確かめる）
+    const avail = p1.clientHeight - 18 * MM;
+    let over = p1.querySelector('.pin').offsetHeight - avail + L.fs * 1.34 * 2.2;
+    const trs = p1.querySelectorAll('tr.hrow');
+    for (let t = trs.length - 1; t >= 0 && over > 0; t--) { over -= trs[t].offsetHeight; k--; }
+    if (k < 0) k = 0;
+    p1.innerHTML = buildFront(d, L, rows, k, om);
+    while (!fits(p1) && k > 0) { k--; p1.innerHTML = buildFront(d, L, rows, k, om); }
+    if (!fits(p1)) return false;
+  }
+  p2.innerHTML = buildBack(d, L, rows, k, om);
+  return fits(p2);
+}
+function fit2(p1, p2, d) {
+  for (let i = 0; i < DUPLEX_STEPS.length; i++) {
+    if (tryDuplex(p1, p2, d, Object.assign({ h: 999, a: 999 }, DUPLEX_STEPS[i]), 0)) return;
+  }
+  // それでも入らないとき：いちばん小さい文字で、最古の回から省略
+  const last = Object.assign({ h: 999, a: 999 }, DUPLEX_STEPS[DUPLEX_STEPS.length - 1]);
+  // 省略する回数は二分探索で最小の数を探す（人数が多いまとめ印刷でも時間がかからないように）
+  let lo = 1, hi = d.history.length;
+  if (hi >= 1 && tryDuplex(p1, p2, d, last, hi)) {
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (tryDuplex(p1, p2, d, last, mid)) hi = mid; else lo = mid + 1; }
+    tryDuplex(p1, p2, d, last, lo); return;
+  }
+  const small = Object.assign({}, last, { a: 18 });
+  if (tryDuplex(p1, p2, d, small, d.history.length)) return;
+  p2.insertAdjacentHTML('beforeend', '<div class="clipnote">※ 入りきらない部分は省略しています</div>');
+}
+
+let MODE = params.get('mode') === 'duplex' ? 'duplex' : 'single';
 const DATA = [];
-function addPage(d) {
+function newWrap() {
   const w = document.createElement('div'); w.className = 'pwrap';
   const p = document.createElement('div'); p.className = 'page';
   w.appendChild(p); document.getElementById('pages').appendChild(w);
-  if (d.missing) { p.innerHTML = '<div class="msg">会員が見つかりませんでした（ID ' + esc(d.id) + '）</div>'; }
-  else fit(p, d);
-  scaleOne(w);
-  DATA.push({ w: w, p: p, d: d });
+  return { w: w, p: p };
 }
-function refitAll() { DATA.forEach(function(x) { if (!x.d.missing) fit(x.p, x.d); scaleOne(x.w); }); }
-window.addEventListener('resize', function() { DATA.forEach(function(x) { scaleOne(x.w); }); });
-window.addEventListener('beforeprint', function() { DATA.forEach(function(x) { x.p.style.transform = 'none'; }); });
-window.addEventListener('afterprint', function() { DATA.forEach(function(x) { scaleOne(x.w); }); });
+function layout(x) {
+  // 1人分のページを作り直す（1枚版＝1ページ、両面版＝必ず2ページ）
+  x.ws.forEach(function(o) { o.w.remove(); });
+  const n = MODE === 'duplex' ? 2 : 1;
+  x.ws = [];
+  for (let i = 0; i < n; i++) x.ws.push(newWrap());
+  const d = x.d;
+  if (d.missing) {
+    x.ws[0].p.innerHTML = '<div class="msg">会員が見つかりませんでした（ID ' + esc(d.id) + '）</div>';
+    if (n === 2) x.ws[1].p.innerHTML = '<div class="msg">（このページは裏面です）</div>';
+  } else if (n === 2) fit2(x.ws[0].p, x.ws[1].p, d);
+  else fit(x.ws[0].p, d);
+  x.ws.forEach(function(o) { scaleOne(o.w); });
+}
+function addPage(d) { const x = { d: d, ws: [] }; layout(x); DATA.push(x); }
+function eachWrap(fn) { DATA.forEach(function(x) { x.ws.forEach(fn); }); }
+function pageCount() { let n = 0; DATA.forEach(function(x) { n += x.ws.length; }); return n; }
+function refitAll() { document.getElementById('pages').innerHTML = ''; DATA.forEach(function(x) { x.ws = []; layout(x); }); }
+window.addEventListener('resize', function() { eachWrap(function(o) { scaleOne(o.w); }); });
+window.addEventListener('beforeprint', function() { eachWrap(function(o) { o.p.style.transform = 'none'; }); });
+window.addEventListener('afterprint', function() { eachWrap(function(o) { scaleOne(o.w); }); });
+(function() {
+  const ms = document.getElementById('modeSel');
+  ms.value = MODE;
+  ms.addEventListener('change', function() {
+    MODE = ms.value === 'duplex' ? 'duplex' : 'single';
+    if (MODE === 'duplex') params.set('mode', 'duplex'); else params.delete('mode');
+    try { history.replaceState(null, '', location.pathname + '?' + params.toString()); } catch (e) {}
+    showHint();
+    if (DATA.length) { refitAll(); showDone(); }
+  });
+})();
+function showHint() {
+  document.getElementById('hint').innerHTML = (MODE === 'duplex'
+    ? '両面2ページ版：1人分を表・裏の2ページにまとめ、振り返りの回を省略せずに載せます（入りきらないときは文字を小さくします）。1人が必ず2ページなので、まとめて印刷しても人がずれません。'
+    : '1枚版：1人分をA4縦1枚にまとめています（入りきらないときは文字を小さくし、古い回などを省略します）。')
+    + '<br>「印刷・PDFで保存」→ 用紙A4・縦、余白「なし」または「デフォルト」、倍率100%で印刷できます。<b>両面版は両面印刷（長辺とじ）で</b>印刷してください。PDFにするときは送信先で「PDFに保存」を選びます。';
+}
+showHint();
+let DONE_MSG = '';
+function showDone() { if (DONE_MSG) document.getElementById('status').textContent = DONE_MSG.replace('{p}', String(pageCount())); }
 document.getElementById('printBtn').addEventListener('click', function() { window.print(); });
 
 async function main() {
@@ -608,11 +747,13 @@ async function main() {
     try { r = await api('/api/admin/sheets?fy=' + FY + '&uids=' + ids.slice(i, i + chunk).join(',')); }
     catch (e) { st.innerHTML = '<span style="color:#c62828">' + esc(e.message) + '（' + i + '人目まで表示）</span>'; return; }
     RULE = r.rule_note || RULE;
+    RNOTE = r.recall_note || RNOTE;
     r.sheets.forEach(addPage);
     if (DATA.length === 1 && !DATA[0].d.missing) document.title = '個人まとめシート ' + DATA[0].d.user.name;
   }
   if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} refitAll(); }
-  st.textContent = head + ids.length + '人分（' + ids.length + 'ページ）を表示しています。';
+  DONE_MSG = head + ids.length + '人分（{p}ページ）を表示しています。';
+  showDone();
   document.getElementById('printBtn').disabled = false;
 }
 main();
