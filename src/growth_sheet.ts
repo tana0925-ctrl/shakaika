@@ -663,7 +663,12 @@ function fit2(p1, p2, d) {
   }
   // それでも入らないとき：いちばん小さい文字で、最古の回から省略
   const last = Object.assign({ h: 999, a: 999 }, DUPLEX_STEPS[DUPLEX_STEPS.length - 1]);
-  for (let om = 1; om <= d.history.length; om++) { if (tryDuplex(p1, p2, d, last, om)) return; }
+  // 省略する回数は二分探索で最小の数を探す（人数が多いまとめ印刷でも時間がかからないように）
+  let lo = 1, hi = d.history.length;
+  if (hi >= 1 && tryDuplex(p1, p2, d, last, hi)) {
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (tryDuplex(p1, p2, d, last, mid)) hi = mid; else lo = mid + 1; }
+    tryDuplex(p1, p2, d, last, lo); return;
+  }
   const small = Object.assign({}, last, { a: 18 });
   if (tryDuplex(p1, p2, d, small, d.history.length)) return;
   p2.insertAdjacentHTML('beforeend', '<div class="clipnote">※ 入りきらない部分は省略しています</div>');
