@@ -4095,8 +4095,8 @@ app.get('/admin', (c) => {
     <input type="text" class="search-box" id="searchBox" placeholder="🔍 名前・メールで検索..." oninput="filterMembers()">
     <div style="display:flex;gap:8px">
       <button class="btn-sm btn-export" onclick="exportCSV()"><i class="fas fa-file-excel"></i> Excel (CSV) ダウンロード</button>
-      <button class="btn-sm" id="sheetPickBtn" style="background:#1a237e;color:#fff;padding:10px 14px;border-radius:10px;font-size:13px" onclick="openSheets('pick')" disabled title="左の□にチェックした人の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 選んだ人の1枚シート（0名）</button>
-      <button class="btn-sm" id="sheetAllBtn" style="background:#e8eaf6;color:#1a237e;padding:10px 14px;border-radius:10px;font-size:13px" onclick="openSheets('shown')" title="いま一覧に表示している全員の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 表示中の全員の1枚シート</button>
+      <button class="btn-sm" id="sheetPickBtn" style="background:#1a237e;color:#fff;padding:10px 14px;border-radius:10px;font-size:13px" onclick="openSheets('pick')" disabled title="左の□にチェックした人の個人まとめシートをまとめて印刷（開いた画面で1枚版／両面2ページ版を選べます）"><i class="fas fa-id-card"></i> 選んだ人のシート（0名）</button>
+      <button class="btn-sm" id="sheetAllBtn" style="background:#e8eaf6;color:#1a237e;padding:10px 14px;border-radius:10px;font-size:13px" onclick="openSheets('shown')" title="いま一覧に表示している全員の個人まとめシートをまとめて印刷（開いた画面で1枚版／両面2ページ版を選べます）"><i class="fas fa-id-card"></i> 表示中の全員のシート</button>
     </div>
 
 </div>
@@ -4211,9 +4211,9 @@ function toggleSheetPick(cb) {
 function updateSheetBtns() {
   var n = Object.keys(_sheetPick).length;
   var b1 = document.getElementById('sheetPickBtn');
-  if (b1) { b1.disabled = !n; b1.style.opacity = n ? '1' : '.5'; b1.innerHTML = '<i class="fas fa-id-card"></i> 選んだ人の1枚シート（' + n + '名）'; }
+  if (b1) { b1.disabled = !n; b1.style.opacity = n ? '1' : '.5'; b1.innerHTML = '<i class="fas fa-id-card"></i> 選んだ人のシート（' + n + '名）'; }
   var b2 = document.getElementById('sheetAllBtn');
-  if (b2) { b2.disabled = !_sheetShown.length; b2.innerHTML = '<i class="fas fa-id-card"></i> 表示中の全員の1枚シート（' + _sheetShown.length + '名）'; }
+  if (b2) { b2.disabled = !_sheetShown.length; b2.innerHTML = '<i class="fas fa-id-card"></i> 表示中の全員のシート（' + _sheetShown.length + '名）'; }
 }
 function openSheets(kind) {
   var ids;
@@ -4223,7 +4223,7 @@ function openSheets(kind) {
     Object.keys(_sheetPick).forEach(function(k) { if (ids.indexOf(+k) < 0) ids.push(+k); });
   } else { ids = _sheetShown.slice(); }
   if (!ids.length) return;
-  if (ids.length > 40 && !confirm(ids.length + '人分（' + ids.length + 'ページ）のシートを作ります。表示まで少し時間がかかります。よろしいですか？')) return;
+  if (ids.length > 40 && !confirm(ids.length + '人分のシートを作ります。表示まで少し時間がかかります。よろしいですか？')) return;
   window.open('/admin/sheet?uids=' + ids.join(','), '_blank', 'noopener');
 }
 var _activeTab = 'elem';
@@ -4601,7 +4601,7 @@ function showDetail(id) {
     html += '</div>' + stepBadge(sel) + '</div>';
   }
 
-  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:8px 14px" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-seedling"></i> 学びの記録</a><a class="btn-sm" style="background:#e8eaf6;color:#1a237e;text-decoration:none;padding:8px 14px" href="/admin/report?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a><a class="btn-sm" style="background:#1a237e;color:#fff;text-decoration:none;padding:8px 14px" href="/admin/sheet?uid=' + m.id + '" target="_blank" rel="noopener" title="A4縦1枚の個人まとめシート（印刷・PDF）"><i class="fas fa-id-card"></i> 1枚シート</a>' + (m.id !== user.id ? '<button class="btn-sm" data-action="watch" data-label="1" data-id="' + m.id + '">.</button>' : '') + promoterBtnHtml(m.id, true) + '</div>';
+  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><a class="btn-sm" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:8px 14px" href="/admin/portfolio?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-seedling"></i> 学びの記録</a><a class="btn-sm" style="background:#e8eaf6;color:#1a237e;text-decoration:none;padding:8px 14px" href="/admin/report?uid=' + m.id + '" target="_blank" rel="noopener"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a><a class="btn-sm" style="background:#1a237e;color:#fff;text-decoration:none;padding:8px 14px" href="/admin/sheet?uid=' + m.id + '" target="_blank" rel="noopener" title="個人まとめシート（1枚版／両面2ページ版・印刷・PDF）"><i class="fas fa-id-card"></i> まとめシート</a>' + (m.id !== user.id ? '<button class="btn-sm" data-action="watch" data-label="1" data-id="' + m.id + '">.</button>' : '') + promoterBtnHtml(m.id, true) + '</div>';
   html += '<div style="font-size:11px;color:#888;margin-top:6px">推進部員：ONの人だけ、1枚シートで「研究」の会（部会など）の参加率を出します。本人の画面には表示されません。</div>';
   html += '<div style="text-align:center;margin-top:24px"><button class="btn-sm" style="background:#eee;color:#555;padding:8px 24px" id="closeDetailBtn">閉じる</button></div>';
   document.getElementById('detailContent').innerHTML = html;
@@ -5704,7 +5704,7 @@ function render(groups,fy){
       +'<button class="grp-ai no-print" data-ai-set="'+setKey+'">\u2728 全員をコピー</button>'
       +'<button class="grp-ai no-print" data-ai-sel="'+setKey+'" disabled>\u2728 選択(0)</button>'
       +ntfGroupBtn(setKey,gname,ms)
-      +'<a class="grp-print no-print" href="/admin/sheet?group='+encodeURIComponent(gname)+'" target="_blank" rel="noopener" title="このグループの会員の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 1枚シートをまとめて印刷（'+ms.length+'名）</a>'
+      +'<a class="grp-print no-print" href="/admin/sheet?group='+encodeURIComponent(gname)+'" target="_blank" rel="noopener" title="このグループの会員の個人まとめシートをまとめて印刷（開いた画面で1枚版／両面2ページ版を選べます）"><i class="fas fa-id-card"></i> シート印刷（'+ms.length+'名）</a>'
       +'<button class="grp-print grp-list no-print" onclick="window.print()" title="この画面の一覧（参加イベントの回答・伴走メモを含む）をそのまま印刷"><i class="fas fa-print"></i> 一覧を印刷</button></div>';
     ms.forEach(function(m){inner+=mRow(m,fy);});
     inner+='</div>';
@@ -5714,7 +5714,7 @@ function render(groups,fy){
     var pid='gp_unset';
     tabs.push({id:pid,label:'<i class="fas fa-question-circle"></i> 未設定 ('+unset.length+')',col:'#9e9e9e'});
     var secs=[['elementary','小学校'],['junior_high','中学校'],['admin_staff','主幹・管理職'],['','校種未設定']];
-    var u='<div class="group-card"><div class="group-header" style="background:#9e9e9e"><i class="fas fa-question-circle"></i> グループ未設定 <span class="group-count">('+unset.length+'名)</span>'+ntfGroupBtn('unset','グループ未設定',unset)+'<a class="grp-print no-print" href="/admin/sheet?unset=1" target="_blank" rel="noopener" title="グループ未設定の会員の個人まとめシートを、1人1ページ（A4縦）でまとめて印刷"><i class="fas fa-id-card"></i> 1枚シートをまとめて印刷（'+unset.length+'名）</a><button class="grp-print grp-list no-print" onclick="window.print()" title="この画面の一覧（参加イベントの回答・伴走メモを含む）をそのまま印刷"><i class="fas fa-print"></i> 一覧を印刷</button></div>';
+    var u='<div class="group-card"><div class="group-header" style="background:#9e9e9e"><i class="fas fa-question-circle"></i> グループ未設定 <span class="group-count">('+unset.length+'名)</span>'+ntfGroupBtn('unset','グループ未設定',unset)+'<a class="grp-print no-print" href="/admin/sheet?unset=1" target="_blank" rel="noopener" title="グループ未設定の会員の個人まとめシートをまとめて印刷（開いた画面で1枚版／両面2ページ版を選べます）"><i class="fas fa-id-card"></i> シート印刷（'+unset.length+'名）</a><button class="grp-print grp-list no-print" onclick="window.print()" title="この画面の一覧（参加イベントの回答・伴走メモを含む）をそのまま印刷"><i class="fas fa-print"></i> 一覧を印刷</button></div>';
     secs.forEach(function(sec){
       var list=unset.filter(function(m){return (m.school_type||'')===sec[0];});
       if(!list.length)return;
