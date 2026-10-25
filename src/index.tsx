@@ -7,6 +7,7 @@ import { registerAnalytics } from './growth_analytics'
 import { registerNotify, notifyReflection } from './growth_notify'
 import { A2HS_HEAD_SCRIPT, a2hsCardHtml, registerInstallHelp } from './app_install'
 import { registerSheet, normGroup, guessEventKind, normEventKind } from './growth_sheet'
+import { registerUsage, USAGE_HEAD_SCRIPT } from './growth_usage'
 
 type Bindings = {
   DB: D1Database
@@ -2248,6 +2249,7 @@ const commonHead = `
 <meta name="apple-mobile-web-app-title" content="学びの道しるべ">
 <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
 ${A2HS_HEAD_SCRIPT}
+${USAGE_HEAD_SCRIPT}
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap');
@@ -4076,6 +4078,7 @@ app.get('/admin', (c) => {
     <a href="/admin/groups" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-users"></i> グループ別</a>
     <a href="/admin/analytics" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-chart-bar"></i> 分析</a>
     <a href="/admin/duplicates" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-user-friends"></i> 重複のまとめ</a>
+    <a href="/admin/usage" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-chart-line"></i> 利用状況</a>
     <a href="/admin/news" class="btn-sm" style="text-decoration:none;background:rgba(255,255,255,0.2);color:#fff"><i class="fas fa-bell"></i> 新着 <span id="newsNavBadge" style="display:none;background:#ff9800;color:#fff;border-radius:10px;padding:0 7px;margin-left:2px"></span></a>
     <button class="btn-sm btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i> ログアウト</button>
   </div>
@@ -7024,5 +7027,8 @@ registerInstallHelp(app, commonHead)
 
 // ========== 個人まとめシート（A4縦1枚・管理者のみ。src/growth_sheet.ts） ==========
 registerSheet(app, { authMiddleware, adminMiddleware, commonHead, stepKeywords: AI_STEP_KEYWORDS })
+
+// ========== 利用状況（人数だけ・管理者のみ。src/growth_usage.ts） ==========
+registerUsage(app, { authMiddleware, adminMiddleware, commonHead })
 
 export default app
