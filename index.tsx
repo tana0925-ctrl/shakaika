@@ -8,6 +8,7 @@ import { registerNotify, notifyReflection } from './growth_notify'
 import { A2HS_HEAD_SCRIPT, a2hsCardHtml, registerInstallHelp } from './app_install'
 import { registerSheet, normGroup, guessEventKind, normEventKind } from './growth_sheet'
 import { registerUsage, USAGE_HEAD_SCRIPT } from './growth_usage'
+import { registerInsightAi, getAllowNonCandidate, loadCandidateMap, INSIGHT_AI_MAX_PICKS } from './growth_insight_ai'
 
 type Bindings = {
   DB: D1Database
@@ -1144,6 +1145,7 @@ app.delete('/api/admin/members/:id', authMiddleware, adminMiddleware, async (c) 
   }
   try { await c.env.DB.prepare('DELETE FROM recall_reflections WHERE user_id = ?').bind(id).run() } catch (e) { /* ignore */ }
   try { await c.env.DB.prepare("DELETE FROM shared_insights WHERE respondent_type = 'member' AND respondent_id = ?").bind(id).run() } catch (e) { /* ignore */ }
+  try { await c.env.DB.prepare("DELETE FROM insight_candidates WHERE respondent_type = 'member' AND respondent_id = ?").bind(id).run() } catch (e) { /* ignore */ }
   try { await c.env.DB.prepare("DELETE FROM share_consents WHERE respondent_type = 'member' AND respondent_id = ?").bind(id).run() } catch (e) { /* ignore */ }
   await c.env.DB.prepare('DELETE FROM selections WHERE user_id = ?').bind(id).run()
   await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id).run()
@@ -1720,6 +1722,7 @@ app.delete('/api/admin/events/:id', authMiddleware, adminMiddleware, async (c) =
   const db = c.env.DB
   try { await db.prepare('DELETE FROM recall_reflections WHERE event_id = ?').bind(id).run() } catch (e) { /* ignore */ }
   try { await db.prepare('DELETE FROM shared_insights WHERE event_id = ?').bind(id).run() } catch (e) { /* ignore */ }
+  try { await db.prepare('DELETE FROM insight_candidates WHERE event_id = ?').bind(id).run() } catch (e) { /* ignore */ }
   try { await db.prepare('DELETE FROM share_consents WHERE event_id = ?').bind(id).run() } catch (e) { /* ignore */ }
   await db.prepare('DELETE FROM custom_answers WHERE event_id = ?').bind(id).run()
   await db.prepare('DELETE FROM survey_answers WHERE event_id = ?').bind(id).run()
@@ -2175,6 +2178,9 @@ app.get('/api/admin/events/:id/insights', authMiddleware, adminMiddleware, async
     "JOIN survey_questions q ON q.id = ga.question_id AND q.question_type = 'text' WHERE ga.event_id = ? AND sc.consent IN ('anon','named') AND trim(ga.answer_text) <> ''"
   ).bind(id).all() as any
   const { results: ad } = await db.prepare('SELECT id, respondent_type, respondent_id, question_id, body, updated_at FROM shared_insights WHERE event_id = ?').bind(id).all() as any
+  // AIが選んだ掲載候補（無い回・migration前は空）と、候補以外からも採用できるかの設定
+  const candMap = await loadCandidateMap(db, id)
+  const allowNon = await getAllowNonCandidate(db)
   const key = (t: string, r: number) => t + ':' + r
   const ansMap = new Map<string, any[]>()
   for (const a of (mAns || [])) { const k = key('member', a.rid); if (!ansMap.has(k)) ansMap.set(k, []); ansMap.get(k)!.push(a) }
@@ -2189,11 +2195,13 @@ app.get('/api/admin/events/:id/insights', authMiddleware, adminMiddleware, async
       const a = (ansMap.get(k) || []).find((x: any) => x.question_id === q.id)
       if (!a) continue
       const adopted = adMap.get(k + ':' + q.id)
-      answers.push({ question_id: q.id, question_text: q.question_text, answer_text: a.answer_text, adopted: adopted ? { id: adopted.id, body: adopted.body } : null })
+      const cand = candMap.get(k + ':' + q.id)
+      answers.push({ question_id: q.id, question_text: q.question_text, answer_text: a.answer_text, adopted: adopted ? { id: adopted.id, body: adopted.body } : null, candidate: cand ? { reason: cand.reason, order: cand.order } : null })
     }
     if (answers.length) people.push({ respondent_type: p.respondent_type, respondent_id: p.respondent_id, name: p.name || '', consent: p.consent, answers })
   }
-  return c.json({ enabled: true, people, adopted_count: people.reduce((n, p) => n + p.answers.filter((a: any) => a.adopted).length, 0) })
+  return c.json({ enabled: true, people, adopted_count: people.reduce((n, p) => n + p.answers.filter((a: any) => a.adopted).length, 0),
+    candidate_count: people.reduce((n, p) => n + p.answers.filter((a: any) => a.candidate).length, 0), allow_non_candidate: allowNon, max_picks: INSIGHT_AI_MAX_PICKS })
 })
 
 // 管理者：採用（新規）・文面の更新
@@ -2217,6 +2225,15 @@ app.post('/api/admin/events/:id/insights', authMiddleware, adminMiddleware, asyn
   if (consent !== 'anon' && consent !== 'named') return c.json({ error: 'この方は紹介に同意していません' }, 403)
   const q = await db.prepare("SELECT id FROM survey_questions WHERE id = ? AND event_id = ? AND question_type = 'text'").bind(qid, id).first()
   if (!q) return c.json({ error: '質問が見つかりません' }, 404)
+  // 初期設定では、新しく採用できるのはAIの掲載候補だけ（採用済みの文面の更新はいつでもできる）
+  if (!(await getAllowNonCandidate(db))) {
+    const already = await db.prepare('SELECT id FROM shared_insights WHERE event_id = ? AND respondent_type = ? AND respondent_id = ? AND question_id = ?').bind(id, rtype, rid, qid).first()
+    if (!already) {
+      let isCand: any = null
+      try { isCand = await db.prepare('SELECT id FROM insight_candidates WHERE event_id = ? AND respondent_type = ? AND respondent_id = ? AND question_id = ?').bind(id, rtype, rid, qid).first() } catch (e) { isCand = null }
+      if (!isCand) return c.json({ error: '掲載候補ではありません。採用するには「候補以外からも採用できる」をONにしてください' }, 403)
+    }
+  }
   const user = c.get('user')
   await db.prepare(
     "INSERT INTO shared_insights (event_id, respondent_type, respondent_id, question_id, body, adopted_by, created_at, updated_at) VALUES (?,?,?,?,?,?,datetime('now'),datetime('now')) " +
@@ -6248,6 +6265,36 @@ app.get('/admin/events', (c) => {
   .ins-btn:disabled { opacity: 0.6; }
   .ins-tag { font-size: 11px; color: #2e7d32; font-weight: 700; }
   .ins-st { font-size: 11px; }
+  .ins-ai { background: #fffde7; border: 2px solid #ffe082; border-radius: 12px; padding: 10px 12px; margin-bottom: 12px; }
+  .ins-ai.none { background: #fff8e1; border-style: dashed; }
+  .ins-ai-head { font-weight: 700; font-size: 14px; color: #8d6e00; margin-bottom: 6px; }
+  .ins-ai-sub { font-size: 11px; color: #9e9e9e; font-weight: 400; }
+  .ins-ai-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .ins-chip { border: 1px solid #ffca28; background: #fff; color: #6d4c41; border-radius: 14px; padding: 4px 10px; font-size: 12px; cursor: pointer; font-family: inherit; text-align: left; }
+  .ins-chip.ad { border-color: #a5d6a7; color: #2e7d32; }
+  .ins-ai-big { width: 100%; border: none; border-radius: 10px; padding: 14px; background: #f9a825; color: #fff; font-size: 16px; font-weight: 700; cursor: pointer; font-family: inherit; box-shadow: 0 2px 8px rgba(249,168,37,0.35); }
+  .ins-ai-toggle { border: 1px dashed #ffb300; background: #fff; color: #8d6e00; border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .ins-ai-note { font-size: 11px; color: #8d6e63; margin-top: 6px; line-height: 1.6; }
+  .ins-ai-steps { margin-top: 10px; }
+  .ins-ai-step { background: #fff; border: 1px solid #ffe082; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 12px; color: #5d4037; line-height: 1.7; }
+  .ins-ai-step textarea { width: 100%; min-height: 90px; margin-top: 6px; padding: 8px; border: 2px solid #e0d6c8; border-radius: 8px; font-size: 13px; font-family: inherit; resize: vertical; }
+  .ins-ai-msg { margin-top: 8px; font-size: 12px; line-height: 1.7; }
+  .ins-ai-msg .ok { color: #2e7d32; font-weight: 700; }
+  .ins-ai-msg .ng { color: #c62828; font-weight: 700; }
+  .ins-ai-msg .warn { color: #6d4c41; background: #fff3e0; border-radius: 6px; padding: 6px 8px; margin-top: 4px; }
+  .ins-ai-msg ul { margin: 4px 0 0 18px; padding: 0; }
+  .ins-ai-msg code { font-size: 11px; background: #fff; padding: 0 3px; word-break: break-all; }
+  .ins-ai-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding-top: 8px; border-top: 1px dashed #ffe082; }
+  .ins-ai-allow { font-size: 12px; color: #5d4037; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .ins-ai-allow input { width: 18px; height: 18px; accent-color: #f9a825; }
+  .ins-ans.cand { background: #fffde7; border-radius: 8px; padding: 8px; border-top: 2px solid #ffd54f; }
+  .ins-ans.cand.adopted { background: #f9fbf6; }
+  .ins-ans.flash { animation: insFlash 1.4s ease; }
+  @keyframes insFlash { 0%, 40% { box-shadow: 0 0 0 3px #ffb300; } 100% { box-shadow: none; } }
+  .ins-cand { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 6px; }
+  .ins-cand-tag { background: #f9a825; color: #fff; border-radius: 10px; padding: 2px 10px; font-size: 11px; font-weight: 700; flex: none; }
+  .ins-cand-why { font-size: 12px; color: #6d4c41; line-height: 1.6; }
+  .ins-nocand { font-size: 11px; color: #9e9e9e; }
   .q-card.fixed { background: #fffaf0; border-style: dashed; border-color: #e0d6c8; box-shadow: none; }
   .detail-tab { padding: 6px 16px; font-size: 12px; font-weight: 700; cursor: pointer; border: 1px solid #ddd; background: #f5f5f5; color: #888; }
   .detail-tab:first-child { border-radius: 6px 0 0 6px; }
@@ -6909,9 +6956,11 @@ function renderInsightsPane(eventId, d) {
     return;
   }
   var people = d.people || [];
+  var allowNon = !!d.allow_non_candidate;
   var h = '<div class="ins-lead">紹介に同意した人の振り返り（文章の回答）だけを表示しています。<b>学校名・子どもの名前など</b>は消してから「採用」してください。元の回答は書き換わりません。<br>採用したものは、次の回の受付画面（会員のみ）とマイページ「みんなの気づき」に出ます。名前あり同意でも、出るのは名前だけです。</div>';
-  h += '<div style="font-size:12px;color:#555;margin-bottom:8px">同意した人 <b>' + people.length + '</b> 人 ／ 採用 <b>' + (d.adopted_count || 0) + '</b> 件</div>';
-  if (!people.length) { h += '<div class="no-data">まだありません（回答フォームの最後で「紹介してもよい」を選んだ人の回答だけがここに出ます）</div>'; pane.innerHTML = h; return; }
+  h += insAiBoxHtml(eventId, d);
+  h += '<div style="font-size:12px;color:#555;margin-bottom:8px">同意した人 <b>' + people.length + '</b> 人 ／ 掲載候補 <b>' + (d.candidate_count || 0) + '</b> 件 ／ 採用 <b>' + (d.adopted_count || 0) + '</b> 件</div>';
+  if (!people.length) { h += '<div class="no-data">まだありません（回答フォームの最後で「紹介してもよい」を選んだ人の回答だけがここに出ます）</div>'; pane.innerHTML = h; insBindPane(pane, eventId); return; }
   people.forEach(function(p, pi) {
     h += '<div class="ins-person"><div class="ins-who">' + escHtml(p.name || '（名前不明）')
       + (p.respondent_type === 'guest' ? ' <span class="ins-badge guest">ゲスト</span>' : '')
@@ -6920,24 +6969,170 @@ function renderInsightsPane(eventId, d) {
     p.answers.forEach(function(a, ai) {
       var k = eventId + '_' + pi + '_' + ai;
       var ad = a.adopted;
-      h += '<div class="ins-ans' + (ad ? ' adopted' : '') + '">';
+      var cand = a.candidate;
+      var canAdopt = !!ad || !!cand || allowNon;
+      h += '<div class="ins-ans' + (ad ? ' adopted' : '') + (cand ? ' cand' : '') + '" id="insA_' + k + '">';
+      if (cand) h += '<div class="ins-cand"><span class="ins-cand-tag">⭐掲載候補</span>' + (cand.reason ? '<span class="ins-cand-why"><b>AIの理由：</b>' + escHtml(cand.reason) + '</span>' : '') + '</div>';
       h += '<div class="q">Q. ' + escHtml(a.question_text) + '</div>';
       h += '<div class="orig">' + escHtml(a.answer_text) + '</div>';
-      h += '<div style="font-size:11px;color:#888;margin-bottom:3px">' + (ad ? '<span class="ins-tag"><i class="fas fa-check-circle"></i> 採用中</span>（紹介する文面）' : '紹介する文面（必要なら直してから採用）') + '</div>';
-      h += '<textarea id="insTx_' + k + '" maxlength="1000">' + escHtml(ad ? ad.body : a.answer_text) + '</textarea>';
-      h += '<div class="ins-row">';
-      h += '<button type="button" class="ins-btn adopt" data-ins="adopt" data-k="' + k + '" data-eid="' + eventId + '" data-pi="' + pi + '" data-ai="' + ai + '"><i class="fas fa-check"></i> ' + (ad ? '文面を更新' : '採用') + '</button>';
-      if (ad) h += '<button type="button" class="ins-btn cancel" data-ins="cancel" data-k="' + k + '" data-eid="' + eventId + '" data-pi="' + pi + '" data-ai="' + ai + '"><i class="fas fa-undo"></i> 採用を取り消す</button>';
-      h += '<button type="button" class="ins-btn reset" data-ins="reset" data-k="' + k + '" data-eid="' + eventId + '" data-pi="' + pi + '" data-ai="' + ai + '">元の文に戻す</button>';
-      h += '<span class="ins-st" id="insSt_' + k + '"></span></div>';
+      if (canAdopt) {
+        h += '<div style="font-size:11px;color:#888;margin-bottom:3px">' + (ad ? '<span class="ins-tag"><i class="fas fa-check-circle"></i> 採用中</span>（紹介する文面）' : '紹介する文面（必要なら直してから採用）') + '</div>';
+        h += '<textarea id="insTx_' + k + '" maxlength="1000">' + escHtml(ad ? ad.body : a.answer_text) + '</textarea>';
+        h += '<div class="ins-row">';
+        h += '<button type="button" class="ins-btn adopt" data-ins="adopt" data-k="' + k + '" data-eid="' + eventId + '" data-pi="' + pi + '" data-ai="' + ai + '"><i class="fas fa-check"></i> ' + (ad ? '文面を更新' : '採用') + '</button>';
+        if (ad) h += '<button type="button" class="ins-btn cancel" data-ins="cancel" data-k="' + k + '" data-eid="' + eventId + '" data-pi="' + pi + '" data-ai="' + ai + '"><i class="fas fa-undo"></i> 採用を取り消す</button>';
+        h += '<button type="button" class="ins-btn reset" data-ins="reset" data-k="' + k + '" data-eid="' + eventId + '" data-pi="' + pi + '" data-ai="' + ai + '">元の文に戻す</button>';
+        h += '<span class="ins-st" id="insSt_' + k + '"></span></div>';
+      } else {
+        h += '<div class="ins-nocand">掲載候補ではないため「採用」は出していません。（上の設定で「候補以外からも採用できる」をONにすると採用できます）</div>';
+      }
       h += '</div>';
     });
     h += '</div>';
   });
   pane.innerHTML = h;
+  insBindPane(pane, eventId);
+}
+function insBindPane(pane, eventId) {
   pane.querySelectorAll('[data-ins]').forEach(function(b) {
     b.addEventListener('click', function(ev) { ev.stopPropagation(); insAction(b); });
   });
+  pane.querySelectorAll('[data-insai]').forEach(function(b) {
+    var evName = (b.tagName === 'INPUT') ? 'change' : 'click';
+    b.addEventListener(evName, function(ev) { ev.stopPropagation(); insAiAction(eventId, b); });
+  });
+  pane.querySelectorAll('[data-insjump]').forEach(function(b) {
+    b.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      var t = document.getElementById(b.dataset.insjump);
+      if (!t) return;
+      t.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      t.classList.remove('flash'); void t.offsetWidth; t.classList.add('flash');
+    });
+  });
+  var pa = document.getElementById('insAiPaste_' + eventId);
+  if (pa) { pa.addEventListener('click', function(ev) { ev.stopPropagation(); }); if (insAiDraft[eventId]) pa.value = insAiDraft[eventId]; pa.addEventListener('input', function() { insAiDraft[eventId] = pa.value; }); }
+}
+
+// ===== みんなの気づき：AIに掲載候補を選んでもらう（①コピー → 外部AI → ②貼り付けて取り込む） =====
+var insAiOpen = {};
+var insAiMsg = {};
+var insAiDraft = {};
+var insAiPrompt = {};
+function insAiBoxHtml(eventId, d) {
+  var cc = d.candidate_count || 0;
+  var max = d.max_picks || 5;
+  var open = !!insAiOpen[eventId];
+  var h = '<div class="ins-ai' + (cc ? '' : ' none') + '">';
+  if (cc) {
+    h += '<div class="ins-ai-head">⭐ 今回の掲載候補：<b>' + cc + '</b>件 <span class="ins-ai-sub">押すとその振り返りへ移動します</span></div>';
+    var list = [];
+    (d.people || []).forEach(function(p, pi) { p.answers.forEach(function(a, ai) { if (a.candidate) list.push({ o: a.candidate.order || 0, k: eventId + '_' + pi + '_' + ai, name: p.name || '（名前不明）', text: a.answer_text || '', ad: !!a.adopted }); }); });
+    list.sort(function(x, y) { return x.o - y.o; });
+    h += '<div class="ins-ai-chips">';
+    list.forEach(function(x) {
+      var t = String(x.text).replace(/\\s+/g, ' ');
+      h += '<button type="button" class="ins-chip' + (x.ad ? ' ad' : '') + '" data-insjump="insA_' + x.k + '">' + (x.ad ? '<i class="fas fa-check-circle"></i> ' : '⭐ ') + escHtml(x.name) + '：' + escHtml(t.length > 16 ? t.slice(0, 16) + '…' : t) + '</button>';
+    });
+    h += '</div>';
+    h += '<button type="button" class="ins-ai-toggle" data-insai="toggle">' + (open ? '▲ 閉じる' : '▼ AIに選び直してもらう') + '</button>';
+  } else {
+    h += '<button type="button" class="ins-ai-big" data-insai="toggle">⭐ 候補なし：AIに選んでもらう</button>';
+    h += '<div class="ins-ai-note">AIが使えないときは、下の「候補以外からも採用できる」をONにすると、今までどおり一覧から採用できます。</div>';
+  }
+  if (open) {
+    h += '<div class="ins-ai-steps">';
+    h += '<div class="ins-ai-step"><b>①</b> 同意した人の振り返りと指示文をコピーして、ChatGPTなどのAIに貼り付けます。<span class="ins-ai-sub">（名前・学校名・メールは伏せ、回答IDだけにしています。AIには最大' + max + '件を理由つきで選ぶよう頼みます）</span>'
+      + '<div class="ins-row"><button type="button" class="ins-btn adopt" data-insai="copy"><i class="fas fa-copy"></i> AIに渡す文をコピー</button><span class="ins-st" id="insAiCopySt_' + eventId + '"></span></div>'
+      + '<textarea id="insAiPromptTa_' + eventId + '" class="ins-ai-prompt" readonly style="display:none"></textarea></div>';
+    h += '<div class="ins-ai-step"><b>②</b> AIの返事（[PICK:回答ID] 理由 の形）をここに貼り付けて「取り込む」を押します。' + (cc ? '<span class="ins-ai-sub">（今の候補' + cc + '件と入れ替わります。採用済みのものはそのまま）</span>' : '')
+      + '<textarea id="insAiPaste_' + eventId + '" class="ins-ai-paste" placeholder="ここにAIの返事を貼り付け"></textarea>'
+      + '<div class="ins-row"><button type="button" class="ins-btn adopt" data-insai="import"><i class="fas fa-file-import"></i> 取り込む</button><span class="ins-st" id="insAiImpSt_' + eventId + '"></span></div></div>';
+    h += '</div>';
+  }
+  if (insAiMsg[eventId]) h += '<div class="ins-ai-msg">' + insAiMsg[eventId] + '</div>';
+  h += '<div class="ins-ai-foot"><label class="ins-ai-allow"><input type="checkbox" data-insai="allow"' + (d.allow_non_candidate ? ' checked' : '') + '> 候補以外からも採用できる <span class="ins-ai-sub">（すべての回に共通の設定）</span></label>';
+  if (cc) h += '<button type="button" class="ins-btn cancel" data-insai="clear"><i class="fas fa-times"></i> 候補をすべて外す</button>';
+  h += '</div></div>';
+  return h;
+}
+function insAiCopy(eventId, text, st) {
+  function showTa(msg) {
+    var ta = document.getElementById('insAiPromptTa_' + eventId);
+    if (ta) { ta.value = text; ta.style.display = 'block'; try { ta.focus(); ta.select(); document.execCommand('copy'); if (st) { st.style.color = '#2e7d32'; st.textContent = 'コピーしました。AIに貼り付けてください。'; } return; } catch (e) {} }
+    if (st) { st.style.color = '#c62828'; st.textContent = msg; }
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function() {
+      if (st) { st.style.color = '#2e7d32'; st.textContent = 'コピーしました。ChatGPTなどのAIに貼り付けてください。'; }
+    }).catch(function() { showTa('自動でコピーできませんでした。下の枠を長押し（または全選択）してコピーしてください。'); });
+  } else { showTa('自動でコピーできませんでした。下の枠を長押し（または全選択）してコピーしてください。'); }
+}
+async function insAiAction(eventId, b) {
+  var act = b.dataset.insai;
+  var d = insCache[eventId] || {};
+  if (act === 'toggle') { insAiOpen[eventId] = !insAiOpen[eventId]; renderInsightsPane(eventId, d); return; }
+  if (act === 'copy') {
+    var st = document.getElementById('insAiCopySt_' + eventId);
+    if (insAiPrompt[eventId]) { insAiCopy(eventId, insAiPrompt[eventId], st); return; }
+    b.disabled = true; if (st) { st.style.color = '#888'; st.textContent = '準備中...'; }
+    try {
+      var r = await fetch('/api/admin/events/' + eventId + '/insights/ai-prompt', { headers: { 'Authorization': 'Bearer ' + token } });
+      var j = {}; try { j = await r.json(); } catch (e2) {}
+      b.disabled = false;
+      if (!r.ok) { if (st) { st.style.color = '#c62828'; st.textContent = j.error || '準備できませんでした'; } return; }
+      if (!j.count) { if (st) { st.style.color = '#c62828'; st.textContent = '紹介に同意した振り返りがまだありません'; } return; }
+      insAiPrompt[eventId] = j.text;
+      insAiCopy(eventId, j.text, st);
+    } catch (e) { b.disabled = false; if (st) { st.style.color = '#c62828'; st.textContent = '通信エラーが発生しました'; } }
+    return;
+  }
+  if (act === 'import') {
+    var pa = document.getElementById('insAiPaste_' + eventId);
+    var ist = document.getElementById('insAiImpSt_' + eventId);
+    var text = pa ? String(pa.value || '') : '';
+    if (!text.trim()) { if (ist) { ist.style.color = '#c62828'; ist.textContent = 'AIの返事を貼り付けてください'; } return; }
+    if ((d.candidate_count || 0) > 0 && !confirm('今の掲載候補（' + d.candidate_count + '件）を、貼り付けた返事の候補と入れ替えます。よろしいですか？（採用済みのものはそのままです）')) return;
+    b.disabled = true; if (ist) { ist.style.color = '#888'; ist.textContent = '取り込み中...'; }
+    try {
+      var r2 = await fetch('/api/admin/events/' + eventId + '/insights/ai-import', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text }) });
+      var j2 = {}; try { j2 = await r2.json(); } catch (e3) {}
+      b.disabled = false;
+      var m = '';
+      if (r2.ok) m += '<div class="ok"><i class="fas fa-check-circle"></i> 掲載候補を <b>' + (j2.saved || 0) + '</b> 件取り込みました。</div>';
+      else m += '<div class="ng"><i class="fas fa-exclamation-circle"></i> ' + escHtml(j2.error || '取り込めませんでした') + '</div>';
+      if (j2.ignored && j2.ignored.length) m += '<div class="warn">上限（' + (j2.max_picks || 5) + '件）を超えた ' + j2.ignored.length + ' 件は取り込んでいません：<ul>' + j2.ignored.map(function(x) { return '<li>' + escHtml(x) + '</li>'; }).join('') + '</ul></div>';
+      if (j2.failed && j2.failed.length) m += '<div class="warn">取り込めなかった目印（' + j2.failed.length + '件）：<ul>' + j2.failed.map(function(x) { return '<li><code>' + escHtml(x.mark) + '</code> … ' + escHtml(x.why) + '</li>'; }).join('') + '</ul></div>';
+      if (!r2.ok && !(j2.failed && j2.failed.length) && !(j2.ignored && j2.ignored.length)) m += '<div class="warn">返事の中に [PICK:回答ID] の目印が見つかりませんでした。①でコピーした文をそのままAIに貼ったか確かめてください。</div>';
+      insAiMsg[eventId] = m;
+      if (r2.ok) { insAiOpen[eventId] = false; insAiDraft[eventId] = ''; await loadInsightsPane(eventId); }
+      else renderInsightsPane(eventId, d);
+    } catch (e) { b.disabled = false; if (ist) { ist.style.color = '#c62828'; ist.textContent = '通信エラーが発生しました'; } }
+    return;
+  }
+  if (act === 'clear') {
+    if (!confirm('この回の掲載候補をすべて外しますか？（採用済みのもの・元の回答はそのままです）')) return;
+    b.disabled = true;
+    try {
+      var r3 = await fetch('/api/admin/events/' + eventId + '/insights/candidates', { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } });
+      if (!r3.ok) { b.disabled = false; alert('外せませんでした'); return; }
+      insAiMsg[eventId] = '';
+      await loadInsightsPane(eventId);
+    } catch (e) { b.disabled = false; alert('通信エラーが発生しました'); }
+    return;
+  }
+  if (act === 'allow') {
+    var want = !!b.checked;
+    if (want && !confirm('「候補以外からも採用できる」をONにします。すべての回で、掲載候補でない振り返りにも「採用」ボタンが出ます。よろしいですか？')) { b.checked = false; return; }
+    b.disabled = true;
+    try {
+      var r4 = await fetch('/api/admin/insights/settings', { method: 'PUT', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ allow_non_candidate: want }) });
+      if (!r4.ok) { b.disabled = false; b.checked = !want; alert('設定を保存できませんでした'); return; }
+      Object.keys(insCache).forEach(function(k) { if (insCache[k]) insCache[k].allow_non_candidate = want; });
+      await loadInsightsPane(eventId);
+    } catch (e) { b.disabled = false; b.checked = !want; alert('通信エラーが発生しました'); }
+    return;
+  }
 }
 async function insAction(b) {
   var eventId = parseInt(b.dataset.eid, 10), pi = parseInt(b.dataset.pi, 10), ai = parseInt(b.dataset.ai, 10), k = b.dataset.k;
@@ -7030,5 +7225,8 @@ registerSheet(app, { authMiddleware, adminMiddleware, commonHead, stepKeywords: 
 
 // ========== 利用状況（人数だけ・管理者のみ。src/growth_usage.ts） ==========
 registerUsage(app, { authMiddleware, adminMiddleware, commonHead })
+
+// ========== みんなの気づき：AIに掲載候補を選んでもらう（管理者のみ。src/growth_insight_ai.ts） ==========
+registerInsightAi(app, { authMiddleware, adminMiddleware, aiMask, aiLoadNameTokens, aiSchoolTypeLabel })
 
 export default app
