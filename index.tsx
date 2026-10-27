@@ -3535,6 +3535,7 @@ function openAnswerForm(eventId) {
   const qs = ev.questions || [];
   const st = (user && user.school_type) || '';
   let html = '<div style="font-weight:700;color:#5d4037;margin-bottom:10px"><i class="fas fa-clipboard-list"></i> アンケートに回答</div>';
+  html += '<div style="font-size:11px;color:#888;margin-bottom:10px">研修をよくするため、名前を伏せて集計・分析に使うことがあります。</div>';
   for (const q of qs) {
     const qid = q.question_id;
     html += '<div style="margin-bottom:14px"><div style="font-weight:700;font-size:13px;color:#555;margin-bottom:6px">' + esc(q.question_text || '') + (q.required ? ' <span style="color:#c62828;font-size:11px;font-weight:700">＊必須</span>' : '') + '</div>';
@@ -4957,7 +4958,8 @@ function renderGuestSurveyForm(d) {
   (d.answers || []).forEach(function(a) { prev[a.question_id] = a.answer_text; });
   var html = '<div style="text-align:left">'
     + '<p style="text-align:center;font-weight:700;margin-bottom:4px">おかえりなさい、' + escG(d.guest.name) + ' さん</p>'
-    + '<p style="text-align:center;color:#888;font-size:13px;margin-bottom:14px">' + escG(d.event.title) + ' の振り返り（アンケート）</p>';
+    + '<p style="text-align:center;color:#888;font-size:13px;margin-bottom:4px">' + escG(d.event.title) + ' の振り返り（アンケート）</p>'
+    + '<div style="font-size:11px;color:#888;margin-bottom:12px;text-align:center">研修をよくするため、名前を伏せて集計・分析に使うことがあります。</div>';
   for (var i = 0; i < qs.length; i++) {
     var q = qs[i];
     html += '<div class="form-group"><label>' + escG(q.question_text) + (q.required ? ' <span style="color:#c62828;font-size:11px;font-weight:700">＊必須</span>' : '') + '</label>';
@@ -5228,7 +5230,7 @@ async function saveRecall() {
   rcSaving = false;
   if (rcPending) { rcPending = false; return saveRecall(); }
   if (st) {
-    if (ok) { st.style.color = '#2e7d32'; st.innerHTML = '<i class="fas fa-check"></i> 残しました（あなたと運営だけが見られます）'; }
+    if (ok) { st.style.color = '#2e7d32'; st.innerHTML = '<i class="fas fa-check"></i> 残しました'; }
     else { st.style.color = '#c62828'; st.textContent = 'うまく残せませんでした。もう一度押してみてください。'; }
   }
 }
