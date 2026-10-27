@@ -361,7 +361,7 @@ function portfolioPage(commonHead: string, isAdmin: boolean, withReport: boolean
       ${withReport ? '<a class="btn btn-g" id="reportLink" href="#"><i class="fas fa-file-alt"></i> 年度末の成長レポート</a>' : ''}
       ${isAdmin ? '<a class="btn btn-g" id="sheetLink" href="#" target="_blank" rel="noopener" title="個人まとめシート（1枚版／両面2ページ版・管理者用）"><i class="fas fa-id-card"></i> まとめシート</a>' : ''}
     </div>
-    <div class="lead" style="margin-top:8px">参加した研修会と、アンケートに書いたこと・選んだ視点を、時間の流れでまとめています。${isAdmin ? '本人と管理者だけが見られます。' : 'このページは、あなたと運営（管理者）だけが見られます。'}点数や順位はつけていません。</div>
+    <div class="lead" style="margin-top:8px">参加した研修会と、アンケートに書いたこと・選んだ視点を、時間の流れでまとめています。点数や順位はつけていません。</div>
   </div>
   <div id="body"><div class="msg"><i class="fas fa-spinner fa-spin"></i> 読み込み中...</div></div>
 </div>
